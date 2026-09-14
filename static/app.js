@@ -987,6 +987,11 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     titleBadge.innerHTML = `<i class="ri-loader-4-line spinner"></i> ${page.display_name} (Updating...)`;
   }
 
+  const rightLabel = document.getElementById("split-label-right");
+  if (rightLabel) {
+    rightLabel.innerHTML = '<i class="ri-loader-4-line spinner"></i> AI Colorizing...';
+  }
+
   const payload = {
     session_id: currentSession.session_id,
     page_index: pageIdx,
@@ -1040,7 +1045,7 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
       }
 
       // Open in Before / After Comparator (prevent jarring scroll when auto-triggered by sliders)
-      openSplitPreview(pageIdx, !showToastFeedback);
+      openSplitPreview(pageIdx, !showToastFeedback, false);
 
       // Keep counter, badge, and export cards in sync
       updateColorizedCount();
@@ -1054,6 +1059,9 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
   } catch (err) {
     showToast(`Preview error: ${err.message}`, "error");
   } finally {
+    if (rightLabel) {
+      rightLabel.innerText = "Colorized AI";
+    }
     const colorImg = document.getElementById("split-img-colorized");
     if (colorImg) colorImg.style.opacity = "1.0";
     if (btnPreview) {
@@ -1063,7 +1071,7 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
   }
 }
 
-function openSplitPreview(pageIdx, preventScroll = false) {
+function openSplitPreview(pageIdx, preventScroll = false, triggerAutoPreview = true) {
   currentPreviewPageIndex = pageIdx;
   const page = currentSession.pages[pageIdx];
 
@@ -1139,6 +1147,11 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   // Reset handle with container dimensions applied and ensure listeners active
   setupSplitSlider();
   setSplitPosition(currentSplitPct);
+
+  // Auto-generate AI color preview if this page hasn't been colorized yet
+  if (triggerAutoPreview && !page.colorized_url && page.status !== "processing") {
+    previewSinglePage(pageIdx, false);
+  }
 }
 
 function closeSplitPreview() {
