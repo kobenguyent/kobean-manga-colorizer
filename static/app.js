@@ -195,25 +195,40 @@ function setupEventListeners() {
   }
 
   // Slider Value Displays with Real-time Live Preview Trigger
-  document.getElementById("slider-line").addEventListener("input", (e) => {
-    document.getElementById("val-line").innerText = `${e.target.value}%`;
-    triggerLivePreview(350);
-  });
+  const sliderLine = document.getElementById("slider-line");
+  if (sliderLine) {
+    sliderLine.addEventListener("input", (e) => {
+      const valLine = document.getElementById("val-line");
+      if (valLine) valLine.innerText = `${e.target.value}%`;
+      triggerLivePreview(350);
+    });
+  }
 
-  document.getElementById("slider-saturation").addEventListener("input", (e) => {
-    document.getElementById("val-saturation").innerText = `${(e.target.value / 10).toFixed(1)}x`;
-    triggerLivePreview(350);
-  });
+  const sliderSat = document.getElementById("slider-saturation");
+  if (sliderSat) {
+    sliderSat.addEventListener("input", (e) => {
+      const valSat = document.getElementById("val-saturation");
+      if (valSat) valSat.innerText = `${(e.target.value / 10).toFixed(1)}x`;
+      triggerLivePreview(350);
+    });
+  }
 
   // Style and Variant Dropdown Listeners
-  document.getElementById("style-select").addEventListener("change", () => triggerLivePreview(100));
-  document.getElementById("model-variant-select").addEventListener("change", () => triggerLivePreview(100));
+  const styleSelect = document.getElementById("style-select");
+  if (styleSelect) styleSelect.addEventListener("change", () => triggerLivePreview(100));
+
+  const modelVariantSelect = document.getElementById("model-variant-select");
+  if (modelVariantSelect) modelVariantSelect.addEventListener("change", () => triggerLivePreview(100));
 
   // Buttons
-  document.getElementById("btn-start-colorize").addEventListener("click", startColorization);
+  const btnStartColorize = document.getElementById("btn-start-colorize");
+  if (btnStartColorize) btnStartColorize.addEventListener("click", startColorization);
+
   const mainExportBtn = document.getElementById("btn-export");
   if (mainExportBtn) mainExportBtn.addEventListener("click", () => exportDocument("auto"));
-  document.getElementById("btn-change-file").addEventListener("click", resetUpload);
+
+  const btnChangeFile = document.getElementById("btn-change-file");
+  if (btnChangeFile) btnChangeFile.addEventListener("click", resetUpload);
 
   // Setup Split Slider Dragging
   setupSplitSlider();
@@ -1071,6 +1086,7 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   }
 
   if (origImg) {
+    origImg.draggable = false;
     origImg.onload = () => {
       if (origImg.naturalWidth && origImg.naturalHeight) {
         syncContainerRatio(origImg.naturalWidth, origImg.naturalHeight);
@@ -1078,8 +1094,13 @@ function openSplitPreview(pageIdx, preventScroll = false) {
       setSplitPosition(currentSplitPct);
     };
     origImg.src = origUrl;
+    if (origImg.complete && origImg.naturalWidth) {
+      syncContainerRatio(origImg.naturalWidth, origImg.naturalHeight);
+      setSplitPosition(currentSplitPct);
+    }
   }
   if (colorImg) {
+    colorImg.draggable = false;
     colorImg.onload = () => {
       if (colorImg.naturalWidth && colorImg.naturalHeight) {
         syncContainerRatio(colorImg.naturalWidth, colorImg.naturalHeight);
@@ -1088,6 +1109,10 @@ function openSplitPreview(pageIdx, preventScroll = false) {
     };
     colorImg.style.opacity = "1.0";
     colorImg.src = `${colorUrl}?t=${Date.now()}`;
+    if (colorImg.complete && colorImg.naturalWidth) {
+      syncContainerRatio(colorImg.naturalWidth, colorImg.naturalHeight);
+      setSplitPosition(currentSplitPct);
+    }
   }
 
   const styleSelect = document.getElementById("style-select");
@@ -1111,7 +1136,8 @@ function openSplitPreview(pageIdx, preventScroll = false) {
     splitCard.scrollIntoView({ behavior: 'smooth' });
   }
 
-  // Reset handle with container dimensions applied
+  // Reset handle with container dimensions applied and ensure listeners active
+  setupSplitSlider();
   setSplitPosition(currentSplitPct);
 }
 
@@ -1120,41 +1146,91 @@ function closeSplitPreview() {
 }
 
 let currentSplitPct = 50;
+let isSplitSliderInitialized = false;
 
 function setupSplitSlider() {
   const container = document.getElementById("split-container");
+  const handle = document.getElementById("split-handle");
+  if (!container || isSplitSliderInitialized) return;
+  isSplitSliderInitialized = true;
+
   let isDragging = false;
 
-  const onMove = (clientX) => {
-    if (!isDragging) return;
+  const getClientX = (e) => {
+    if (e.clientX !== undefined && e.clientX !== 0) return e.clientX;
+    if (e.touches && e.touches[0]) return e.touches[0].clientX;
+    if (e.changedTouches && e.changedTouches[0]) return e.changedTouches[0].clientX;
+    return 0;
+  };
+
+  const updateSplitFromClientX = (clientX) => {
     const rect = container.getBoundingClientRect();
+    if (rect.width <= 0) return;
     let x = clientX - rect.left;
     if (x < 0) x = 0;
     if (x > rect.width) x = rect.width;
-    const pct = (x / rect.width) * 100;
+    const pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
     setSplitPosition(pct);
   };
 
-  container.addEventListener("mousedown", (e) => {
+  const startDrag = (e) => {
+    // Accept primary mouse button (0) or touch/pen
+    if (e.button !== undefined && e.button !== 0) return;
     isDragging = true;
-    onMove(e.clientX);
-  });
+    if (handle) handle.classList.add("active");
+    if (container.setPointerCapture && e.pointerId !== undefined) {
+      try {
+        container.setPointerCapture(e.pointerId);
+      } catch (_) {}
+    }
+    updateSplitFromClientX(getClientX(e));
+    if (e.cancelable) e.preventDefault();
+  };
 
-  window.addEventListener("mousemove", (e) => onMove(e.clientX));
-  window.addEventListener("mouseup", () => { isDragging = false; });
+  const onDrag = (e) => {
+    if (!isDragging) return;
+    updateSplitFromClientX(getClientX(e));
+    if (e.cancelable) e.preventDefault();
+  };
 
-  // Touch support
-  container.addEventListener("touchstart", (e) => {
-    isDragging = true;
-    onMove(e.touches[0].clientX);
-  });
-  window.addEventListener("touchmove", (e) => {
-    if (isDragging) onMove(e.touches[0].clientX);
-  });
-  window.addEventListener("touchend", () => { isDragging = false; });
+  const stopDrag = (e) => {
+    if (!isDragging) return;
+    isDragging = false;
+    if (handle) handle.classList.remove("active");
+    if (container.releasePointerCapture && e.pointerId !== undefined) {
+      try {
+        container.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    }
+  };
 
-  // Window resize handler keeps image layers aligned
+  // Modern Pointer Events (mouse, touch, stylus)
+  container.addEventListener("pointerdown", startDrag);
+  window.addEventListener("pointermove", onDrag, { passive: false });
+  window.addEventListener("pointerup", stopDrag);
+  window.addEventListener("pointercancel", stopDrag);
+
+  // Mouse event fallbacks
+  container.addEventListener("mousedown", startDrag);
+  window.addEventListener("mousemove", onDrag);
+  window.addEventListener("mouseup", stopDrag);
+
+  // Touch event fallbacks
+  container.addEventListener("touchstart", startDrag, { passive: false });
+  window.addEventListener("touchmove", onDrag, { passive: false });
+  window.addEventListener("touchend", stopDrag);
+
+  // Prevent browser native image dragging and selection
+  container.addEventListener("dragstart", (e) => e.preventDefault());
+  container.addEventListener("selectstart", (e) => e.preventDefault());
+
+  // Window resize handler
   window.addEventListener("resize", () => setSplitPosition(currentSplitPct));
+
+  // ResizeObserver keeps overlay image exactly aligned with container
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => setSplitPosition(currentSplitPct)).observe(container);
+  }
 }
 
 function setSplitPosition(pct) {

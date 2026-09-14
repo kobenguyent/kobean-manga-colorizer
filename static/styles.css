@@ -629,6 +629,9 @@ body {
   border: 1px solid var(--bg-card-border);
   overflow: hidden;
   padding: 0;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .split-image-container {
@@ -638,8 +641,11 @@ body {
   height: min(650px, 72vh);
   margin: 0 auto;
   user-select: none;
+  -webkit-user-select: none;
   overflow: hidden;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.8);
+  cursor: ew-resize;
+  touch-action: none;
 }
 
 .split-image-container img {
@@ -647,6 +653,10 @@ body {
   height: 100%;
   object-fit: fill;
   display: block;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 #split-img-colorized {
@@ -657,6 +667,10 @@ body {
   height: 100%;
   object-fit: fill;
   display: block;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .split-image-overlay {
@@ -667,6 +681,7 @@ body {
   height: 100%;
   overflow: hidden;
   border-right: 2px solid var(--accent-cyan);
+  pointer-events: none;
 }
 
 #split-img-original {
@@ -677,6 +692,10 @@ body {
   max-width: none;
   object-fit: fill;
   display: block;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 .split-handle {
@@ -684,20 +703,34 @@ body {
   top: 0;
   left: 50%;
   height: 100%;
-  width: 4px;
-  background: var(--accent-cyan);
+  width: 44px;
+  transform: translateX(-50%);
   cursor: ew-resize;
   z-index: 10;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.split-handle-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 3px;
   transform: translateX(-50%);
+  background: var(--accent-cyan);
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.7);
+  pointer-events: none;
 }
 
 .split-handle-button {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 38px;
-  height: 38px;
+  position: relative;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: var(--accent-cyan);
   color: #000;
@@ -705,7 +738,16 @@ body {
   align-items: center;
   justify-content: center;
   font-weight: bold;
-  box-shadow: 0 0 15px rgba(6, 182, 212, 0.6);
+  box-shadow: 0 0 18px rgba(6, 182, 212, 0.8), 0 2px 8px rgba(0, 0, 0, 0.5);
+  cursor: ew-resize;
+  pointer-events: auto;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.split-handle:hover .split-handle-button,
+.split-handle.active .split-handle-button {
+  transform: scale(1.12);
+  box-shadow: 0 0 24px rgba(6, 182, 212, 1), 0 4px 12px rgba(0, 0, 0, 0.6);
 }
 
 .split-label {
@@ -717,6 +759,9 @@ body {
   font-weight: 700;
   backdrop-filter: blur(10px);
   z-index: 5;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .label-left {
