@@ -827,6 +827,69 @@ body {
   font-weight: 600;
 }
 
+/* Gallery Selection Controls */
+.gallery-selection-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-left: 0.75rem;
+}
+
+.select-all-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.25rem 0.65rem;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.select-all-label input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.select-all-label .custom-checkbox {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1.5px solid rgba(255, 255, 255, 0.3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  font-size: 0.75rem;
+  transition: all 0.15s ease;
+}
+
+.select-all-label:hover {
+  background: rgba(6, 182, 212, 0.1);
+  border-color: rgba(6, 182, 212, 0.4);
+  color: var(--text-primary);
+}
+
+.select-all-label input:checked + .custom-checkbox {
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  color: #0b1120;
+}
+
+.select-all-label input:indeterminate + .custom-checkbox {
+  background: rgba(6, 182, 212, 0.5);
+  border-color: var(--accent-cyan);
+  color: #fff;
+}
+
 /* Gallery Grid */
 .pages-grid {
   display: grid;
@@ -841,7 +904,7 @@ body {
   border-radius: var(--radius-md);
   overflow: hidden;
   cursor: pointer;
-  transition: all 0.25 ease;
+  transition: all 0.25s ease;
   position: relative;
 }
 
@@ -849,6 +912,12 @@ body {
   transform: translateY(-4px);
   border-color: var(--accent-cyan);
   box-shadow: 0 10px 25px -5px rgba(6, 182, 212, 0.3);
+}
+
+.page-card.selected {
+  border-color: rgba(6, 182, 212, 0.75);
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.3);
+  background: rgba(6, 182, 212, 0.04);
 }
 
 .page-thumb-container {
@@ -877,6 +946,63 @@ body {
   transform: scale(1.02);
 }
 
+/* Card Checkbox */
+.page-select-checkbox {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 5;
+  backdrop-filter: blur(8px);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.page-select-checkbox input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.page-select-checkbox .custom-checkbox {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  font-size: 0.95rem;
+  font-weight: 900;
+  border-radius: inherit;
+  transition: all 0.15s ease;
+}
+
+.page-select-checkbox:hover {
+  border-color: var(--accent-cyan);
+  background: rgba(15, 23, 42, 0.95);
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.4);
+}
+
+.page-select-checkbox.checked,
+.page-card.selected .page-select-checkbox {
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.55);
+}
+
+.page-select-checkbox.checked .custom-checkbox,
+.page-card.selected .page-select-checkbox .custom-checkbox {
+  color: #0b1120;
+}
+
 .page-status-badge {
   position: absolute;
   top: 0.5rem;
@@ -892,17 +1018,17 @@ body {
 .page-delete-btn {
   position: absolute;
   top: 0.5rem;
-  left: 0.5rem;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
+  left: 2.65rem;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   background: rgba(15, 23, 42, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   cursor: pointer;
   z-index: 4;
   backdrop-filter: blur(8px);

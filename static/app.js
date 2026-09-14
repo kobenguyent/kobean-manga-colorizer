@@ -8,6 +8,8 @@ let activeProvider = "resnext_generator";
 let currentPreviewPageIndex = 0;
 let isBatchColorizing = false;
 let batchQueuePoller = null;
+let selectedPages = new Set();
+
 
 // Sub-model options per provider
 const MODEL_VARIANTS = {
@@ -518,6 +520,13 @@ function renderDashboard() {
   document.getElementById("doc-filename").innerText = currentSession.filename;
   document.getElementById("doc-total-pages").innerText = currentSession.total_pages;
 
+  // Initialize all pages as selected when opening or switching documents
+  if (currentSession.pages) {
+    selectedPages = new Set(currentSession.pages.map((_, i) => i));
+  } else {
+    selectedPages = new Set();
+  }
+
   const iconBox = document.getElementById("file-type-icon");
   const fn = currentSession.filename.toLowerCase();
   if (fn.endsWith(".epub")) {
@@ -577,8 +586,9 @@ function renderGalleryGrid() {
   grid.innerHTML = "";
 
   currentSession.pages.forEach((page, idx) => {
+    const isSelected = selectedPages.has(idx);
     const card = document.createElement("div");
-    card.className = "page-card";
+    card.className = `page-card ${isSelected ? "selected" : ""}`;
     card.id = `page-card-${idx}`;
     card.onclick = () => openSplitPreview(idx);
 
@@ -587,13 +597,17 @@ function renderGalleryGrid() {
     const dimText = (page.width && page.height) ? `${page.width} × ${page.height}` : "";
     card.innerHTML = `
       <div class="page-thumb-container">
-        <img class="page-thumb-img" id="page-img-${idx}" src="${thumbUrl}" alt="${page.display_name}" loading="lazy" />
+        <label class="page-select-checkbox ${isSelected ? 'checked' : ''}" onclick="event.stopPropagation()" title="Select/Deselect page for colorization">
+          <input type="checkbox" id="page-check-${idx}" ${isSelected ? 'checked' : ''} onchange="togglePageSelection(${idx}, this.checked, event)" />
+          <span class="custom-checkbox"><i class="ri-check-line"></i></span>
+        </label>
         <button class="page-delete-btn" title="Delete this page" onclick="deletePage(event, ${idx})">
           <i class="ri-delete-bin-line"></i>
         </button>
         <span class="page-status-badge status-${page.status}" id="page-badge-${idx}">
           ${page.status.toUpperCase()}
         </span>
+        <img class="page-thumb-img" id="page-img-${idx}" src="${thumbUrl}" alt="${page.display_name}" loading="lazy" />
       </div>
       <div class="page-card-footer">
         <span class="page-card-title">${page.display_name}</span>
@@ -604,6 +618,94 @@ function renderGalleryGrid() {
   });
 
   updateColorizedCount();
+  updateSelectionUI();
+}
+
+function togglePageSelection(idx, isSelected, event) {
+  if (event) event.stopPropagation();
+  if (isSelected) {
+    selectedPages.add(idx);
+  } else {
+    selectedPages.delete(idx);
+  }
+
+  const card = document.getElementById(`page-card-${idx}`);
+  if (card) {
+    const cbLabel = card.querySelector(".page-select-checkbox");
+    if (isSelected) {
+      card.classList.add("selected");
+      if (cbLabel) cbLabel.classList.add("checked");
+    } else {
+      card.classList.remove("selected");
+      if (cbLabel) cbLabel.classList.remove("checked");
+    }
+  }
+
+  updateSelectionUI();
+}
+
+function toggleSelectAllPages(selectAll) {
+  if (!currentSession || !currentSession.pages) return;
+  if (selectAll) {
+    selectedPages = new Set(currentSession.pages.map((_, i) => i));
+  } else {
+    selectedPages.clear();
+  }
+
+  currentSession.pages.forEach((_, idx) => {
+    const cb = document.getElementById(`page-check-${idx}`);
+    if (cb) cb.checked = selectAll;
+    const card = document.getElementById(`page-card-${idx}`);
+    if (card) {
+      const cbLabel = card.querySelector(".page-select-checkbox");
+      if (selectAll) {
+        card.classList.add("selected");
+        if (cbLabel) cbLabel.classList.add("checked");
+      } else {
+        card.classList.remove("selected");
+        if (cbLabel) cbLabel.classList.remove("checked");
+      }
+    }
+  });
+
+  updateSelectionUI();
+}
+
+function updateSelectionUI() {
+  if (!currentSession || !currentSession.pages) return;
+  const total = currentSession.pages.length;
+  const count = selectedPages.size;
+
+  const selectAllCb = document.getElementById("select-all-pages-checkbox");
+  if (selectAllCb) {
+    selectAllCb.checked = count === total && total > 0;
+    selectAllCb.indeterminate = count > 0 && count < total;
+  }
+
+  const selectedTextElem = document.getElementById("selected-pages-text");
+  if (selectedTextElem) {
+    if (count === total && total > 0) {
+      selectedTextElem.innerText = `All (${total}) Selected`;
+    } else if (count === 0) {
+      selectedTextElem.innerText = `0 Selected`;
+    } else {
+      selectedTextElem.innerText = `${count} of ${total} Selected`;
+    }
+  }
+
+  const btnStart = document.getElementById("btn-start-colorize");
+  if (btnStart) {
+    if (count === 0) {
+      btnStart.innerHTML = '<i class="ri-checkbox-blank-line"></i> Select Pages to Colorize';
+      btnStart.disabled = true;
+    } else if (count === total) {
+      btnStart.innerHTML = `<i class="ri-magic-line"></i> Start Colorizing All (${total} Pages)`;
+      btnStart.disabled = false;
+    } else {
+      btnStart.innerHTML = `<i class="ri-magic-line"></i> Start Colorizing (${count} Selected Pages)`;
+      btnStart.disabled = false;
+    }
+  }
 }
 
 async function startColorization() {
@@ -615,6 +717,15 @@ async function startColorization() {
   const linePreserve = parseFloat(document.getElementById("slider-line").value) / 100.0;
   const saturation = parseFloat(document.getElementById("slider-saturation").value) / 10.0;
 
+  // Determine selected pages
+  let pagesToColorize = null;
+  if (selectedPages && selectedPages.size > 0 && selectedPages.size < currentSession.pages.length) {
+    pagesToColorize = Array.from(selectedPages).sort((a, b) => a - b);
+  } else if (selectedPages && selectedPages.size === 0) {
+    showToast("Please select at least one page to colorize.", "warning");
+    return;
+  }
+
   const payload = {
     session_id: currentSession.session_id,
     model_provider: activeProvider,
@@ -623,7 +734,8 @@ async function startColorization() {
     style: style,
     saturation: saturation,
     contrast: 1.1,
-    line_preserve: linePreserve
+    line_preserve: linePreserve,
+    selected_pages: pagesToColorize
   };
 
   // UI state updates
@@ -638,7 +750,8 @@ async function startColorization() {
     local_smart: "Smart Local Engine"
   };
 
-  document.getElementById("progress-subtext").innerText = `Using ${providerNames[activeProvider]} (${modelVariant})`;
+  const pageCountText = pagesToColorize ? `${pagesToColorize.length} Selected Pages` : `${currentSession.total_pages} Pages`;
+  document.getElementById("progress-subtext").innerText = `Using ${providerNames[activeProvider]} (${modelVariant}) • ${pageCountText}`;
 
   try {
     const resp = await fetch("/api/colorize/start", {
