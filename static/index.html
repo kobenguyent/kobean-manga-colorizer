@@ -379,10 +379,17 @@
 
         <!-- Pages Thumbnail Grid -->
         <div class="card gallery-card">
-          <div class="card-header space-between">
+          <div class="card-header space-between gallery-header-bar">
             <div class="header-left">
               <i class="ri-gallery-grid-line"></i>
               <h3>Manga Page Gallery</h3>
+              <div class="gallery-selection-controls">
+                <label class="select-all-label" title="Select or Deselect All Pages">
+                  <input type="checkbox" id="select-all-pages-checkbox" checked onchange="toggleSelectAllPages(this.checked)">
+                  <span class="custom-checkbox"><i class="ri-check-line"></i></span>
+                  <span id="selected-pages-text">All Selected</span>
+                </label>
+              </div>
             </div>
             <div class="header-right">
               <span class="gallery-counter"><strong id="colorized-count">0</strong> of <span id="gallery-total-count">0</span> Colorized</span>
