@@ -753,22 +753,42 @@ body {
 .split-label {
   position: absolute;
   bottom: 1rem;
-  padding: 0.35rem 0.85rem;
+  padding: 0.4rem 0.9rem;
   border-radius: var(--radius-full);
   font-size: 0.75rem;
   font-weight: 700;
   backdrop-filter: blur(10px);
   z-index: 5;
-  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   user-select: none;
   -webkit-user-select: none;
 }
 
+.split-label.clickable {
+  pointer-events: auto !important;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.split-label.clickable:hover {
+  transform: scale(1.05);
+}
+
 .label-left {
   left: 1rem;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.65);
   color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.label-left:hover,
+.label-left.active {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: #fff;
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.4);
 }
 
 .label-right {
@@ -776,6 +796,51 @@ body {
   background: rgba(6, 182, 212, 0.4);
   color: #fff;
   border: 1px solid var(--accent-cyan);
+}
+
+.label-right:hover,
+.label-right.active {
+  background: rgba(6, 182, 212, 0.7);
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.8);
+}
+
+/* Comparator View Mode Switcher (B&W | Split | Color) */
+.view-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid var(--bg-card-border);
+  border-radius: var(--radius-full);
+  padding: 3px;
+  gap: 2px;
+}
+
+.view-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-full);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.view-mode-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.view-mode-btn.active {
+  color: #000;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
 }
 
 /* Export Banner */

@@ -1044,8 +1044,15 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
         titleBadge.innerText = `${page.display_name} • ${selectedStyleText}`;
       }
 
-      // Open in Before / After Comparator (prevent jarring scroll when auto-triggered by sliders)
-      openSplitPreview(pageIdx, !showToastFeedback, false);
+      const btnColorize = document.getElementById("btn-colorize-page");
+      if (btnColorize) {
+        btnColorize.className = "btn btn-secondary btn-sm";
+        btnColorize.innerHTML = `<i class="ri-refresh-line"></i> Re-Colorize`;
+      }
+
+      // Open in Before / After Comparator and switch to split view so color is visible
+      openSplitPreview(pageIdx, !showToastFeedback);
+      setComparatorView("split", true);
 
       // Keep counter, badge, and export cards in sync
       updateColorizedCount();
@@ -1060,7 +1067,7 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     showToast(`Preview error: ${err.message}`, "error");
   } finally {
     if (rightLabel) {
-      rightLabel.innerText = "Colorized AI";
+      rightLabel.innerHTML = '<i class="ri-palette-line"></i> Colorized AI';
     }
     const colorImg = document.getElementById("split-img-colorized");
     if (colorImg) colorImg.style.opacity = "1.0";
@@ -1071,7 +1078,55 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
   }
 }
 
-function openSplitPreview(pageIdx, preventScroll = false, triggerAutoPreview = true) {
+let currentViewMode = "split"; // "bw", "split", "color"
+
+function setComparatorView(mode, animate = true) {
+  currentViewMode = mode;
+  const overlay = document.getElementById("split-overlay");
+  const handle = document.getElementById("split-handle");
+  const currentPage = currentSession?.pages?.[currentPreviewPageIndex];
+
+  // If user requests color view but page has not been colorized yet, trigger preview on demand
+  if (mode === "color" && currentPage && !currentPage.colorized_url && currentPage.status !== "processing") {
+    previewSinglePage(currentPreviewPageIndex, true).then(() => {
+      setComparatorView("color", true);
+    });
+    return;
+  }
+
+  // Update toggle button active states
+  ["bw", "split", "color"].forEach(m => {
+    const btn = document.getElementById(`btn-view-${m}`);
+    if (btn) btn.classList.toggle("active", m === mode);
+  });
+
+  const btnLeft = document.querySelector(".split-label.label-left");
+  const btnRight = document.getElementById("split-label-right");
+  if (btnLeft) btnLeft.classList.toggle("active", mode === "bw");
+  if (btnRight) btnRight.classList.toggle("active", mode === "color");
+
+  if (animate) {
+    if (overlay) overlay.style.transition = "width 0.28s cubic-bezier(0.4, 0, 0.2, 1)";
+    if (handle) handle.style.transition = "left 0.28s cubic-bezier(0.4, 0, 0.2, 1)";
+    setTimeout(() => {
+      if (overlay) overlay.style.transition = "";
+      if (handle) handle.style.transition = "";
+    }, 300);
+  } else {
+    if (overlay) overlay.style.transition = "";
+    if (handle) handle.style.transition = "";
+  }
+
+  if (mode === "bw") {
+    setSplitPosition(100);
+  } else if (mode === "color") {
+    setSplitPosition(0);
+  } else {
+    setSplitPosition(50);
+  }
+}
+
+function openSplitPreview(pageIdx, preventScroll = false) {
   currentPreviewPageIndex = pageIdx;
   const page = currentSession.pages[pageIdx];
 
@@ -1131,6 +1186,18 @@ function openSplitPreview(pageIdx, preventScroll = false, triggerAutoPreview = t
     titleBadge.innerText = selectedStyleText ? `${page.display_name}${dim} • ${selectedStyleText}` : `${page.display_name}${dim}`;
   }
 
+  // Update header action button: "Colorize Page" if pending, "Re-Colorize" if colorized
+  const btnColorize = document.getElementById("btn-colorize-page");
+  if (btnColorize) {
+    if (page.colorized_url) {
+      btnColorize.className = "btn btn-secondary btn-sm";
+      btnColorize.innerHTML = `<i class="ri-refresh-line"></i> Re-Colorize`;
+    } else {
+      btnColorize.className = "btn btn-primary btn-sm";
+      btnColorize.innerHTML = `<i class="ri-sparkles-line"></i> Colorize Page`;
+    }
+  }
+
   const btnPreview = document.getElementById("btn-preview-page");
   if (btnPreview) {
     btnPreview.innerHTML = `<i class="ri-sparkles-line"></i> Preview ${page.display_name}`;
@@ -1144,13 +1211,14 @@ function openSplitPreview(pageIdx, preventScroll = false, triggerAutoPreview = t
     splitCard.scrollIntoView({ behavior: 'smooth' });
   }
 
-  // Reset handle with container dimensions applied and ensure listeners active
+  // Setup slider listeners
   setupSplitSlider();
-  setSplitPosition(currentSplitPct);
 
-  // Auto-generate AI color preview if this page hasn't been colorized yet
-  if (triggerAutoPreview && !page.colorized_url && page.status !== "processing") {
-    previewSinglePage(pageIdx, false);
+  // Set initial view: if page is colorized, show split; if not, show B&W
+  if (page.colorized_url) {
+    setComparatorView("split", false);
+  } else {
+    setComparatorView("bw", false);
   }
 }
 
@@ -1183,6 +1251,18 @@ function setupSplitSlider() {
     if (x < 0) x = 0;
     if (x > rect.width) x = rect.width;
     const pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
+
+    // When dragging manually, update view mode button states
+    currentViewMode = pct <= 2 ? "color" : (pct >= 98 ? "bw" : "split");
+    ["bw", "split", "color"].forEach(m => {
+      const btn = document.getElementById(`btn-view-${m}`);
+      if (btn) btn.classList.toggle("active", m === currentViewMode);
+    });
+    const btnLeft = document.querySelector(".split-label.label-left");
+    const btnRight = document.getElementById("split-label-right");
+    if (btnLeft) btnLeft.classList.toggle("active", currentViewMode === "bw");
+    if (btnRight) btnRight.classList.toggle("active", currentViewMode === "color");
+
     setSplitPosition(pct);
   };
 

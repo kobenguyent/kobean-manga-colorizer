@@ -312,8 +312,22 @@
             </div>
             <div class="header-right">
               <span class="badge" id="preview-page-title">Page 1</span>
-              <button class="btn btn-secondary btn-sm" onclick="previewCurrentPage()">
-                <i class="ri-refresh-line"></i> Re-Preview with Settings
+              
+              <!-- Quick View Mode Switcher: B&W | Split | Color -->
+              <div class="view-mode-toggle" id="view-mode-toggle">
+                <button type="button" class="view-mode-btn" id="btn-view-bw" onclick="setComparatorView('bw')" title="Switch to 100% Black & White">
+                  <i class="ri-contrast-line"></i> B&W
+                </button>
+                <button type="button" class="view-mode-btn active" id="btn-view-split" onclick="setComparatorView('split')" title="Switch to Split Comparison">
+                  <i class="ri-separator"></i> Split
+                </button>
+                <button type="button" class="view-mode-btn" id="btn-view-color" onclick="setComparatorView('color')" title="Switch to 100% Colorized AI">
+                  <i class="ri-palette-line"></i> Color
+                </button>
+              </div>
+
+              <button class="btn btn-primary btn-sm" id="btn-colorize-page" onclick="previewCurrentPage()">
+                <i class="ri-sparkles-line"></i> Colorize Page
               </button>
               <button class="btn-icon btn-danger-icon" title="Delete this page" onclick="deleteCurrentPreviewPage(event)">
                 <i class="ri-delete-bin-line"></i>
@@ -340,9 +354,13 @@
                 </div>
               </div>
 
-              <!-- Page Labels -->
-              <span class="split-label label-left">Black & White</span>
-              <span class="split-label label-right" id="split-label-right">Colorized AI</span>
+              <!-- Page Labels / Quick Click Switchers -->
+              <button type="button" class="split-label label-left clickable" onclick="setComparatorView('bw')" title="Click to view full Black & White">
+                <i class="ri-contrast-line"></i> Black & White
+              </button>
+              <button type="button" class="split-label label-right clickable" id="split-label-right" onclick="setComparatorView('color')" title="Click to view full Colorized AI">
+                <i class="ri-palette-line"></i> Colorized AI
+              </button>
             </div>
           </div>
         </div>
