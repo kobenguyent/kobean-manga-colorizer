@@ -36,10 +36,225 @@ const MODEL_VARIANTS = {
   ]
 };
 
+// ==========================================================================
+// Smooth & Elegant Custom Dropdown System
+// ==========================================================================
+function initCustomSelect(selectElement) {
+  if (!selectElement || selectElement.dataset.customSelectInitialized) return;
+  selectElement.dataset.customSelectInitialized = "true";
+
+  // Create container
+  const container = document.createElement("div");
+  container.className = "custom-select-container";
+  container.id = `custom-select-${selectElement.id}`;
+
+  // Create trigger button
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "custom-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+
+  const labelSpan = document.createElement("span");
+  labelSpan.className = "custom-select-label";
+
+  const arrowSpan = document.createElement("span");
+  arrowSpan.className = "custom-select-arrow";
+  arrowSpan.innerHTML = '<i class="ri-arrow-down-s-line"></i>';
+
+  trigger.appendChild(labelSpan);
+  trigger.appendChild(arrowSpan);
+
+  // Create floating dropdown menu
+  const dropdown = document.createElement("div");
+  dropdown.className = "custom-select-dropdown";
+  dropdown.setAttribute("role", "listbox");
+
+  const optionsContainer = document.createElement("div");
+  optionsContainer.className = "custom-select-options";
+  dropdown.appendChild(optionsContainer);
+
+  // Insert container in place of native select
+  selectElement.parentNode.insertBefore(container, selectElement);
+  container.appendChild(selectElement);
+  container.appendChild(trigger);
+  container.appendChild(dropdown);
+
+  // Hide native select visually while keeping it fully functional in DOM
+  selectElement.classList.add("custom-select-hidden");
+
+  function syncOptions() {
+    optionsContainer.innerHTML = "";
+    const options = Array.from(selectElement.options);
+    const selectedOpt = selectElement.options[selectElement.selectedIndex] || options[0];
+
+    if (selectedOpt) {
+      labelSpan.innerText = selectedOpt.text;
+    } else {
+      labelSpan.innerText = "";
+    }
+
+    options.forEach((opt, idx) => {
+      const isSelected = opt.selected || opt.value === selectElement.value;
+      const optElem = document.createElement("div");
+      optElem.className = `custom-select-option ${isSelected ? "selected" : ""}`;
+      optElem.setAttribute("role", "option");
+      optElem.setAttribute("aria-selected", isSelected ? "true" : "false");
+      optElem.dataset.value = opt.value;
+      optElem.style.animationDelay = `${Math.min(idx * 28, 200)}ms`;
+
+      optElem.innerHTML = `
+        <span class="custom-option-text">${opt.text}</span>
+        <i class="ri-check-line custom-option-check"></i>
+      `;
+
+      optElem.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        selectOption(opt.value);
+      });
+
+      optionsContainer.appendChild(optElem);
+    });
+  }
+
+  function selectOption(value) {
+    if (selectElement.value !== value) {
+      selectElement.value = value;
+      selectElement.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    syncOptions();
+    closeDropdown();
+  }
+
+  function openDropdown() {
+    // Close other open custom selects
+    document.querySelectorAll(".custom-select-container.open").forEach(other => {
+      if (other !== container) {
+        other.classList.remove("open");
+        const trig = other.querySelector(".custom-select-trigger");
+        if (trig) trig.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    // Smart viewport collision detection: open upwards only if genuinely restricted below
+    const rect = trigger.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const estHeight = Math.min((selectElement.options.length * 44) + 20, 280);
+    if (spaceBelow < estHeight && rect.top > estHeight) {
+      dropdown.style.top = "auto";
+      dropdown.style.bottom = "calc(100% + 6px)";
+      dropdown.style.transformOrigin = "bottom center";
+    } else {
+      dropdown.style.top = "calc(100% + 6px)";
+      dropdown.style.bottom = "auto";
+      dropdown.style.transformOrigin = "top center";
+    }
+
+    container.classList.add("open");
+    trigger.setAttribute("aria-expanded", "true");
+
+    const selected = optionsContainer.querySelector(".custom-select-option.selected");
+    if (selected) {
+      selected.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function closeDropdown() {
+    container.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+  }
+
+  function toggleDropdown() {
+    if (container.classList.contains("open")) {
+      closeDropdown();
+    } else {
+      openDropdown();
+    }
+  }
+
+  trigger.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleDropdown();
+  });
+
+  // Keyboard navigation & accessibility
+  trigger.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (!container.classList.contains("open")) {
+        openDropdown();
+      } else if (e.key === "ArrowDown") {
+        focusNextOption(1);
+      } else if (e.key === "Enter" || e.key === " ") {
+        const focused = optionsContainer.querySelector(".custom-select-option.focused");
+        if (focused && focused.dataset.value) {
+          selectOption(focused.dataset.value);
+        } else {
+          closeDropdown();
+        }
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (container.classList.contains("open")) {
+        focusNextOption(-1);
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeDropdown();
+    }
+  });
+
+  function focusNextOption(direction) {
+    const opts = Array.from(optionsContainer.querySelectorAll(".custom-select-option"));
+    if (opts.length === 0) return;
+    let focusedIndex = opts.findIndex(o => o.classList.contains("focused") || o.classList.contains("selected"));
+    if (focusedIndex === -1) focusedIndex = 0;
+    else focusedIndex = (focusedIndex + direction + opts.length) % opts.length;
+
+    opts.forEach((o, i) => o.classList.toggle("focused", i === focusedIndex));
+    opts[focusedIndex].scrollIntoView({ block: "nearest" });
+  }
+
+  // React to programmatic native select change events
+  selectElement.addEventListener("change", () => {
+    syncOptions();
+  });
+
+  // Observe option modifications on native select
+  const observer = new MutationObserver(() => {
+    syncOptions();
+  });
+  observer.observe(selectElement, { childList: true, subtree: true });
+
+  // Store refresh hook on native select
+  selectElement.refreshCustomSelect = syncOptions;
+
+  // Initial sync
+  syncOptions();
+}
+
+function initAllCustomSelects() {
+  document.querySelectorAll("select.form-select").forEach(initCustomSelect);
+}
+
+// Global click-outside listener to close dropdowns smoothly
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".custom-select-container")) {
+    document.querySelectorAll(".custom-select-container.open").forEach(c => {
+      c.classList.remove("open");
+      const trig = c.querySelector(".custom-select-trigger");
+      if (trig) trig.setAttribute("aria-expanded", "false");
+    });
+  }
+});
+
 
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
   updateModelVariants("resnext_generator");
+  initAllCustomSelects();
 
   // Auto-restore session from sessionStorage or fetch the latest active session
   const savedSessionId = sessionStorage.getItem("active_session_id");
@@ -291,6 +506,7 @@ function selectProvider(provider) {
 
 function updateModelVariants(provider) {
   const select = document.getElementById("model-variant-select");
+  if (!select) return;
   select.innerHTML = "";
   const variants = MODEL_VARIANTS[provider] || [];
   
@@ -300,6 +516,10 @@ function updateModelVariants(provider) {
     opt.innerText = v.label;
     select.appendChild(opt);
   });
+
+  if (select.refreshCustomSelect) {
+    select.refreshCustomSelect();
+  }
 }
 
 function toggleApiKeyVisibility() {
