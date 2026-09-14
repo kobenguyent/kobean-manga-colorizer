@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#241b4d"/>
+      <stop offset="100%" stop-color="#121324"/>
+    </linearGradient>
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#b362ff"/>
+      <stop offset="100%" stop-color="#4d88ff"/>
+    </linearGradient>
+  </defs>
+  <!-- Background Disc -->
+  <circle cx="32" cy="32" r="29" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="2.5"/>
+  <!-- Palette Color Spots -->
+  <circle cx="32" cy="16" r="4.5" fill="#ff4b8b"/>
+  <circle cx="47" cy="27" r="4.5" fill="#4ba3ff"/>
+  <circle cx="41" cy="45" r="4.5" fill="#ffbe28"/>
+  <circle cx="23" cy="45" r="4.5" fill="#3ce6a0"/>
+  <circle cx="17" cy="27" r="4.5" fill="#aa55ff"/>
+  <!-- Center Star/Sparkle -->
+  <circle cx="32" cy="32" r="3" fill="#ffffff" opacity="0.95"/>
+</svg>

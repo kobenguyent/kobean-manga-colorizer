@@ -5,7 +5,10 @@ import io
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from PIL import Image, ImageOps
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # Fallback for older PyMuPDF versions
 from bs4 import BeautifulSoup
 import re
 

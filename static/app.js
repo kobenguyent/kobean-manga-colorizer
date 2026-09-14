@@ -96,6 +96,14 @@ function setupEventListeners() {
     }
   });
 
+  // Click handler on entire dropzone box to open file explorer
+  dropzone.addEventListener("click", (e) => {
+    if (e.target === fileInput) return;
+    const loadingContent = document.getElementById("dropzone-loading-content");
+    if (loadingContent && !loadingContent.classList.contains("hidden")) return;
+    fileInput.click();
+  });
+
   fileInput.addEventListener("change", (e) => {
     if (fileInput.files.length > 0) {
       handleFileSelection(fileInput.files);
@@ -426,15 +434,48 @@ function renderDashboard() {
   renderDocumentQueue();
 }
 
+function updateColorizedCount() {
+  if (!currentSession || !currentSession.pages) return;
+  const colorizedCount = currentSession.pages.filter(p => p.status === "colorized").length;
+  currentSession.processed_count = colorizedCount;
+
+  const countElem = document.getElementById("colorized-count");
+  if (countElem) countElem.innerText = colorizedCount;
+
+  const totalElem = document.getElementById("gallery-total-count");
+  if (totalElem) totalElem.innerText = currentSession.total_pages || currentSession.pages.length;
+
+  const exportBadge = document.getElementById("export-badge-count");
+  if (exportBadge) exportBadge.innerText = `${colorizedCount} Ready`;
+
+  const exportCard = document.getElementById("export-card");
+  const sidebarExportCard = document.getElementById("sidebar-export-card");
+  if (colorizedCount > 0 || (currentSession && currentSession.status === "completed")) {
+    if (exportCard) exportCard.classList.remove("hidden");
+    if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
+  } else {
+    if (exportCard) exportCard.classList.add("hidden");
+    if (sidebarExportCard) sidebarExportCard.classList.add("hidden");
+  }
+
+  // Synchronize with activeSessions sidebar queue
+  if (Array.isArray(activeSessions)) {
+    const sessIdx = activeSessions.findIndex(s => s.session_id === currentSession.session_id);
+    if (sessIdx !== -1) {
+      activeSessions[sessIdx].processed_count = colorizedCount;
+      if (colorizedCount === currentSession.total_pages) {
+        activeSessions[sessIdx].status = "completed";
+      }
+      renderDocumentQueue();
+    }
+  }
+}
+
 function renderGalleryGrid() {
   const grid = document.getElementById("pages-grid");
   grid.innerHTML = "";
 
-  let colorizedCount = 0;
-
   currentSession.pages.forEach((page, idx) => {
-    if (page.status === "colorized") colorizedCount++;
-
     const card = document.createElement("div");
     card.className = "page-card";
     card.id = `page-card-${idx}`;
@@ -461,24 +502,7 @@ function renderGalleryGrid() {
     grid.appendChild(card);
   });
 
-  document.getElementById("colorized-count").innerText = colorizedCount;
-
-  // Unhide export banners and update count badge whenever colorized pages are available
-  const exportCard = document.getElementById("export-card");
-  const sidebarExportCard = document.getElementById("sidebar-export-card");
-  const exportBadge = document.getElementById("export-badge-count");
-
-  if (exportBadge) {
-    exportBadge.innerText = `${colorizedCount} Ready`;
-  }
-
-  if (colorizedCount > 0 || (currentSession && currentSession.status === "completed")) {
-    if (exportCard) exportCard.classList.remove("hidden");
-    if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
-  } else {
-    if (exportCard) exportCard.classList.add("hidden");
-    if (sidebarExportCard) sidebarExportCard.classList.add("hidden");
-  }
+  updateColorizedCount();
 }
 
 async function startColorization() {
@@ -574,6 +598,8 @@ function subscribeToProgressStream(sessionId = null) {
           const countText = document.getElementById("colorized-count");
           if (countText) countText.innerText = data.processed_count;
         }
+
+        updateColorizedCount();
       }
     } else if (data.type === "completed") {
       eventSource.close();
@@ -736,11 +762,8 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
       // Open in Before / After Comparator (prevent jarring scroll when auto-triggered by sliders)
       openSplitPreview(pageIdx, !showToastFeedback);
 
-      // Unhide export options since at least one colorized page is ready
-      const exportCard = document.getElementById("export-card");
-      const sidebarExportCard = document.getElementById("sidebar-export-card");
-      if (exportCard) exportCard.classList.remove("hidden");
-      if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
+      // Keep counter, badge, and export cards in sync
+      updateColorizedCount();
 
       if (showToastFeedback) {
         showToast(`Preview updated for ${page.display_name}!`, "success");

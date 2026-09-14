@@ -72,6 +72,10 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 sess = json.load(f)
+                if "pages" in sess:
+                    sess["processed_count"] = sum(1 for p in sess["pages"] if p.get("status") == "colorized")
+                    if sess.get("total_pages") and sess["processed_count"] == sess["total_pages"]:
+                        sess["status"] = "completed"
                 SESSIONS[session_id] = sess
                 if session_id not in EVENT_QUEUES:
                     EVENT_QUEUES[session_id] = []
@@ -409,7 +413,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 sess["status"] = "cancelled"
                 page_info["status"] = "colorized"
                 page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
-                sess["processed_count"] += 1
+                sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
                 await notify_sse_listeners(session_id, {
                     "type": "cancelled",
                     "processed_count": sess["processed_count"],
@@ -421,7 +425,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
             page_info["engine_used"] = res.get("engine", req.model_provider)
 
-            sess["processed_count"] += 1
+            sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
             save_session_meta(session_id)
 
             await notify_sse_listeners(session_id, {
@@ -532,6 +536,12 @@ async def preview_single_page(req: PreviewRequest):
         page_info["status"] = "colorized"
         page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
         page_info["engine_used"] = res.get("engine", req.model_provider)
+
+        # Update processed_count and status
+        sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+        if sess["processed_count"] == sess.get("total_pages", len(pages)):
+            sess["status"] = "completed"
+
         save_session_meta(session_id)
 
         await notify_sse_listeners(session_id, {
@@ -539,7 +549,9 @@ async def preview_single_page(req: PreviewRequest):
             "page_index": req.page_index,
             "status": "colorized",
             "colorized_url": page_info["colorized_url"],
-            "engine": page_info["engine_used"]
+            "engine": page_info["engine_used"],
+            "processed_count": sess["processed_count"],
+            "total": sess.get("total_pages", len(pages))
         })
 
         return JSONResponse({
@@ -547,7 +559,9 @@ async def preview_single_page(req: PreviewRequest):
             "page_index": req.page_index,
             "colorized_url": page_info["colorized_url"],
             "engine": page_info["engine_used"],
-            "page_info": page_info
+            "page_info": page_info,
+            "processed_count": sess["processed_count"],
+            "total_pages": sess.get("total_pages", len(pages))
         })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
@@ -867,5 +881,13 @@ async def delete_all_sessions():
         "message": "All document sessions and files deleted successfully"
     })
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def get_favicon():
+    favicon_path = STATIC_DIR / "favicon.ico"
+    if favicon_path.exists():
+        return FileResponse(favicon_path, media_type="image/x-icon")
+    return JSONResponse(status_code=404, content={"detail": "Favicon not found"})
+
 # Serve Frontend static assets
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+
