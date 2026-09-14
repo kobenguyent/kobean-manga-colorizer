@@ -387,7 +387,6 @@
             <div class="header-left">
               <i class="ri-gallery-grid-line"></i>
               <h3>Manga Page Gallery</h3>
-              <span class="gallery-counter"><strong id="colorized-count">0</strong> of <span id="gallery-total-count">0</span> Colorized</span>
               <div class="gallery-selection-controls">
                 <label class="select-all-label" title="Select or Deselect All Pages">
                   <input type="checkbox" id="select-all-pages-checkbox" checked onchange="toggleSelectAllPages(this.checked)">
@@ -395,14 +394,18 @@
                   <span id="selected-pages-text">All Selected</span>
                 </label>
               </div>
-            </div>
-
-            <div class="header-right">
               <!-- Single Button to Colorize Pending Pages -->
               <button class="btn btn-accent btn-sm" id="btn-gallery-colorize" onclick="startColorization()" title="Start colorizing pending pages">
                 <i class="ri-magic-line"></i>
                 <span id="gallery-colorize-btn-text">Colorize Pending Pages</span>
               </button>
+            </div>
+
+            <div class="header-right">
+              <!-- Count of Colorized Pages -->
+              <span class="gallery-counter"><strong id="colorized-count">0</strong>&nbsp;of&nbsp;<span id="gallery-total-count">0</span>&nbsp;Colorized</span>
+              
+              <!-- 3 Quick Export Buttons -->
               <div class="gallery-quick-exports">
                 <button class="btn btn-secondary btn-sm" onclick="exportDocument('pdf')" title="Export as PDF">
                   <i class="ri-file-pdf-2-line"></i> PDF
