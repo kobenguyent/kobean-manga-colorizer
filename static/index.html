@@ -16,6 +16,11 @@
   
   <!-- Main Stylesheet -->
   <link rel="stylesheet" href="styles.css">
+
+  <!-- Favicons -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="alternate icon" type="image/png" href="favicon.png">
+  <link rel="shortcut icon" href="favicon.ico">
 </head>
 <body>
 
@@ -60,7 +65,7 @@
           </div>
           <h2>Drag & Drop Manga files here</h2>
           <p class="dropzone-hint">Upload single or <strong>multiple files</strong>: <strong>.pdf</strong>, <strong>.epub</strong>, <strong>Images</strong> & <strong>.zip</strong></p>
-          <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">
+          <button class="btn btn-primary" type="button" id="btn-select-files">
             <i class="ri-file-add-line"></i> Select Files (Multiple Supported)
           </button>
         </div>
