@@ -122,13 +122,13 @@
 
           <!-- Queue Control Buttons -->
           <div class="queue-btn-group">
-            <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="document.getElementById('add-more-input').click()">
+            <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="triggerAddFiles()">
               <i class="ri-add-line"></i> Add Files
             </button>
             <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-delete-all-files" onclick="clearAllDocuments(event)">
               <i class="ri-delete-bin-line"></i> Delete All
             </button>
-            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" hidden />
+            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" style="display: none;" />
           </div>
         </div>
 
@@ -310,26 +310,40 @@
               <i class="ri-drag-move-fill"></i>
               <h3>Interactive Before / After Comparator</h3>
             </div>
-            <div class="header-right">
+            <div class="header-right preview-controls-group">
+              <button class="btn-icon btn-nav-preview" id="btn-prev-page" title="Previous Page (Left Arrow)" onclick="navigatePreviewPage(-1)">
+                <i class="ri-arrow-left-s-line"></i>
+              </button>
               <span class="badge" id="preview-page-title">Page 1</span>
+              <button class="btn-icon btn-nav-preview" id="btn-next-page" title="Next Page (Right Arrow)" onclick="navigatePreviewPage(1)">
+                <i class="ri-arrow-right-s-line"></i>
+              </button>
               <button class="btn btn-secondary btn-sm" onclick="previewCurrentPage()">
-                <i class="ri-refresh-line"></i> Re-Preview with Settings
+                <i class="ri-refresh-line"></i> Re-Preview
               </button>
               <button class="btn-icon btn-danger-icon" title="Delete this page" onclick="deleteCurrentPreviewPage(event)">
                 <i class="ri-delete-bin-line"></i>
               </button>
-              <button class="btn-icon" onclick="closeSplitPreview()"><i class="ri-close-line"></i></button>
+              <button class="btn-icon" onclick="closeSplitPreview()" title="Close Comparator (Esc)"><i class="ri-close-line"></i></button>
             </div>
           </div>
 
           <div class="split-slider-wrapper">
+            <!-- Chevron navigation buttons on the left & right of the preview -->
+            <button class="preview-nav-chevron preview-nav-prev" onclick="navigatePreviewPage(-1)" title="Previous Page (Left Arrow)">
+              <i class="ri-arrow-left-s-line"></i>
+            </button>
+            <button class="preview-nav-chevron preview-nav-next" onclick="navigatePreviewPage(1)" title="Next Page (Right Arrow)">
+              <i class="ri-arrow-right-s-line"></i>
+            </button>
+
             <div class="split-image-container" id="split-container">
               <!-- Colorized Base Image (Bottom/Right) -->
-              <img id="split-img-colorized" src="" alt="Colorized Page" />
+              <img id="split-img-colorized" src="" alt="Colorized Page" draggable="false" />
               
               <!-- Original B&W Overlay (Top/Left - Clipped by Slider) -->
               <div class="split-image-overlay" id="split-overlay">
-                <img id="split-img-original" src="" alt="Original B&W Page" />
+                <img id="split-img-original" src="" alt="Original B&W Page" draggable="false" />
               </div>
 
               <!-- Slider Handle -->

@@ -188,11 +188,55 @@ function setupEventListeners() {
 
   if (addMoreInput) {
     addMoreInput.addEventListener("change", (e) => {
-      if (addMoreInput.files.length > 0) {
+      if (addMoreInput.files && addMoreInput.files.length > 0) {
         handleFileSelection(addMoreInput.files);
       }
     });
   }
+
+  // Window-level drag & drop support so dropping files anywhere on the page uploads them
+  ["dragenter", "dragover"].forEach(eventName => {
+    window.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      const dropzone = document.getElementById("dropzone");
+      if (dropzone) dropzone.classList.add("dragover");
+    });
+  });
+
+  ["dragleave"].forEach(eventName => {
+    window.addEventListener(eventName, (e) => {
+      if (e.clientX <= 0 || e.clientY <= 0 || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
+        const dropzone = document.getElementById("dropzone");
+        if (dropzone) dropzone.classList.remove("dragover");
+      }
+    });
+  });
+
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const dropzone = document.getElementById("dropzone");
+    if (dropzone) dropzone.classList.remove("dragover");
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFileSelection(e.dataTransfer.files);
+    }
+  });
+
+  // Keyboard navigation for split comparator (ArrowLeft, ArrowRight, Escape)
+  window.addEventListener("keydown", (e) => {
+    const splitCard = document.getElementById("split-preview-card");
+    if (!splitCard || splitCard.classList.contains("hidden")) return;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      navigatePreviewPage(-1);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      navigatePreviewPage(1);
+    } else if (e.key === "Escape") {
+      closeSplitPreview();
+    }
+  });
 
   // Slider Value Displays with Real-time Live Preview Trigger
   document.getElementById("slider-line").addEventListener("input", (e) => {
@@ -218,6 +262,15 @@ function setupEventListeners() {
   // Setup Split Slider Dragging
   setupSplitSlider();
 }
+
+function triggerAddFiles() {
+  const addMoreInput = document.getElementById("add-more-input");
+  if (addMoreInput) {
+    addMoreInput.value = "";
+    addMoreInput.click();
+  }
+}
+window.triggerAddFiles = triggerAddFiles;
 
 let livePreviewDebounceTimer = null;
 function triggerLivePreview(delay = 300) {
@@ -313,7 +366,16 @@ async function handleFileSelection(fileOrFiles) {
     return;
   }
 
-  // Show dropzone upload loading UI
+  // Visual feedback on the Add Files button in the sidebar
+  const addBtn = document.getElementById("btn-add-files");
+  let origAddBtnHTML = "";
+  if (addBtn) {
+    origAddBtnHTML = addBtn.innerHTML;
+    addBtn.disabled = true;
+    addBtn.innerHTML = '<i class="ri-loader-4-line spin"></i> Adding...';
+  }
+
+  // Show dropzone upload loading UI (for initial landing page state)
   const idleContent = document.getElementById("dropzone-idle-content");
   const loadingContent = document.getElementById("dropzone-loading-content");
   const filenameText = document.getElementById("upload-filename-text");
@@ -342,38 +404,32 @@ async function handleFileSelection(fileOrFiles) {
 
     const data = await resp.json();
     if (resp.ok && data.status === "success") {
-      currentSession = data;
+      // 1. Refresh activeSessions from server to get accurate natural sort and status
+      const sessRes = await fetch("/api/sessions");
+      if (sessRes.ok) {
+        const sessData = await sessRes.json();
+        if (sessData && sessData.sessions) {
+          activeSessions = sessData.sessions;
+        }
+      }
+
+      // 2. Fetch full session details for the newly uploaded primary document
+      const newSessionId = data.session_id;
+      const fullSessRes = await fetch(`/api/session/${newSessionId}`);
+      if (fullSessRes.ok) {
+        currentSession = await fullSessRes.json();
+      } else {
+        currentSession = data;
+      }
       currentBatchId = data.batch_id || currentBatchId;
-      sessionStorage.setItem("active_session_id", data.session_id);
+      sessionStorage.setItem("active_session_id", currentSession.session_id);
       if (currentBatchId) {
         sessionStorage.setItem("active_batch_id", currentBatchId);
       }
 
-      if (data.sessions && data.sessions.length > 0) {
-        data.sessions.forEach(newSess => {
-          const existingIdx = activeSessions.findIndex(s => s.session_id === newSess.session_id);
-          if (existingIdx !== -1) {
-            activeSessions[existingIdx] = newSess;
-          } else {
-            activeSessions.push(newSess);
-          }
-        });
-      } else {
-        if (!activeSessions.some(s => s.session_id === data.session_id)) {
-          activeSessions.push({
-            session_id: data.session_id,
-            filename: data.filename,
-            ext: data.ext || "." + data.filename.split(".").pop(),
-            total_pages: data.total_pages,
-            status: data.status || "idle",
-            processed_count: data.processed_count || 0
-          });
-        }
-      }
-
       renderDashboard();
       renderDocumentQueue();
-      showToast(`Uploaded ${validFiles.length} file(s) with ${data.total_pages} total pages!`, "success");
+      showToast(`Added ${validFiles.length} document(s) with ${data.total_pages || 0} pages!`, "success");
     } else {
       showToast(data.detail || "Upload failed.", "error");
       if (idleContent) idleContent.classList.remove("hidden");
@@ -383,6 +439,15 @@ async function handleFileSelection(fileOrFiles) {
     showToast(`Error: ${err.message}`, "error");
     if (idleContent) idleContent.classList.remove("hidden");
     if (loadingContent) loadingContent.classList.add("hidden");
+  } finally {
+    if (addBtn && origAddBtnHTML) {
+      addBtn.disabled = false;
+      addBtn.innerHTML = origAddBtnHTML;
+    }
+    const addMore = document.getElementById("add-more-input");
+    if (addMore) addMore.value = "";
+    const fileInput = document.getElementById("file-input");
+    if (fileInput) fileInput.value = "";
   }
 }
 
@@ -1111,8 +1176,20 @@ function openSplitPreview(pageIdx, preventScroll = false) {
     splitCard.scrollIntoView({ behavior: 'smooth' });
   }
 
+  // Update prev / next buttons and floating chevron indicators
+  const totalPages = currentSession?.pages?.length || 0;
+  const prevBtn = document.getElementById("btn-prev-page");
+  const nextBtn = document.getElementById("btn-next-page");
+  if (prevBtn) prevBtn.disabled = pageIdx <= 0;
+  if (nextBtn) nextBtn.disabled = pageIdx >= totalPages - 1;
+
+  const chevronPrev = document.querySelector(".preview-nav-prev");
+  const chevronNext = document.querySelector(".preview-nav-next");
+  if (chevronPrev) chevronPrev.style.display = pageIdx <= 0 ? "none" : "flex";
+  if (chevronNext) chevronNext.style.display = pageIdx >= totalPages - 1 ? "none" : "flex";
+
   // Reset handle with container dimensions applied
-  setSplitPosition(currentSplitPct);
+  requestAnimationFrame(() => setSplitPosition(currentSplitPct));
 }
 
 function closeSplitPreview() {
@@ -1123,38 +1200,67 @@ let currentSplitPct = 50;
 
 function setupSplitSlider() {
   const container = document.getElementById("split-container");
+  if (!container) return;
+
   let isDragging = false;
 
-  const onMove = (clientX) => {
-    if (!isDragging) return;
+  const updateFromPointer = (clientX) => {
     const rect = container.getBoundingClientRect();
+    if (rect.width <= 0) return;
     let x = clientX - rect.left;
     if (x < 0) x = 0;
     if (x > rect.width) x = rect.width;
-    const pct = (x / rect.width) * 100;
+    const pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
     setSplitPosition(pct);
   };
 
-  container.addEventListener("mousedown", (e) => {
+  // Modern Pointer Events API (supports Mouse, Touch, and Stylus without native drag interference)
+  container.addEventListener("pointerdown", (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
     isDragging = true;
-    onMove(e.clientX);
+    try {
+      container.setPointerCapture(e.pointerId);
+    } catch (err) {}
+    updateFromPointer(e.clientX);
+    e.preventDefault();
   });
 
-  window.addEventListener("mousemove", (e) => onMove(e.clientX));
-  window.addEventListener("mouseup", () => { isDragging = false; });
-
-  // Touch support
-  container.addEventListener("touchstart", (e) => {
-    isDragging = true;
-    onMove(e.touches[0].clientX);
+  container.addEventListener("pointermove", (e) => {
+    if (!isDragging) return;
+    updateFromPointer(e.clientX);
+    e.preventDefault();
   });
-  window.addEventListener("touchmove", (e) => {
-    if (isDragging) onMove(e.touches[0].clientX);
-  });
-  window.addEventListener("touchend", () => { isDragging = false; });
 
-  // Window resize handler keeps image layers aligned
+  const stopDrag = (e) => {
+    if (isDragging) {
+      isDragging = false;
+      try {
+        container.releasePointerCapture(e.pointerId);
+      } catch (err) {}
+    }
+  };
+
+  container.addEventListener("pointerup", stopDrag);
+  container.addEventListener("pointercancel", stopDrag);
+
+  // Horizontal Trackpad / Wheel Scroll Support (Swipe left/right to slide divider)
+  container.addEventListener("wheel", (e) => {
+    const isHorizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    const delta = isHorizontal ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
+    if (delta !== 0) {
+      e.preventDefault();
+      const step = (delta / (container.clientWidth || 600)) * 100 * 1.2;
+      const newPct = Math.max(0, Math.min(100, currentSplitPct + step));
+      setSplitPosition(newPct);
+    }
+  }, { passive: false });
+
+  // Window resize & ResizeObserver for dynamic image alignment
   window.addEventListener("resize", () => setSplitPosition(currentSplitPct));
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => setSplitPosition(currentSplitPct));
+    ro.observe(container);
+  }
 }
 
 function setSplitPosition(pct) {
@@ -1176,6 +1282,19 @@ function setSplitPosition(pct) {
     }
   }
 }
+
+function navigatePreviewPage(direction) {
+  if (!currentSession || !currentSession.pages || currentSession.pages.length === 0) return;
+  const newIndex = currentPreviewPageIndex + direction;
+  if (newIndex >= 0 && newIndex < currentSession.pages.length) {
+    openSplitPreview(newIndex, true);
+  } else if (newIndex < 0) {
+    showToast("Already on the first page.", "info");
+  } else {
+    showToast("Already on the last page.", "info");
+  }
+}
+window.navigatePreviewPage = navigatePreviewPage;
 
 async function exportDocument(format = "auto") {
   if (!currentSession) return;
