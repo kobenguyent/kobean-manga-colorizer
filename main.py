@@ -3,7 +3,8 @@ import shutil
 import uuid
 import json
 import asyncio
-from typing import Dict, List, Optional
+import re
+from typing import Dict, List, Optional, Any
 from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException
@@ -35,6 +36,7 @@ STATIC_DIR = BASE_DIR / "static"
 for d in [UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR, STATIC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# Instantiate core engines
 file_processor = MangaFileProcessor(storage_dir=str(STORAGE_DIR))
 colorizer_engine = MangaColorizerEngine()
 
@@ -44,11 +46,26 @@ SESSIONS: Dict[str, dict] = {}
 # session_id -> asyncio.Queue for SSE events
 EVENT_QUEUES: Dict[str, List[asyncio.Queue]] = {}
 
+# Global Active Batch Tracking
+CURRENT_BATCH: Dict[str, Any] = {
+    "is_running": False,
+    "total_docs": 0,
+    "completed_docs": 0,
+    "current_index": 0,
+    "current_session_id": None,
+    "session_ids": []
+}
+
 def save_session_meta(session_id: str):
     """Persists session state to meta.json on disk to survive server restarts."""
     sess = SESSIONS.get(session_id)
     if not sess:
         return
+    if "pages" in sess:
+        actual_count = sum(1 for p in sess["pages"] if p.get("status") == "colorized")
+        sess["processed_count"] = actual_count
+        if sess.get("total_pages") and actual_count >= sess["total_pages"]:
+            sess["status"] = "completed"
     sess_dir = STORAGE_DIR / session_id
     sess_dir.mkdir(parents=True, exist_ok=True)
     meta_path = sess_dir / "meta.json"
@@ -362,6 +379,9 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
     colorized_dir = session_dir / "colorized"
     colorized_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensure processed_count strictly reflects actual colorized pages
+    sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+
     for idx in target_pages:
         # Check if cancellation was requested before processing next page
         if sess.get("cancel_requested"):
@@ -380,6 +400,16 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             continue
         
         page_info = pages[idx]
+        orig_path = page_info["original_path"]
+        color_filename = page_info["filename"]
+        output_path = str(colorized_dir / color_filename)
+
+        # Skip if page is already colorized and output file exists on disk
+        if page_info.get("status") == "colorized" and Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+            if not page_info.get("colorized_url"):
+                page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+            continue
+
         page_info["status"] = "processing"
         
         await notify_sse_listeners(session_id, {
@@ -388,10 +418,6 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             "status": "processing",
             "progress": f"{idx + 1}/{len(pages)}"
         })
-
-        orig_path = page_info["original_path"]
-        color_filename = page_info["filename"]
-        output_path = str(colorized_dir / color_filename)
 
         try:
             # Run CPU-bound colorization in a thread without blocking main asyncio loop
@@ -451,6 +477,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 "error": str(e)
             })
 
+    sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
     sess["status"] = "completed"
     save_session_meta(session_id)
     await notify_sse_listeners(session_id, {
@@ -683,7 +710,7 @@ async def download_file(session_id: str, filename: str):
 
 @app.get("/api/sessions")
 async def list_sessions(batch_id: Optional[str] = None):
-    """Returns list of active/cached sessions, optionally filtered by batch_id."""
+    """Returns list of active/cached sessions, optionally filtered by batch_id, naturally sorted by filename."""
     dirs = [d for d in STORAGE_DIR.iterdir() if d.is_dir()]
     for d in dirs:
         if d.name not in SESSIONS:
@@ -693,6 +720,13 @@ async def list_sessions(batch_id: Optional[str] = None):
     for sess in SESSIONS.values():
         if batch_id and sess.get("batch_id") != batch_id:
             continue
+        pages = sess.get("pages", [])
+        if pages:
+            actual_count = sum(1 for p in pages if p.get("status") == "colorized")
+            sess["processed_count"] = actual_count
+            if actual_count >= len(pages):
+                sess["status"] = "completed"
+
         results.append({
             "session_id": sess["session_id"],
             "batch_id": sess.get("batch_id"),
@@ -703,12 +737,30 @@ async def list_sessions(batch_id: Optional[str] = None):
             "status": sess.get("status", "idle")
         })
 
-    results.sort(key=lambda s: (s.get("processed_count", 0), s.get("total_pages", 0)), reverse=True)
+    def _sort_key(s):
+        fn = s.get("filename", "").lower()
+        parts = [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', fn)]
+        return parts
+
+    results.sort(key=_sort_key)
     return JSONResponse({"sessions": results})
+
+@app.get("/api/colorize/batch/status")
+async def get_batch_status():
+    """Returns current active batch colorization status."""
+    return JSONResponse(CURRENT_BATCH)
 
 @app.post("/api/colorize/batch/start")
 async def start_batch_colorization(req: BatchColorizeRequest):
     """Starts sequential colorization for a batch of documents."""
+    global CURRENT_BATCH
+    if CURRENT_BATCH.get("is_running"):
+        return JSONResponse({
+            "status": "already_running",
+            "message": "Batch colorization is already running",
+            "batch": CURRENT_BATCH
+        })
+
     valid_sessions = []
     for sid in req.session_ids:
         sess = SESSIONS.get(sid) or get_or_restore_session(sid)
@@ -718,10 +770,51 @@ async def start_batch_colorization(req: BatchColorizeRequest):
     if not valid_sessions:
         raise HTTPException(status_code=404, detail="No valid sessions found for batch colorization")
 
+    CURRENT_BATCH = {
+        "is_running": True,
+        "total_docs": len(valid_sessions),
+        "completed_docs": 0,
+        "current_index": 0,
+        "current_session_id": valid_sessions[0] if valid_sessions else None,
+        "session_ids": valid_sessions
+    }
+
     async def _run_batch():
-        for sid in valid_sessions:
-            sess = SESSIONS.get(sid) or get_or_restore_session(sid)
-            if sess and sess.get("status") != "completed":
+        global CURRENT_BATCH
+        try:
+            for idx, sid in enumerate(valid_sessions):
+                if not CURRENT_BATCH.get("is_running"):
+                    break
+                CURRENT_BATCH["current_index"] = idx
+                CURRENT_BATCH["current_session_id"] = sid
+
+                sess = SESSIONS.get(sid) or get_or_restore_session(sid)
+                if not sess:
+                    continue
+
+                pages = sess.get("pages", [])
+                colorized_dir = STORAGE_DIR / sid / "colorized"
+                uncolorized = [
+                    p for p in pages
+                    if p.get("status") != "colorized" or not (colorized_dir / p.get("filename", "")).exists()
+                ]
+
+                if not uncolorized and len(pages) > 0:
+                    sess["status"] = "completed"
+                    sess["processed_count"] = len(pages)
+                    save_session_meta(sid)
+                    CURRENT_BATCH["completed_docs"] += 1
+                    await notify_sse_listeners(sid, {
+                        "type": "completed",
+                        "total_processed": len(pages),
+                        "batch_info": {
+                            "current_doc_idx": idx + 1,
+                            "total_docs": len(valid_sessions),
+                            "completed_docs": CURRENT_BATCH["completed_docs"]
+                        }
+                    })
+                    continue
+
                 single_req = ColorizeRequest(
                     session_id=sid,
                     model_provider=req.model_provider,
@@ -733,6 +826,10 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     line_preserve=req.line_preserve
                 )
                 await _async_colorization_worker(sid, single_req)
+                CURRENT_BATCH["completed_docs"] += 1
+        finally:
+            CURRENT_BATCH["is_running"] = False
+            CURRENT_BATCH["current_session_id"] = None
 
     asyncio.create_task(_run_batch())
     return JSONResponse({

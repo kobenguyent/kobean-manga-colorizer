@@ -6,6 +6,8 @@ let currentBatchId = null;
 let eventSource = null;
 let activeProvider = "resnext_generator";
 let currentPreviewPageIndex = 0;
+let isBatchColorizing = false;
+let batchQueuePoller = null;
 
 // Sub-model options per provider
 const MODEL_VARIANTS = {
@@ -50,7 +52,15 @@ document.addEventListener("DOMContentLoaded", () => {
         currentBatchId = data.batch_id || null;
         sessionStorage.setItem("active_session_id", data.session_id);
         renderDashboard();
-        if (data.pages[0].status === "colorized") {
+        if (data.status === "processing") {
+          const progCard = document.getElementById("progress-card");
+          if (progCard) progCard.classList.remove("hidden");
+          const expCard = document.getElementById("export-card");
+          if (expCard) expCard.classList.add("hidden");
+          const btnStart = document.getElementById("btn-start-colorize");
+          if (btnStart) btnStart.disabled = true;
+          subscribeToProgressStream(data.session_id);
+        } else if (data.pages[0].status === "colorized") {
           openSplitPreview(0, true);
         }
       }
@@ -64,10 +74,74 @@ document.addEventListener("DOMContentLoaded", () => {
       if (data && data.sessions && data.sessions.length > 0) {
         activeSessions = data.sessions;
         renderDocumentQueue();
+
+        // Check if a batch is active on the server
+        fetch("/api/colorize/batch/status")
+          .then(res => res.ok ? res.json() : null)
+          .then(batchData => {
+            if (batchData && batchData.is_running) {
+              isBatchColorizing = true;
+              startBatchQueuePoller();
+              if (batchData.current_session_id) {
+                if (!currentSession || currentSession.session_id === batchData.current_session_id) {
+                  subscribeToProgressStream(batchData.current_session_id);
+                }
+              }
+            }
+          })
+          .catch(() => {});
       }
     })
     .catch(() => {});
 });
+
+function startBatchQueuePoller() {
+  if (batchQueuePoller) clearInterval(batchQueuePoller);
+  batchQueuePoller = setInterval(async () => {
+    try {
+      const batchRes = await fetch("/api/colorize/batch/status");
+      if (batchRes.ok) {
+        const batchData = await batchRes.json();
+        if (!batchData.is_running && isBatchColorizing) {
+          const anyProcessing = activeSessions.some(s => s.status === "processing");
+          if (!anyProcessing) {
+            isBatchColorizing = false;
+            clearInterval(batchQueuePoller);
+            batchQueuePoller = null;
+            const progCard = document.getElementById("progress-card");
+            if (progCard) progCard.classList.add("hidden");
+            const btnStart = document.getElementById("btn-start-colorize");
+            if (btnStart) btnStart.disabled = false;
+            const btnBatch = document.getElementById("btn-start-batch-colorize");
+            if (btnBatch) btnBatch.disabled = false;
+            const expCard = document.getElementById("export-card");
+            if (expCard) expCard.classList.remove("hidden");
+            const sidebarExportCard = document.getElementById("sidebar-export-card");
+            if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
+          }
+        }
+      }
+
+      const sessRes = await fetch("/api/sessions");
+      if (sessRes.ok) {
+        const sessData = await sessRes.json();
+        if (sessData && sessData.sessions) {
+          activeSessions = sessData.sessions;
+          renderDocumentQueue();
+          if (currentSession) {
+            const updatedCurr = activeSessions.find(s => s.session_id === currentSession.session_id);
+            if (updatedCurr) {
+              currentSession.processed_count = updatedCurr.processed_count;
+              currentSession.status = updatedCurr.status;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // transient polling error
+    }
+  }, 3000);
+}
 
 function setupEventListeners() {
   const dropzone = document.getElementById("dropzone");
@@ -332,6 +406,7 @@ function renderDocumentQueue() {
     if (batchColorizeBtn) {
       batchColorizeBtn.classList.remove("hidden");
       if (batchCountText) batchCountText.innerText = count;
+      batchColorizeBtn.disabled = isBatchColorizing;
     }
     if (sidebarBatchExport) sidebarBatchExport.classList.remove("hidden");
     if (bannerBatchBtn) {
@@ -362,8 +437,16 @@ function renderDocumentQueue() {
       iconHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
     }
 
-    const statusBadgeClass = sess.status === "completed" ? "status-colorized" : "status-pending";
-    const statusText = sess.status === "completed" ? "Ready" : `${sess.processed_count || 0}/${sess.total_pages || 0}`;
+    let statusBadgeClass = "status-pending";
+    let statusHTML = `${sess.processed_count || 0}/${sess.total_pages || 0}`;
+
+    if (sess.status === "completed") {
+      statusBadgeClass = "status-colorized";
+      statusHTML = "Ready";
+    } else if (sess.status === "processing") {
+      statusBadgeClass = "status-processing";
+      statusHTML = `<i class="ri-loader-4-line spin"></i> ${sess.processed_count || 0}/${sess.total_pages || 0}`;
+    }
 
     item.innerHTML = `
       <div class="doc-queue-icon">${iconHTML}</div>
@@ -371,7 +454,7 @@ function renderDocumentQueue() {
         <div class="doc-queue-name" title="${sess.filename}">${sess.filename}</div>
         <div class="doc-queue-meta">
           <span>${sess.total_pages} pages</span>
-          <span class="page-status-badge ${statusBadgeClass}" style="font-size: 0.68rem; padding: 1px 6px;">${statusText}</span>
+          <span class="page-status-badge ${statusBadgeClass}" id="doc-queue-badge-${sess.session_id}" style="font-size: 0.68rem; padding: 1px 6px;">${statusHTML}</span>
         </div>
       </div>
       <button class="btn-icon doc-delete-btn" title="Delete ${sess.filename}" onclick="deleteDocument(event, '${sess.session_id}')">
@@ -386,7 +469,6 @@ function renderDocumentQueue() {
 async function switchActiveDocument(sessionId) {
   if (currentSession && currentSession.session_id === sessionId) return;
 
-  showToast("Switching active document...", "info");
   try {
     const resp = await fetch(`/api/session/${sessionId}`);
     const data = await resp.json();
@@ -401,6 +483,25 @@ async function switchActiveDocument(sessionId) {
 
       renderDashboard();
       renderDocumentQueue();
+
+      const progCard = document.getElementById("progress-card");
+      const expCard = document.getElementById("export-card");
+      const btnStart = document.getElementById("btn-start-colorize");
+
+      if (data.status === "processing") {
+        if (progCard) progCard.classList.remove("hidden");
+        if (expCard) expCard.classList.add("hidden");
+        if (btnStart) btnStart.disabled = true;
+        subscribeToProgressStream(sessionId);
+      } else if (data.status === "completed") {
+        if (!isBatchColorizing && progCard) progCard.classList.add("hidden");
+        if (expCard) expCard.classList.remove("hidden");
+        if (btnStart) btnStart.disabled = false;
+      } else {
+        if (!isBatchColorizing && progCard) progCard.classList.add("hidden");
+        if (btnStart) btnStart.disabled = isBatchColorizing;
+      }
+
       if (data.pages && data.pages.length > 0 && data.pages[0].status === "colorized") {
         openSplitPreview(0, true);
       }
@@ -560,7 +661,10 @@ async function startColorization() {
 }
 
 function subscribeToProgressStream(sessionId = null) {
-  if (eventSource) eventSource.close();
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
 
   const targetId = sessionId || (currentSession ? currentSession.session_id : null);
   if (!targetId) return;
@@ -590,7 +694,7 @@ function subscribeToProgressStream(sessionId = null) {
 
         // Update progress bar
         if (data.processed_count !== undefined) {
-          const pct = Math.round((data.processed_count / currentSession.total_pages) * 100);
+          const pct = Math.min(100, Math.round((data.processed_count / currentSession.total_pages) * 100));
           const barFill = document.getElementById("progress-bar-fill");
           if (barFill) barFill.style.width = `${pct}%`;
           const counterText = document.getElementById("progress-counter-text");
@@ -601,8 +705,54 @@ function subscribeToProgressStream(sessionId = null) {
 
         updateColorizedCount();
       }
+
+      // Update activeSessions and sidebar badge directly for fast live feedback
+      const sessIdx = activeSessions.findIndex(s => s.session_id === targetId);
+      if (sessIdx !== -1) {
+        activeSessions[sessIdx].status = "processing";
+        if (data.processed_count !== undefined) {
+          activeSessions[sessIdx].processed_count = data.processed_count;
+        }
+        const badgeElem = document.getElementById(`doc-queue-badge-${targetId}`);
+        if (badgeElem) {
+          badgeElem.className = "page-status-badge status-processing";
+          badgeElem.innerHTML = `<i class="ri-loader-4-line spin"></i> ${activeSessions[sessIdx].processed_count || 0}/${activeSessions[sessIdx].total_pages || 0}`;
+        }
+      }
+
     } else if (data.type === "completed") {
-      eventSource.close();
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+
+      // Mark this session as completed in activeSessions
+      const sessIdx = activeSessions.findIndex(s => s.session_id === targetId);
+      if (sessIdx !== -1) {
+        activeSessions[sessIdx].status = "completed";
+        activeSessions[sessIdx].processed_count = activeSessions[sessIdx].total_pages;
+      }
+      if (currentSession && currentSession.session_id === targetId) {
+        currentSession.status = "completed";
+        currentSession.processed_count = currentSession.total_pages;
+      }
+      renderDocumentQueue();
+
+      if (isBatchColorizing) {
+        // Look for next session that needs colorization
+        const nextSess = activeSessions.find(s => s.status !== "completed");
+        if (nextSess) {
+          showToast(`Completed "${currentSession?.filename || 'Document'}"! Starting "${nextSess.filename}"...`, "info");
+          switchActiveDocument(nextSess.session_id).then(() => {
+            subscribeToProgressStream(nextSess.session_id);
+          });
+          return;
+        } else {
+          isBatchColorizing = false;
+          showToast("All documents in queue colorized successfully!", "success");
+        }
+      }
+
       const progCard = document.getElementById("progress-card");
       if (progCard) progCard.classList.add("hidden");
       const expCard = document.getElementById("export-card");
@@ -611,34 +761,36 @@ function subscribeToProgressStream(sessionId = null) {
       if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
       const btnStart = document.getElementById("btn-start-colorize");
       if (btnStart) btnStart.disabled = false;
-      showToast("Colorization complete!", "success");
-      if (typeof renderDocumentQueue === "function") renderDocumentQueue();
+      const btnBatch = document.getElementById("btn-start-batch-colorize");
+      if (btnBatch) btnBatch.disabled = false;
+
+      if (!isBatchColorizing) {
+        showToast("Colorization complete!", "success");
+      }
+      renderDocumentQueue();
+
     } else if (data.type === "cancelled") {
-      eventSource.close();
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      isBatchColorizing = false;
       const progCard = document.getElementById("progress-card");
       if (progCard) progCard.classList.add("hidden");
       const btnStart = document.getElementById("btn-start-colorize");
       if (btnStart) btnStart.disabled = false;
+      const btnBatch = document.getElementById("btn-start-batch-colorize");
+      if (btnBatch) btnBatch.disabled = false;
 
-      // Re-render gallery grid to reset pending statuses
       renderGalleryGrid();
-
-      // Show export card if at least one page was colorized before cancelling
-      const processedCount = data.processed_count || 0;
-      if (processedCount > 0) {
-        const expCard = document.getElementById("export-card");
-        if (expCard) expCard.classList.remove("hidden");
-        const sidebarExportCard = document.getElementById("sidebar-export-card");
-        if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
-      }
-
-      showToast(`Colorization cancelled (${processedCount} pages colorized).`, "info");
+      updateColorizedCount();
+      renderDocumentQueue();
+      showToast("Colorization cancelled.", "info");
     }
   };
 
   eventSource.onerror = (err) => {
-    console.error("SSE stream error:", err);
-    eventSource.close();
+    // If SSE disconnects, don't crash, poller handles state
   };
 }
 
@@ -984,6 +1136,12 @@ async function startBatchColorization() {
   const sessionIds = activeSessions.map(s => s.session_id);
   showToast(`Starting batch colorization for ${sessionIds.length} documents...`, "info");
 
+  isBatchColorizing = true;
+  const btnStart = document.getElementById("btn-start-colorize");
+  if (btnStart) btnStart.disabled = true;
+  const btnBatch = document.getElementById("btn-start-batch-colorize");
+  if (btnBatch) btnBatch.disabled = true;
+
   try {
     const resp = await fetch("/api/colorize/batch/start", {
       method: "POST",
@@ -1001,23 +1159,34 @@ async function startBatchColorization() {
     });
 
     const data = await resp.json();
-    if (resp.ok && data.status === "started") {
+    if (resp.ok && (data.status === "started" || data.status === "already_running")) {
       showToast(data.message, "success");
-      if (currentSession) {
-        const progCard = document.getElementById("progress-card");
-        if (progCard) progCard.classList.remove("hidden");
-        const expCard = document.getElementById("export-card");
-        if (expCard) expCard.classList.add("hidden");
-        const btnStart = document.getElementById("btn-start-colorize");
-        if (btnStart) btnStart.disabled = true;
+      startBatchQueuePoller();
 
-        subscribeToProgressStream(currentSession.session_id);
+      // Find the first document that needs colorization
+      const targetSess = activeSessions.find(s => s.status !== "completed") || currentSession;
+      if (targetSess) {
+        if (!currentSession || currentSession.session_id !== targetSess.session_id) {
+          await switchActiveDocument(targetSess.session_id);
+        } else {
+          const progCard = document.getElementById("progress-card");
+          if (progCard) progCard.classList.remove("hidden");
+          const expCard = document.getElementById("export-card");
+          if (expCard) expCard.classList.add("hidden");
+          subscribeToProgressStream(targetSess.session_id);
+        }
       }
     } else {
       showToast(data.detail || "Batch colorization failed.", "error");
+      isBatchColorizing = false;
+      if (btnStart) btnStart.disabled = false;
+      if (btnBatch) btnBatch.disabled = false;
     }
   } catch (err) {
     showToast(`Batch error: ${err.message}`, "error");
+    isBatchColorizing = false;
+    if (btnStart) btnStart.disabled = false;
+    if (btnBatch) btnBatch.disabled = false;
   }
 }
 
