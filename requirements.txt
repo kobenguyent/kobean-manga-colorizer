@@ -1,0 +1,11 @@
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pillow>=10.0.0
+pymupdf>=1.23.0
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+python-multipart>=0.0.9
+requests>=2.31.0
+numpy>=1.26.0
+opencv-python-headless>=4.9.0
+aiofiles>=23.2.0

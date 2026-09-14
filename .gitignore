@@ -1,0 +1,9 @@
+./.idea
+/output
+/venv
+/sessions
+/uploads
+
+.DS_Store
+/networks/generator.zip
+/networks/archive

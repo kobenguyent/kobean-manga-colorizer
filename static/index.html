@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Manga Colorizer Pro - Google Nano & Apple Foundation Model AI</title>
+  <meta name="description" content="Colorize black and white manga EPUB and PDF files automatically using Google Nano Banana and Apple Foundation AI models.">
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Remixicon Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+  
+  <!-- Main Stylesheet -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Background Decorative Glows -->
+  <div class="bg-glow glow-1"></div>
+  <div class="bg-glow glow-2"></div>
+
+  <!-- App Header -->
+  <header class="app-header">
+    <div class="logo-container">
+      <div class="logo-icon">
+        <i class="ri-palette-fill"></i>
+      </div>
+      <div>
+        <h1 class="logo-title">Kobean Manga Colorization</h1>
+        <p class="logo-subtitle">Let's colorize our EPUB & PDF Manga</p>
+      </div>
+    </div>
+
+    <div class="header-status">
+      <span class="badge badge-model active" id="active-model-badge">
+        <i class="ri-dna-line"></i> ResNeXt Deep Generator
+      </span>
+      <span class="badge badge-accent">
+        <i class="ri-file-code-line"></i> .PDF, .EPUB, Images & .ZIP
+      </span>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="main-container">
+
+    <!-- Upload Section -->
+    <section class="card upload-section" id="upload-section">
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="file-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" hidden />
+
+        <!-- Idle Upload State -->
+        <div class="dropzone-content" id="dropzone-idle-content">
+          <div class="dropzone-icon">
+            <i class="ri-upload-cloud-2-line"></i>
+          </div>
+          <h2>Drag & Drop Manga files here</h2>
+          <p class="dropzone-hint">Upload single or <strong>multiple files</strong>: <strong>.pdf</strong>, <strong>.epub</strong>, <strong>Images</strong> & <strong>.zip</strong></p>
+          <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">
+            <i class="ri-file-add-line"></i> Select Files (Multiple Supported)
+          </button>
+        </div>
+
+        <!-- Uploading & Extraction In-Progress State -->
+        <div class="dropzone-loading hidden" id="dropzone-loading-content">
+          <div class="spinner-icon">
+            <i class="ri-loader-4-line spinner"></i>
+          </div>
+          <h2 id="upload-filename-text">Uploading manga_volume.pdf...</h2>
+          <p class="dropzone-hint">Extracting pages & building document session... Please wait.</p>
+          <div class="upload-progress-bar-container">
+            <div class="upload-progress-bar-fill"></div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- App Dashboard (Hidden until file uploaded) -->
+    <section class="dashboard-grid hidden" id="dashboard-section">
+
+      <!-- Left Column: File Info & Controls -->
+      <aside class="sidebar">
+
+        <!-- File Info & Documents Queue Card -->
+        <div class="card file-info-card">
+          <div class="card-header space-between">
+            <div class="header-left">
+              <i class="ri-folders-line"></i>
+              <h3>Documents Queue</h3>
+            </div>
+            <span class="badge badge-accent" id="doc-queue-badge">1 Document</span>
+          </div>
+
+          <!-- Active Document Highlight -->
+          <div class="file-details active-doc-box">
+            <div class="file-icon-box" id="file-type-icon">
+              <i class="ri-file-pdf-fill"></i>
+            </div>
+            <div class="file-meta">
+              <h4 id="doc-filename">manga_volume.pdf</h4>
+              <p><span id="doc-total-pages">0</span> Pages Loaded</p>
+            </div>
+            <button class="btn-icon btn-delete-doc-active" id="btn-delete-active-doc" title="Delete this document" onclick="deleteActiveDocument(event)">
+              <i class="ri-delete-bin-line"></i>
+            </button>
+          </div>
+
+          <!-- Multi-document list (when 2+ files are queued) -->
+          <div class="doc-queue-list hidden" id="doc-queue-list">
+            <!-- Rendered dynamically -->
+          </div>
+
+          <!-- Queue Control Buttons -->
+          <div class="queue-btn-group">
+            <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="document.getElementById('add-more-input').click()">
+              <i class="ri-add-line"></i> Add Files
+            </button>
+            <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-delete-all-files" onclick="clearAllDocuments(event)">
+              <i class="ri-delete-bin-line"></i> Delete All
+            </button>
+            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" hidden />
+          </div>
+        </div>
+
+        <!-- Model Configuration Card -->
+        <div class="card config-card">
+          <div class="card-header">
+            <i class="ri-cpu-line"></i>
+            <h3>AI Engine & Models</h3>
+          </div>
+
+          <!-- Model Provider Tabs -->
+          <div class="form-group">
+            <label>AI Colorization Model</label>
+            <div class="model-selector-grid">
+              <button class="model-option active" data-provider="resnext_generator" onclick="selectProvider('resnext_generator')">
+                <span class="model-emoji">🧬</span>
+                <span class="model-name">ResNeXt Net</span>
+                <span class="model-tag">Deep Generator</span>
+              </button>
+
+              <button class="model-option" data-provider="google_nano" onclick="selectProvider('google_nano')">
+                <span class="model-emoji">🍌</span>
+                <span class="model-name">Google Nano</span>
+                <span class="model-tag">Google AI</span>
+              </button>
+
+              <button class="model-option" data-provider="apple_foundation" onclick="selectProvider('apple_foundation')">
+                <span class="model-emoji">🍏</span>
+                <span class="model-name">Apple AI</span>
+                <span class="model-tag">Apple Silicon</span>
+              </button>
+
+              <button class="model-option" data-provider="local_smart" onclick="selectProvider('local_smart')">
+                <span class="model-emoji">🎨</span>
+                <span class="model-name">Smart Local</span>
+                <span class="model-tag">Offline Palette</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Sub-Model Selection -->
+          <div class="form-group">
+            <label for="model-variant-select">Model Variant</label>
+            <select id="model-variant-select" class="form-select">
+              <!-- Dynamically populated -->
+            </select>
+          </div>
+
+          <!-- API Key Input (Optional) -->
+          <div class="form-group" id="api-key-group">
+            <div class="label-with-hint">
+              <label for="api-key-input">Google API Key</label>
+              <span class="hint-text">(Optional for Google Nano API)</span>
+            </div>
+            <div class="input-with-icon">
+              <input type="password" id="api-key-input" placeholder="AIzaSy..." class="form-input" />
+              <button class="btn-icon" type="button" onclick="toggleApiKeyVisibility()">
+                <i class="ri-eye-line" id="api-key-toggle-icon"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Color Style Preset -->
+          <div class="form-group">
+            <label for="style-select">Manga Color Aesthetic</label>
+            <select id="style-select" class="form-select">
+              <option value="gemini_anime" selected>✨ Gemini Anime Vibrant (Demo Style)</option>
+              <option value="shonen_vivid">🔥 Shonen Vivid (Vibrant Anime Style)</option>
+              <option value="anime_pastel">🌸 Soft Pastel Anime (Gentle Lighting)</option>
+              <option value="retro_90s">📼 Retro 90s Anime (Classic Cell Shading)</option>
+              <option value="dark_fantasy">🦇 Dark Fantasy (Moody Shading)</option>
+              <option value="cyberpunk">⚡ Cyberpunk Neon (Cyan & Magenta Tones)</option>
+            </select>
+          </div>
+
+          <!-- Advanced Sliders -->
+          <div class="form-group">
+            <div class="slider-header">
+              <label for="slider-line">Line Art Preservation</label>
+              <span class="slider-value" id="val-line">85%</span>
+            </div>
+            <input type="range" id="slider-line" min="50" max="100" value="85" class="form-slider" />
+          </div>
+
+          <div class="form-group">
+            <div class="slider-header">
+              <label for="slider-saturation">Color Saturation</label>
+              <span class="slider-value" id="val-saturation">1.4x</span>
+            </div>
+            <input type="range" id="slider-saturation" min="5" max="25" value="14" class="form-slider" />
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="action-btn-group">
+            <button class="btn btn-secondary btn-block" id="btn-preview-page" onclick="previewCurrentPage()">
+              <i class="ri-sparkles-line"></i> Preview Page 1
+            </button>
+            <button class="btn btn-accent btn-block" id="btn-start-colorize">
+              <i class="ri-magic-line"></i> Colorize Current Document
+            </button>
+            <button class="btn btn-primary btn-block hidden" id="btn-start-batch-colorize" onclick="startBatchColorization()">
+              <i class="ri-play-list-add-line"></i> Colorize All (<span id="batch-count-text">0</span>) Documents
+            </button>
+          </div>
+        </div>
+
+        <!-- Export Options Card in Sidebar -->
+        <div class="card export-sidebar-card" id="sidebar-export-card">
+          <div class="card-header space-between">
+            <div class="header-left">
+              <i class="ri-download-cloud-2-fill" style="color: var(--accent-green);"></i>
+              <h3>Export Manga</h3>
+            </div>
+            <span class="badge badge-accent" id="export-badge-count">Ready</span>
+          </div>
+          <p class="export-sidebar-hint">Download active document in your preferred format:</p>
+          <div class="sidebar-export-buttons">
+            <button class="btn btn-success btn-block" id="btn-sidebar-export-pdf" onclick="exportDocument('pdf')">
+              <i class="ri-file-pdf-2-line"></i> Download as PDF
+            </button>
+            <button class="btn btn-accent btn-block" id="btn-sidebar-export-epub" onclick="exportDocument('epub')">
+              <i class="ri-book-open-line"></i> Download as EPUB
+            </button>
+            <button class="btn btn-secondary btn-block" id="btn-sidebar-export-zip" onclick="exportDocument('zip')">
+              <i class="ri-file-zip-line"></i> Download Images ZIP
+            </button>
+          </div>
+
+          <!-- Batch Export section (visible when 2+ documents are present) -->
+          <div class="batch-export-section hidden" id="sidebar-batch-export">
+            <div class="batch-export-divider"></div>
+            <div class="batch-export-header">
+              <i class="ri-archive-line"></i>
+              <h4>Export All Documents</h4>
+            </div>
+            <p class="export-sidebar-hint">Bundle all queued documents into a single archive:</p>
+            <div class="sidebar-export-buttons">
+              <button class="btn btn-success btn-block" id="btn-batch-export-auto" onclick="exportBatch('auto')">
+                <i class="ri-folder-zip-line"></i> Export All (Original Formats)
+              </button>
+              <button class="btn btn-accent btn-block" id="btn-batch-export-epub" onclick="exportBatch('epub')">
+                <i class="ri-book-open-line"></i> Export All as EPUBs ZIP
+              </button>
+              <button class="btn btn-secondary btn-block" id="btn-batch-export-pdf" onclick="exportBatch('pdf')">
+                <i class="ri-file-pdf-2-line"></i> Export All as PDFs ZIP
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </aside>
+
+      <!-- Right Column: Progress, Live Slider Preview, & Pages Gallery -->
+      <div class="content-area">
+
+        <!-- Progress Banner (Visible during processing) -->
+        <div class="card progress-card hidden" id="progress-card">
+          <div class="progress-info">
+            <div>
+              <h3 id="progress-status-text">Colorizing Manga Pages...</h3>
+              <p id="progress-subtext">Using Google Nano Banana Engine</p>
+            </div>
+            <div class="progress-info-right">
+              <span class="progress-counter" id="progress-counter-text">0 / 0</span>
+              <button class="btn btn-danger btn-sm" id="btn-cancel-colorize" onclick="cancelColorization()">
+                <i class="ri-close-circle-line"></i> Cancel
+              </button>
+            </div>
+          </div>
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- Before / After Interactive Split Comparison Header -->
+        <div class="card split-preview-card hidden" id="split-preview-card">
+          <div class="card-header space-between">
+            <div class="header-left">
+              <i class="ri-drag-move-fill"></i>
+              <h3>Interactive Before / After Comparator</h3>
+            </div>
+            <div class="header-right">
+              <span class="badge" id="preview-page-title">Page 1</span>
+              <button class="btn btn-secondary btn-sm" onclick="previewCurrentPage()">
+                <i class="ri-refresh-line"></i> Re-Preview with Settings
+              </button>
+              <button class="btn-icon btn-danger-icon" title="Delete this page" onclick="deleteCurrentPreviewPage(event)">
+                <i class="ri-delete-bin-line"></i>
+              </button>
+              <button class="btn-icon" onclick="closeSplitPreview()"><i class="ri-close-line"></i></button>
+            </div>
+          </div>
+
+          <div class="split-slider-wrapper">
+            <div class="split-image-container" id="split-container">
+              <!-- Colorized Base Image (Bottom/Right) -->
+              <img id="split-img-colorized" src="" alt="Colorized Page" />
+              
+              <!-- Original B&W Overlay (Top/Left - Clipped by Slider) -->
+              <div class="split-image-overlay" id="split-overlay">
+                <img id="split-img-original" src="" alt="Original B&W Page" />
+              </div>
+
+              <!-- Slider Handle -->
+              <div class="split-handle" id="split-handle">
+                <div class="split-handle-line"></div>
+                <div class="split-handle-button">
+                  <i class="ri-code-line"></i>
+                </div>
+              </div>
+
+              <!-- Page Labels -->
+              <span class="split-label label-left">Black & White</span>
+              <span class="split-label label-right">Colorized AI</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Export & Download Banner (Visible when completed) -->
+        <div class="card export-card hidden" id="export-card">
+          <div class="export-content">
+            <div class="export-icon">
+              <i class="ri-checkbox-circle-fill"></i>
+            </div>
+            <div>
+              <h3>Colorization Complete!</h3>
+              <p>Download your colorized manga in your preferred format:</p>
+            </div>
+          </div>
+          <div class="export-actions-group">
+            <button class="btn btn-success" id="btn-export-pdf" onclick="exportDocument('pdf')">
+              <i class="ri-file-pdf-2-line"></i> Export PDF
+            </button>
+            <button class="btn btn-accent" id="btn-export-epub" onclick="exportDocument('epub')">
+              <i class="ri-book-open-line"></i> Export EPUB
+            </button>
+            <button class="btn btn-secondary" id="btn-export-zip" onclick="exportDocument('zip')">
+              <i class="ri-file-zip-line"></i> Export ZIP
+            </button>
+            <button class="btn btn-outline" id="btn-export" onclick="exportDocument('auto')">
+              <i class="ri-download-cloud-2-line"></i> Original Format
+            </button>
+            <button class="btn btn-primary hidden" id="btn-export-batch-banner" onclick="exportBatch('auto')">
+              <i class="ri-archive-line"></i> Export All (<span id="banner-batch-count">0</span>) Documents ZIP
+            </button>
+          </div>
+        </div>
+
+        <!-- Pages Thumbnail Grid -->
+        <div class="card gallery-card">
+          <div class="card-header space-between">
+            <div class="header-left">
+              <i class="ri-gallery-grid-line"></i>
+              <h3>Manga Page Gallery</h3>
+            </div>
+            <div class="header-right">
+              <span class="gallery-counter"><strong id="colorized-count">0</strong> of <span id="gallery-total-count">0</span> Colorized</span>
+              <div class="gallery-quick-exports">
+                <button class="btn btn-secondary btn-sm" onclick="exportDocument('pdf')" title="Export as PDF">
+                  <i class="ri-file-pdf-2-line"></i> PDF
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="exportDocument('epub')" title="Export as EPUB">
+                  <i class="ri-book-open-line"></i> EPUB
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="exportDocument('zip')" title="Export as ZIP">
+                  <i class="ri-file-zip-line"></i> ZIP
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="pages-grid" id="pages-grid">
+            <!-- Page Card items rendered here -->
+          </div>
+        </div>
+
+      </div>
+
+    </main>
+
+  <!-- Notification Toast -->
+  <div class="toast hidden" id="toast">
+    <i class="ri-information-line" id="toast-icon"></i>
+    <span id="toast-message">Message text</span>
+  </div>
+
+  <!-- Main JavaScript File -->
+  <script src="app.js"></script>
+</body>
+</html>
