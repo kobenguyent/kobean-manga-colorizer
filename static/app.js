@@ -9,6 +9,9 @@ let currentPreviewPageIndex = 0;
 let isBatchColorizing = false;
 let batchQueuePoller = null;
 let selectedPages = new Set();
+let historyData = [];
+let currentHistoryFilter = "all";
+let currentHistorySearch = "";
 
 
 // Sub-model options per provider
@@ -69,29 +72,34 @@ document.addEventListener("DOMContentLoaded", () => {
     })
     .catch(() => {});
 
-  // Fetch recent sessions to populate the documents queue
+  // Fetch recent sessions to populate the documents queue and history badges
   fetch("/api/sessions")
     .then(res => res.ok ? res.json() : null)
     .then(data => {
-      if (data && data.sessions && data.sessions.length > 0) {
-        activeSessions = data.sessions;
-        renderDocumentQueue();
+      if (data && data.sessions) {
+        historyData = data.sessions;
+        updateHistoryBadges();
 
-        // Check if a batch is active on the server
-        fetch("/api/colorize/batch/status")
-          .then(res => res.ok ? res.json() : null)
-          .then(batchData => {
-            if (batchData && batchData.is_running) {
-              isBatchColorizing = true;
-              startBatchQueuePoller();
-              if (batchData.current_session_id) {
-                if (!currentSession || currentSession.session_id === batchData.current_session_id) {
-                  subscribeToProgressStream(batchData.current_session_id);
+        if (data.sessions.length > 0) {
+          activeSessions = data.sessions;
+          renderDocumentQueue();
+
+          // Check if a batch is active on the server
+          fetch("/api/colorize/batch/status")
+            .then(res => res.ok ? res.json() : null)
+            .then(batchData => {
+              if (batchData && batchData.is_running) {
+                isBatchColorizing = true;
+                startBatchQueuePoller();
+                if (batchData.current_session_id) {
+                  if (!currentSession || currentSession.session_id === batchData.current_session_id) {
+                    subscribeToProgressStream(batchData.current_session_id);
+                  }
                 }
               }
-            }
-          })
-          .catch(() => {});
+            })
+            .catch(() => {});
+        }
       }
     })
     .catch(() => {});
@@ -129,7 +137,16 @@ function startBatchQueuePoller() {
         const sessData = await sessRes.json();
         if (sessData && sessData.sessions) {
           activeSessions = sessData.sessions;
+          historyData = sessData.sessions;
+          updateHistoryBadges();
           renderDocumentQueue();
+
+          const histOverlay = document.getElementById("history-modal-overlay");
+          if (histOverlay && !histOverlay.classList.contains("hidden")) {
+            updateHistoryStatsBar();
+            renderHistoryList();
+          }
+
           if (currentSession) {
             const updatedCurr = activeSessions.find(s => s.session_id === currentSession.session_id);
             if (updatedCurr) {
@@ -221,8 +238,16 @@ function setupEventListeners() {
     }
   });
 
-  // Keyboard navigation for split comparator (ArrowLeft, ArrowRight, Escape)
+  // Keyboard navigation for split comparator & modal dismissal (Escape, ArrowLeft, ArrowRight)
   window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const histOverlay = document.getElementById("history-modal-overlay");
+      if (histOverlay && !histOverlay.classList.contains("hidden")) {
+        closeHistoryModal();
+        return;
+      }
+    }
+
     const splitCard = document.getElementById("split-preview-card");
     if (!splitCard || splitCard.classList.contains("hidden")) return;
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
@@ -1487,6 +1512,9 @@ async function deleteDocument(event, sessionId) {
 
     if (resp.ok) {
       activeSessions = activeSessions.filter(s => s.session_id !== sessionId);
+      historyData = historyData.filter(s => s.session_id !== sessionId);
+      updateHistoryBadges();
+      updateHistoryStatsBar();
 
       if (currentSession && currentSession.session_id === sessionId) {
         if (activeSessions.length > 0) {
@@ -1639,3 +1667,327 @@ function showToast(message, type = "info") {
     toast.classList.add("hidden");
   }, 4000);
 }
+
+// ─── Document & Processing History Modal Logic ─────────────────────────────
+
+function openHistoryModal() {
+  const overlay = document.getElementById("history-modal-overlay");
+  if (!overlay) return;
+  overlay.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+
+  loadHistoryData();
+
+  setTimeout(() => {
+    const input = document.getElementById("history-search-input");
+    if (input) input.focus();
+  }, 100);
+}
+
+function closeHistoryModal() {
+  const overlay = document.getElementById("history-modal-overlay");
+  if (!overlay) return;
+  overlay.classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+function handleHistoryOverlayClick(event) {
+  if (event.target && event.target.id === "history-modal-overlay") {
+    closeHistoryModal();
+  }
+}
+
+function updateHistoryBadges() {
+  const count = historyData ? historyData.length : 0;
+  const badge = document.getElementById("history-badge-count");
+  if (badge) badge.innerText = count;
+
+  const idleContainer = document.getElementById("idle-history-container");
+  const idleCount = document.getElementById("idle-history-count");
+  if (idleContainer && idleCount) {
+    if (count > 0) {
+      idleCount.innerText = count;
+      idleContainer.classList.remove("hidden");
+    } else {
+      idleContainer.classList.add("hidden");
+    }
+  }
+}
+
+async function loadHistoryData(forceRefresh = false) {
+  const listContainer = document.getElementById("history-list-container");
+  if (forceRefresh && listContainer) {
+    listContainer.innerHTML = `
+      <div class="history-loading-placeholder">
+        <i class="ri-loader-4-line spin" style="font-size: 2rem; color: var(--accent-cyan);"></i>
+        <span>Refreshing document sessions...</span>
+      </div>
+    `;
+  }
+
+  try {
+    const res = await fetch("/api/sessions");
+    if (!res.ok) throw new Error("Failed to load sessions");
+    const data = await res.json();
+    historyData = data.sessions || [];
+
+    // Keep activeSessions in sync if needed
+    if (historyData.length > 0 && (!activeSessions || activeSessions.length === 0)) {
+      activeSessions = historyData;
+      renderDocumentQueue();
+    }
+
+    updateHistoryBadges();
+    updateHistoryStatsBar();
+    renderHistoryList();
+  } catch (err) {
+    if (listContainer) {
+      listContainer.innerHTML = `
+        <div class="history-empty-state">
+          <i class="ri-error-warning-line history-empty-icon" style="color: #ef4444;"></i>
+          <h4 class="history-empty-title">Unable to Load History</h4>
+          <p class="history-empty-desc">${err.message}</p>
+          <button class="btn btn-secondary btn-sm" onclick="loadHistoryData(true)">Try Again</button>
+        </div>
+      `;
+    }
+  }
+}
+
+function updateHistoryStatsBar() {
+  const total = historyData.length;
+  const completed = historyData.filter(s => s.status === "completed").length;
+  const processing = historyData.filter(s => s.status === "processing").length;
+  const idle = historyData.filter(s => s.status !== "completed" && s.status !== "processing").length;
+
+  const totalEl = document.getElementById("hist-stat-total");
+  const compEl = document.getElementById("hist-stat-completed");
+  const procEl = document.getElementById("hist-stat-processing");
+  const idleEl = document.getElementById("hist-stat-idle");
+
+  if (totalEl) totalEl.innerText = total;
+  if (compEl) compEl.innerText = completed;
+  if (procEl) procEl.innerText = processing;
+  if (idleEl) idleEl.innerText = idle;
+
+  const tabAll = document.getElementById("hist-tab-all-count");
+  const tabComp = document.getElementById("hist-tab-completed-count");
+  const tabProc = document.getElementById("hist-tab-proc-count");
+  const tabIdle = document.getElementById("hist-tab-idle-count");
+
+  if (tabAll) tabAll.innerText = total;
+  if (tabComp) tabComp.innerText = completed;
+  if (tabProc) tabProc.innerText = processing;
+  if (tabIdle) tabIdle.innerText = idle;
+
+  const batchExportBtn = document.getElementById("btn-history-batch-export");
+  if (batchExportBtn) {
+    batchExportBtn.disabled = completed === 0;
+  }
+}
+
+function setHistoryFilter(filter, tabBtn) {
+  currentHistoryFilter = filter;
+  const tabs = document.querySelectorAll(".history-tab-btn");
+  tabs.forEach(t => t.classList.remove("active"));
+  if (tabBtn) tabBtn.classList.add("active");
+  renderHistoryList();
+}
+
+function filterHistoryList() {
+  const input = document.getElementById("history-search-input");
+  const clearBtn = document.getElementById("btn-history-clear-search");
+  currentHistorySearch = input ? input.value.trim().toLowerCase() : "";
+
+  if (clearBtn) {
+    if (currentHistorySearch) {
+      clearBtn.classList.remove("hidden");
+    } else {
+      clearBtn.classList.add("hidden");
+    }
+  }
+
+  renderHistoryList();
+}
+
+function clearHistorySearch() {
+  const input = document.getElementById("history-search-input");
+  if (input) input.value = "";
+  filterHistoryList();
+}
+
+function renderHistoryList() {
+  const container = document.getElementById("history-list-container");
+  const summaryEl = document.getElementById("history-footer-summary");
+  if (!container) return;
+
+  // Filter items
+  let filtered = historyData.filter(item => {
+    // Status filter
+    if (currentHistoryFilter === "completed" && item.status !== "completed") return false;
+    if (currentHistoryFilter === "processing" && item.status !== "processing") return false;
+    if (currentHistoryFilter === "idle" && (item.status === "completed" || item.status === "processing")) return false;
+
+    // Search query filter
+    if (currentHistorySearch) {
+      const name = (item.filename || "").toLowerCase();
+      if (!name.includes(currentHistorySearch)) return false;
+    }
+
+    return true;
+  });
+
+  if (summaryEl) {
+    summaryEl.innerText = `Showing ${filtered.length} of ${historyData.length} documents`;
+  }
+
+  if (filtered.length === 0) {
+    let emptyMsg = "No documents uploaded or processed yet.";
+    let emptyDesc = "Drag & drop manga files onto the upload area to start colorizing!";
+    if (currentHistorySearch || currentHistoryFilter !== "all") {
+      emptyMsg = "No matching documents found.";
+      emptyDesc = "Try adjusting your search query or status filter tab above.";
+    }
+
+    container.innerHTML = `
+      <div class="history-empty-state">
+        <i class="ri-folder-history-line history-empty-icon"></i>
+        <h4 class="history-empty-title">${emptyMsg}</h4>
+        <p class="history-empty-desc">${emptyDesc}</p>
+        ${currentHistorySearch || currentHistoryFilter !== "all" ? `
+          <button class="btn btn-secondary btn-sm" onclick="clearHistorySearch(); setHistoryFilter('all', document.querySelector('.history-tab-btn[data-filter=all]'));">
+            Reset Filters
+          </button>
+        ` : ""}
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = "";
+
+  filtered.forEach(item => {
+    const isCurrent = currentSession && currentSession.session_id === item.session_id;
+    const totalPages = item.total_pages || 0;
+    const processedPages = item.processed_count || 0;
+    const pct = totalPages > 0 ? Math.min(100, Math.round((processedPages / totalPages) * 100)) : 0;
+
+    const fn = (item.filename || "").toLowerCase();
+    let iconHTML = '<i class="ri-image-fill" style="color: #06b6d4;"></i>';
+    if (fn.endsWith(".epub")) {
+      iconHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
+    } else if (fn.endsWith(".pdf")) {
+      iconHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
+    } else if (fn.endsWith(".zip")) {
+      iconHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
+    }
+
+    let statusBadgeClass = "status-pending";
+    let statusText = "Queued";
+    if (item.status === "completed") {
+      statusBadgeClass = "status-colorized";
+      statusText = "Completed";
+    } else if (item.status === "processing") {
+      statusBadgeClass = "status-processing";
+      statusText = `<i class="ri-loader-4-line spin"></i> Processing (${processedPages}/${totalPages})`;
+    }
+
+    const row = document.createElement("div");
+    row.className = `history-item ${isCurrent ? "is-current" : ""}`;
+    row.id = `history-item-${item.session_id}`;
+
+    row.innerHTML = `
+      <div class="history-item-icon">
+        ${iconHTML}
+      </div>
+      <div class="history-item-details">
+        <div class="history-item-title-row">
+          <span class="history-item-title" title="${item.filename}" onclick="switchFromHistory('${item.session_id}')">
+            ${item.filename}
+          </span>
+          ${isCurrent ? '<span class="history-active-tag">Active</span>' : ''}
+        </div>
+        <div class="history-item-meta">
+          <span class="page-status-badge ${statusBadgeClass}" style="font-size: 0.7rem; padding: 2px 8px;">
+            ${statusText}
+          </span>
+          <span>${processedPages} / ${totalPages} pages (${pct}%)</span>
+          <div class="history-progress-track">
+            <div class="history-progress-fill" style="width: ${pct}%;"></div>
+          </div>
+        </div>
+      </div>
+      <div class="history-item-actions">
+        <button class="btn btn-secondary btn-sm btn-history-open" onclick="switchFromHistory('${item.session_id}')" title="Open and view in workspace">
+          <i class="ri-arrow-right-line"></i> Open
+        </button>
+        ${item.status === "completed" ? `
+          <button class="btn btn-secondary btn-sm" onclick="exportDocumentFromHistory('${item.session_id}')" title="Export colorized document">
+            <i class="ri-download-cloud-2-line"></i> Export
+          </button>
+        ` : ""}
+        <button class="btn-icon btn-danger-icon" onclick="deleteFromHistory(event, '${item.session_id}')" title="Delete document session">
+          <i class="ri-delete-bin-line"></i>
+        </button>
+      </div>
+    `;
+
+    container.appendChild(row);
+  });
+}
+
+async function switchFromHistory(sessionId) {
+  closeHistoryModal();
+  await switchActiveDocument(sessionId);
+}
+
+async function exportDocumentFromHistory(sessionId, format = "auto") {
+  const sess = historyData.find(s => s.session_id === sessionId) || (currentSession?.session_id === sessionId ? currentSession : null);
+  const docName = sess ? sess.filename : "document";
+
+  showToast(`Preparing export for "${docName}"...`, "info");
+
+  try {
+    const queryParam = format && format !== "auto" ? `?format=${encodeURIComponent(format)}` : "";
+    const resp = await fetch(`/api/export/${sessionId}${queryParam}`, {
+      method: "POST"
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.download_url) {
+      showToast(`Exported "${data.filename}" successfully! Downloading...`, "success");
+      const a = document.createElement("a");
+      a.href = data.download_url;
+      a.download = data.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } else {
+      showToast(data.detail || "Export failed.", "error");
+    }
+  } catch (err) {
+    showToast(`Export error: ${err.message}`, "error");
+  }
+}
+
+async function deleteFromHistory(event, sessionId) {
+  if (event) event.stopPropagation();
+
+  await deleteDocument(event, sessionId);
+
+  // Refresh data in history list
+  loadHistoryData(false);
+}
+
+// Make history handlers globally available
+window.openHistoryModal = openHistoryModal;
+window.closeHistoryModal = closeHistoryModal;
+window.handleHistoryOverlayClick = handleHistoryOverlayClick;
+window.loadHistoryData = loadHistoryData;
+window.setHistoryFilter = setHistoryFilter;
+window.filterHistoryList = filterHistoryList;
+window.clearHistorySearch = clearHistorySearch;
+window.switchFromHistory = switchFromHistory;
+window.exportDocumentFromHistory = exportDocumentFromHistory;
+window.deleteFromHistory = deleteFromHistory;
+

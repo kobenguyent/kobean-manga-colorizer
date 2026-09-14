@@ -41,6 +41,9 @@
     </div>
 
     <div class="header-status">
+      <button class="btn btn-secondary btn-sm header-history-btn" id="btn-open-history" onclick="openHistoryModal()" title="View processing and document history">
+        <i class="ri-history-line"></i> History <span class="badge badge-accent" id="history-badge-count">0</span>
+      </button>
       <span class="badge badge-model active" id="active-model-badge">
         <i class="ri-dna-line"></i> ResNeXt Deep Generator
       </span>
@@ -68,6 +71,11 @@
           <button class="btn btn-primary" type="button" id="btn-select-files">
             <i class="ri-file-add-line"></i> Select Files (Multiple Supported)
           </button>
+          <div class="idle-history-container hidden" id="idle-history-container" style="margin-top: 1rem;">
+            <button class="btn btn-secondary btn-sm" type="button" onclick="openHistoryModal()">
+              <i class="ri-history-line"></i> View History (<span id="idle-history-count">0</span> loaded)
+            </button>
+          </div>
         </div>
 
         <!-- Uploading & Extraction In-Progress State -->
@@ -98,7 +106,12 @@
               <i class="ri-folders-line"></i>
               <h3>Documents Queue</h3>
             </div>
-            <span class="badge badge-accent" id="doc-queue-badge">1 Document</span>
+            <div class="header-right" style="display: flex; gap: 8px; align-items: center;">
+              <button class="btn btn-secondary btn-xs" onclick="openHistoryModal()" title="View full document history" style="font-size: 0.72rem; padding: 2px 7px;">
+                <i class="ri-history-line"></i> History
+              </button>
+              <span class="badge badge-accent" id="doc-queue-badge">1 Document</span>
+            </div>
           </div>
 
           <!-- Active Document Highlight -->
@@ -425,10 +438,118 @@
             <!-- Page Card items rendered here -->
           </div>
         </div>
+      </div>
+    </section>
+  </main>
 
+  <!-- History Modal Overlay -->
+  <div class="modal-overlay hidden" id="history-modal-overlay" onclick="handleHistoryOverlayClick(event)">
+    <div class="history-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="history-modal-title">
+      
+      <!-- Modal Header -->
+      <div class="history-modal-header">
+        <div class="history-modal-header-left">
+          <div class="history-modal-icon">
+            <i class="ri-history-line"></i>
+          </div>
+          <div>
+            <h2 id="history-modal-title" class="history-modal-title">Processing & Document History</h2>
+            <p class="history-modal-subtitle">Browse, switch between, export, or manage loaded manga sessions</p>
+          </div>
+        </div>
+        <button class="btn-icon history-close-btn" onclick="closeHistoryModal()" title="Close history (Esc)">
+          <i class="ri-close-line"></i>
+        </button>
       </div>
 
-    </main>
+      <!-- Overview Stats Summary Bar -->
+      <div class="history-stats-bar">
+        <div class="history-stat-card">
+          <div class="history-stat-icon total"><i class="ri-folders-line"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-total">0</span>
+            <span class="history-stat-label">Total Documents</span>
+          </div>
+        </div>
+        <div class="history-stat-card">
+          <div class="history-stat-icon completed"><i class="ri-checkbox-circle-line"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-completed">0</span>
+            <span class="history-stat-label">Completed</span>
+          </div>
+        </div>
+        <div class="history-stat-card">
+          <div class="history-stat-icon processing"><i class="ri-loader-4-line spin"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-processing">0</span>
+            <span class="history-stat-label">In Progress</span>
+          </div>
+        </div>
+        <div class="history-stat-card">
+          <div class="history-stat-icon idle"><i class="ri-time-line"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-idle">0</span>
+            <span class="history-stat-label">Queued / Idle</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls / Filter Toolbar -->
+      <div class="history-toolbar">
+        <div class="history-search-wrapper">
+          <i class="ri-search-line history-search-icon"></i>
+          <input type="text" id="history-search-input" placeholder="Search by document title..." oninput="filterHistoryList()" />
+          <button class="btn-icon history-search-clear hidden" id="btn-history-clear-search" onclick="clearHistorySearch()" title="Clear search">
+            <i class="ri-close-circle-line"></i>
+          </button>
+        </div>
+
+        <div class="history-filter-tabs">
+          <button class="history-tab-btn active" data-filter="all" onclick="setHistoryFilter('all', this)">
+            All (<span id="hist-tab-all-count">0</span>)
+          </button>
+          <button class="history-tab-btn" data-filter="completed" onclick="setHistoryFilter('completed', this)">
+            Completed (<span id="hist-tab-completed-count">0</span>)
+          </button>
+          <button class="history-tab-btn" data-filter="processing" onclick="setHistoryFilter('processing', this)">
+            Processing (<span id="hist-tab-proc-count">0</span>)
+          </button>
+          <button class="history-tab-btn" data-filter="idle" onclick="setHistoryFilter('idle', this)">
+            Queued (<span id="hist-tab-idle-count">0</span>)
+          </button>
+        </div>
+
+        <button class="btn btn-secondary btn-sm history-refresh-btn" onclick="loadHistoryData(true)" title="Refresh history list">
+          <i class="ri-refresh-line"></i> Refresh
+        </button>
+      </div>
+
+      <!-- Document Sessions List Container -->
+      <div class="history-list-container" id="history-list-container">
+        <!-- Rendered dynamically -->
+        <div class="history-loading-placeholder">
+          <i class="ri-loader-4-line spin"></i>
+          <span>Loading session history...</span>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="history-modal-footer">
+        <div class="history-footer-summary" id="history-footer-summary">
+          Showing 0 documents
+        </div>
+        <div class="history-footer-actions">
+          <button class="btn btn-secondary btn-sm" onclick="exportBatch('auto')" id="btn-history-batch-export" title="Export all colorized documents as a single ZIP archive">
+            <i class="ri-archive-line"></i> Export All Completed ZIP
+          </button>
+          <button class="btn btn-primary btn-sm" onclick="closeHistoryModal()">
+            Close
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
 
   <!-- Notification Toast -->
   <div class="toast hidden" id="toast">
