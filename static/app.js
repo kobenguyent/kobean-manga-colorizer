@@ -598,6 +598,7 @@ function updateColorizedCount() {
 
 function renderGalleryGrid() {
   const grid = document.getElementById("pages-grid");
+  if (!grid || !currentSession || !currentSession.pages) return;
   grid.innerHTML = "";
 
   currentSession.pages.forEach((page, idx) => {
@@ -607,9 +608,10 @@ function renderGalleryGrid() {
     card.id = `page-card-${idx}`;
     card.onclick = () => openSplitPreview(idx);
 
-    const thumbUrl = page.colorized_url || `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
-    
+    const origUrl = `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
+    const thumbUrl = page.colorized_url || origUrl;
     const dimText = (page.width && page.height) ? `${page.width} × ${page.height}` : "";
+
     card.innerHTML = `
       <div class="page-thumb-container">
         <label class="page-select-checkbox ${isSelected ? 'checked' : ''}" onclick="event.stopPropagation()" title="Select/Deselect page for colorization">
@@ -708,9 +710,31 @@ function updateSelectionUI() {
     }
   }
 
+  const pendingCount = currentSession.pages.filter((p, i) => selectedPages.has(i) && p.status !== "colorized").length;
+
+  // Single button in gallery header to change pending to colorized
+  const btnGallery = document.getElementById("btn-gallery-colorize");
+  if (btnGallery) {
+    if (isBatchColorizing) {
+      btnGallery.innerHTML = '<i class="ri-loader-4-line spin"></i> Colorizing Pages...';
+      btnGallery.disabled = true;
+    } else if (count === 0) {
+      btnGallery.innerHTML = '<i class="ri-checkbox-blank-line"></i> Select Pages to Colorize';
+      btnGallery.disabled = true;
+    } else if (pendingCount > 0) {
+      btnGallery.innerHTML = `<i class="ri-magic-line"></i> Colorize (${pendingCount}) Pending Page${pendingCount > 1 ? 's' : ''}`;
+      btnGallery.disabled = false;
+    } else {
+      btnGallery.innerHTML = `<i class="ri-refresh-line"></i> Re-Colorize (${count}) Selected`;
+      btnGallery.disabled = false;
+    }
+  }
+
   const btnStart = document.getElementById("btn-start-colorize");
   if (btnStart) {
-    if (count === 0) {
+    if (isBatchColorizing) {
+      btnStart.disabled = true;
+    } else if (count === 0) {
       btnStart.innerHTML = '<i class="ri-checkbox-blank-line"></i> Select Pages to Colorize';
       btnStart.disabled = true;
     } else if (count === total) {
@@ -741,6 +765,9 @@ async function startColorization() {
     return;
   }
 
+  const pendingCount = currentSession.pages.filter((p, i) => selectedPages.has(i) && p.status !== "colorized").length;
+  const isForceReprocess = pendingCount === 0;
+
   const payload = {
     session_id: currentSession.session_id,
     model_provider: activeProvider,
@@ -750,13 +777,20 @@ async function startColorization() {
     saturation: saturation,
     contrast: 1.1,
     line_preserve: linePreserve,
-    selected_pages: pagesToColorize
+    selected_pages: pagesToColorize,
+    force_reprocess: isForceReprocess
   };
 
   // UI state updates
   document.getElementById("progress-card").classList.remove("hidden");
   document.getElementById("export-card").classList.add("hidden");
-  document.getElementById("btn-start-colorize").disabled = true;
+  const btnStart = document.getElementById("btn-start-colorize");
+  if (btnStart) btnStart.disabled = true;
+  const btnGallery = document.getElementById("btn-gallery-colorize");
+  if (btnGallery) {
+    btnGallery.innerHTML = '<i class="ri-loader-4-line spin"></i> Colorizing Pages...';
+    btnGallery.disabled = true;
+  }
 
   const providerNames = {
     resnext_generator: "ResNeXt Deep Generator",
@@ -780,11 +814,13 @@ async function startColorization() {
     } else {
       const err = await resp.json();
       showToast(err.detail || "Failed to start colorization.", "error");
-      document.getElementById("btn-start-colorize").disabled = false;
+      if (btnStart) btnStart.disabled = false;
+      updateSelectionUI();
     }
   } catch (err) {
     showToast(`Error: ${err.message}`, "error");
-    document.getElementById("btn-start-colorize").disabled = false;
+    if (btnStart) btnStart.disabled = false;
+    updateSelectionUI();
   }
 }
 
@@ -832,6 +868,7 @@ function subscribeToProgressStream(sessionId = null) {
         }
 
         updateColorizedCount();
+        updateSelectionUI();
       }
 
       // Update activeSessions and sidebar badge directly for fast live feedback
@@ -1017,7 +1054,6 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
       page.colorized_url = data.colorized_url;
       const ts = Date.now();
       
-      // Update page card thumbnail in gallery
       const imgElem = document.getElementById(`page-img-${pageIdx}`);
       if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
 
@@ -1026,6 +1062,9 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
         badge.className = "page-status-badge status-colorized";
         badge.innerText = "COLORIZED";
       }
+
+      updateColorizedCount();
+      updateSelectionUI();
 
       // Update split comparator images directly
       const origImg = document.getElementById("split-img-original");

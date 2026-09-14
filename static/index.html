@@ -312,20 +312,6 @@
             </div>
             <div class="header-right">
               <span class="badge" id="preview-page-title">Page 1</span>
-              
-              <!-- Quick View Mode Switcher: B&W | Split | Color -->
-              <div class="view-mode-toggle" id="view-mode-toggle">
-                <button type="button" class="view-mode-btn" id="btn-view-bw" onclick="setComparatorView('bw')" title="Switch to 100% Black & White">
-                  <i class="ri-contrast-line"></i> B&W
-                </button>
-                <button type="button" class="view-mode-btn active" id="btn-view-split" onclick="setComparatorView('split')" title="Switch to Split Comparison">
-                  <i class="ri-separator"></i> Split
-                </button>
-                <button type="button" class="view-mode-btn" id="btn-view-color" onclick="setComparatorView('color')" title="Switch to 100% Colorized AI">
-                  <i class="ri-palette-line"></i> Color
-                </button>
-              </div>
-
               <button class="btn btn-primary btn-sm" id="btn-colorize-page" onclick="previewCurrentPage()">
                 <i class="ri-sparkles-line"></i> Colorize Page
               </button>
@@ -401,6 +387,7 @@
             <div class="header-left">
               <i class="ri-gallery-grid-line"></i>
               <h3>Manga Page Gallery</h3>
+              <span class="gallery-counter"><strong id="colorized-count">0</strong> of <span id="gallery-total-count">0</span> Colorized</span>
               <div class="gallery-selection-controls">
                 <label class="select-all-label" title="Select or Deselect All Pages">
                   <input type="checkbox" id="select-all-pages-checkbox" checked onchange="toggleSelectAllPages(this.checked)">
@@ -409,8 +396,13 @@
                 </label>
               </div>
             </div>
+
             <div class="header-right">
-              <span class="gallery-counter"><strong id="colorized-count">0</strong> of <span id="gallery-total-count">0</span> Colorized</span>
+              <!-- Single Button to Colorize Pending Pages -->
+              <button class="btn btn-accent btn-sm" id="btn-gallery-colorize" onclick="startColorization()" title="Start colorizing pending pages">
+                <i class="ri-magic-line"></i>
+                <span id="gallery-colorize-btn-text">Colorize Pending Pages</span>
+              </button>
               <div class="gallery-quick-exports">
                 <button class="btn btn-secondary btn-sm" onclick="exportDocument('pdf')" title="Export as PDF">
                   <i class="ri-file-pdf-2-line"></i> PDF

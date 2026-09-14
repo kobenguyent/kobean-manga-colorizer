@@ -804,44 +804,7 @@ body {
   box-shadow: 0 0 16px rgba(6, 182, 212, 0.8);
 }
 
-/* Comparator View Mode Switcher (B&W | Split | Color) */
-.view-mode-toggle {
-  display: inline-flex;
-  align-items: center;
-  background: rgba(15, 23, 42, 0.85);
-  border: 1px solid var(--bg-card-border);
-  border-radius: var(--radius-full);
-  padding: 3px;
-  gap: 2px;
-}
 
-.view-mode-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.3rem 0.7rem;
-  border-radius: var(--radius-full);
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.view-mode-btn:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.view-mode-btn.active {
-  color: #000;
-  background: var(--accent-cyan);
-  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
-}
 
 /* Export Banner */
 .export-card {
@@ -1000,7 +963,61 @@ body {
   color: #fff;
 }
 
-/* Gallery Grid */
+/* Gallery Header Bar */
+.gallery-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+
+.gallery-counter {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-full, 9999px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-weight: 500;
+}
+
+.gallery-counter strong {
+  color: var(--accent-cyan);
+}
+
+/* Primary Gallery Colorize Action Button */
+#btn-gallery-colorize {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 0.45rem 1.1rem;
+  background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);
+  color: #0b1120;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#btn-gallery-colorize:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 0 24px rgba(6, 182, 212, 0.8), 0 4px 12px rgba(0, 0, 0, 0.3);
+  filter: brightness(1.1);
+}
+
+#btn-gallery-colorize:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+  filter: grayscale(0.6);
+}
+
+/* Gallery Grid & Cards */
 .pages-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -1122,7 +1139,7 @@ body {
   font-size: 0.7rem;
   font-weight: 700;
   backdrop-filter: blur(8px);
-  z-index: 2;
+  z-index: 6;
 }
 
 .page-delete-btn {

@@ -148,6 +148,7 @@ class ColorizeRequest(BaseModel):
     contrast: float = 1.1
     line_preserve: float = 0.85
     selected_pages: Optional[List[int]] = None
+    force_reprocess: bool = False
 
 class BatchColorizeRequest(BaseModel):
     session_ids: List[str]
@@ -404,8 +405,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
         color_filename = page_info["filename"]
         output_path = str(colorized_dir / color_filename)
 
-        # Skip if page is already colorized and output file exists on disk
-        if page_info.get("status") == "colorized" and Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+        # Skip if page is already colorized and output file exists on disk (unless force_reprocess is True)
+        if not getattr(req, "force_reprocess", False) and page_info.get("status") == "colorized" and Path(output_path).exists() and Path(output_path).stat().st_size > 0:
             if not page_info.get("colorized_url"):
                 page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
             continue
