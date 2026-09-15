@@ -514,6 +514,22 @@ function setupEventListeners() {
   const btnChangeFile = document.getElementById("btn-change-file");
   if (btnChangeFile) btnChangeFile.addEventListener("click", resetUpload);
 
+  // Combined Export Preset & Grayscale sync
+  const combinedPreset = document.getElementById("combined-preset-select");
+  const combinedGray = document.getElementById("combined-grayscale-check");
+  if (combinedPreset && combinedGray) {
+    combinedPreset.addEventListener("change", () => {
+      if (combinedPreset.value === "colorsoft" && combinedGray.checked) {
+        combinedGray.checked = false;
+      }
+    });
+    combinedGray.addEventListener("change", () => {
+      if (combinedGray.checked && combinedPreset.value === "colorsoft") {
+        combinedPreset.value = "kindle";
+      }
+    });
+  }
+
   // Setup Split Slider Dragging
   setupSplitSlider();
 }
@@ -1931,14 +1947,49 @@ async function exportCombined(format = "epub") {
     : (currentSession ? [currentSession] : []);
 
   if (sessionList.length === 0 && Array.isArray(historyData) && historyData.length > 0) {
-    sessionList = historyData;
+    sessionList = historyData.filter(s => (s.total_pages > 0 || (s.pages && s.pages.length > 0)));
   }
 
   const sessionIds = sessionList.map(s => s.session_id).filter(Boolean);
   const title = document.getElementById("combined-title-input")?.value?.trim()
     || "Colorized Manga Collection";
 
-  const fmtLabel = format === "pdf" ? "Single PDF" : (format === "mobi" ? "Single Kindle MOBI" : "Single EPUB");
+  const chunkVal = document.getElementById("combined-chunk-select")?.value || "none";
+  let chunkBy = "none";
+  let chunkSize = 3;
+  if (chunkVal === "volumes_3") {
+    chunkBy = "volumes";
+    chunkSize = 3;
+  } else if (chunkVal === "volumes_5") {
+    chunkBy = "volumes";
+    chunkSize = 5;
+  } else if (chunkVal === "size_500") {
+    chunkBy = "size_mb";
+    chunkSize = 500;
+  }
+
+  const presetVal = document.getElementById("combined-preset-select")?.value || "colorsoft";
+  let maxDim = 1600;
+  let jpegQual = 80;
+  let colorsoftTune = false;
+  if (presetVal === "colorsoft") {
+    maxDim = 1600;
+    jpegQual = 80;
+    colorsoftTune = true;
+  } else if (presetVal === "kindle") {
+    maxDim = 1600;
+    jpegQual = 80;
+  } else if (presetVal === "tablet") {
+    maxDim = 1920;
+    jpegQual = 85;
+  } else if (presetVal === "original") {
+    maxDim = 0;
+    jpegQual = 90;
+  }
+
+  const isGrayscale = Boolean(document.getElementById("combined-grayscale-check")?.checked);
+
+  const fmtLabel = format === "pdf" ? "Single PDF" : (format === "mobi" ? "Kindle MOBI" : "Single EPUB");
 
   const epubBtn = document.getElementById("btn-combined-epub");
   const mobiBtn = document.getElementById("btn-combined-mobi");
@@ -1986,7 +2037,17 @@ async function exportCombined(format = "epub") {
     const resp = await fetch("/api/export/combined", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_ids: sessionIds, format, title })
+      body: JSON.stringify({
+        session_ids: sessionIds,
+        format,
+        title,
+        chunk_by: chunkBy,
+        chunk_size: chunkSize,
+        max_dimension: maxDim,
+        jpeg_quality: jpegQual,
+        grayscale: isGrayscale,
+        colorsoft_tune: colorsoftTune
+      })
     });
 
     const data = await resp.json();

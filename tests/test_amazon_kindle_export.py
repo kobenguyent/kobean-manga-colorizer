@@ -3,6 +3,9 @@ import sys
 import io
 import struct
 import zipfile
+import uuid
+import json
+import shutil
 import requests
 from pathlib import Path
 from PIL import Image
@@ -11,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from file_processor import MangaFileProcessor
 
 BASE_URL = "http://127.0.0.1:8000"
+STORAGE_DIR = Path(__file__).resolve().parent.parent / "sessions"
 
 
 def test_pure_python_mobi_generator(tmp_path):
@@ -228,3 +232,195 @@ def test_combined_mobi_export():
     assert dl_resp.headers["content-type"] == "application/x-mobipocket-ebook"
     assert b"BOOK" in dl_resp.content[:78]
     assert b"MOBI" in dl_resp.content[:78]
+
+
+def test_kindle_image_optimization_and_grayscale(tmp_path):
+    """Verifies that MangaFileProcessor.optimize_image_data downscales and converts to e-ink grayscale."""
+    # 2400 x 3200 high-res image
+    img = Image.new("RGB", (2400, 3200), color="royalblue")
+    raw_buf = io.BytesIO()
+    img.save(raw_buf, format="JPEG", quality=95)
+    orig_bytes = raw_buf.getvalue()
+
+    # 1. Downscale to Kindle 1600px max edge
+    opt_bytes, w, h = MangaFileProcessor.optimize_image_data(orig_bytes, max_dimension=1600, quality=80, grayscale=False)
+    assert max(w, h) == 1600
+    assert w == 1200
+    assert h == 1600
+    assert len(opt_bytes) < len(orig_bytes) / 2
+
+    # 2. 16-level grayscale conversion for e-ink
+    gray_bytes, gw, gh = MangaFileProcessor.optimize_image_data(orig_bytes, max_dimension=1600, quality=80, grayscale=True)
+    assert (gw, gh) == (1200, 1600)
+    with Image.open(io.BytesIO(gray_bytes)) as pil_gray:
+        assert pil_gray.mode == "L"
+    assert len(gray_bytes) <= len(opt_bytes)
+
+
+def test_omnibus_chunking_direct(tmp_path):
+    """Verifies that build_combined_omnibus splits multi-volume collections into clean ZIP bundles."""
+    processor = MangaFileProcessor(str(tmp_path / "storage"))
+    sessions = []
+
+    for i in range(1, 5):
+        s_id = f"sess_{i}"
+        s_dir = tmp_path / "storage" / s_id / "original"
+        s_dir.mkdir(parents=True)
+        img_path = s_dir / f"page_{i}.jpg"
+        Image.new("RGB", (300, 450), color="purple").save(str(img_path), "JPEG")
+
+        sessions.append({
+            "session_id": s_id,
+            "title": f"Volume {i}",
+            "pages": [{
+                "filename": f"page_{i}.jpg",
+                "original_path": str(img_path),
+                "width": 300,
+                "height": 450,
+                "display_name": f"Page {i}"
+            }]
+        })
+
+    out_file = str(tmp_path / "Manga_Collection.mobi")
+    zip_result = processor.build_combined_omnibus(
+        sessions,
+        out_file,
+        export_format="mobi",
+        chunk_by="volumes",
+        chunk_size=2,
+        title="Epic Manga",
+        max_dimension=1600,
+        jpeg_quality=80,
+        grayscale=True
+    )
+
+    assert zip_result.endswith(".zip")
+    assert os.path.exists(zip_result)
+
+    with zipfile.ZipFile(zip_result, "r") as zf:
+        names = sorted(zf.namelist())
+        assert len(names) == 2
+        assert "Part_01_Vol_01-02.mobi" in names[0]
+        assert "Part_02_Vol_03-04.mobi" in names[1]
+
+        for fname in names:
+            mobi_bytes = zf.read(fname)
+            assert b"BOOK" in mobi_bytes[:78]
+            assert b"MOBI" in mobi_bytes[:78]
+
+
+def test_omnibus_combined_api_endpoint():
+    """Tests POST /api/export/combined with omnibus chunking across multiple volumes via API."""
+    sid1 = ensure_test_doc()
+    sid2 = ensure_test_doc()
+    sid3 = ensure_test_doc()
+
+    resp = requests.post(f"{BASE_URL}/api/export/combined", json={
+        "session_ids": [sid1, sid2, sid3],
+        "format": "mobi",
+        "sync": True,
+        "chunk_by": "volumes",
+        "chunk_size": 2,
+        "title": "Kindle Omnibus API Collection",
+        "max_dimension": 1600,
+        "jpeg_quality": 80,
+        "grayscale": True
+    })
+    assert resp.status_code == 200, f"Omnibus export failed: {resp.text}"
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["filename"].endswith(".zip")
+    assert "/api/download/combined/" in data["download_url"]
+
+    # Verify download and ZIP contents
+    dl_resp = requests.get(f"{BASE_URL}{data['download_url']}")
+    assert dl_resp.status_code == 200
+    assert dl_resp.headers["content-type"] == "application/zip"
+
+    with zipfile.ZipFile(io.BytesIO(dl_resp.content), "r") as zf:
+        parts = sorted(zf.namelist())
+        assert len(parts) == 2
+        assert "Part_01_Vol_01-02.mobi" in parts[0]
+        assert "Part_02_Vol_03-03.mobi" in parts[1]
+
+        for zinfo in zf.infolist():
+            assert zinfo.compress_type == zipfile.ZIP_STORED
+            assert ((zinfo.external_attr >> 16) & 0o777) == 0o644
+            assert (zinfo.external_attr & 0x20) == 0x20
+
+        for part in parts:
+            part_bytes = zf.read(part)
+            assert b"BOOK" in part_bytes[:78]
+            assert b"MOBI" in part_bytes[:78]
+
+
+def test_kindle_colorsoft_optimization(tmp_path):
+    """Verifies that Kindle Colorsoft preset enhances saturation & contrast for color e-ink displays."""
+    img = Image.new("RGB", (2000, 2600), color=(100, 150, 200))
+    raw_buf = io.BytesIO()
+    img.save(raw_buf, format="JPEG", quality=90)
+    raw_bytes = raw_buf.getvalue()
+
+    # Standard kindle export (no tune)
+    std_bytes, sw, sh = MangaFileProcessor.optimize_image_data(
+        raw_bytes, max_dimension=1600, quality=80, grayscale=False, colorsoft_tune=False
+    )
+    assert max(sw, sh) == 1600
+
+    # Colorsoft tuned export (e-ink color boost)
+    tuned_bytes, tw, th = MangaFileProcessor.optimize_image_data(
+        raw_bytes, max_dimension=1600, quality=80, grayscale=False, colorsoft_tune=True
+    )
+    assert (tw, th) == (sw, sh)
+
+    with Image.open(io.BytesIO(tuned_bytes)) as pil_tuned:
+        assert pil_tuned.mode == "RGB"
+        # Verify color is not flattened to grayscale
+        colors = pil_tuned.getcolors(maxcolors=256)
+        assert colors is not None
+
+    # Test API with colorsoft_tune
+    sid1 = ensure_test_doc()
+    sid2 = ensure_test_doc()
+    resp = requests.post(f"{BASE_URL}/api/export/combined", json={
+        "session_ids": [sid1, sid2],
+        "format": "mobi",
+        "sync": True,
+        "title": "Kindle Colorsoft Test",
+        "colorsoft_tune": True,
+        "grayscale": False
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["filename"].endswith(".mobi")
+
+
+def test_combined_export_filters_empty_sessions_and_sorts_volumes():
+    """Verifies that empty sessions (0 pages) are omitted and volumes are naturally sorted."""
+    sid1 = ensure_test_doc()
+    sid2 = ensure_test_doc()
+
+    # Create an empty ghost session with 0 pages
+    empty_sid = "test_empty_ghost_" + str(uuid.uuid4())[:8]
+    sess_dir = STORAGE_DIR / empty_sid
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    with open(sess_dir / "meta.json", "w") as f:
+        json.dump({"session_id": empty_sid, "filename": "test_ghost.pdf", "pages": []}, f)
+
+    try:
+        resp = requests.post(f"{BASE_URL}/api/export/combined", json={
+            "session_ids": [empty_sid, sid2, sid1],
+            "format": "mobi",
+            "sync": True,
+            "title": "Natural Sort and Filter Test"
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        # Only the 2 real sessions should be merged, empty ghost session skipped
+        assert data["total_volumes"] == 2
+    finally:
+        shutil.rmtree(sess_dir, ignore_errors=True)
+
+

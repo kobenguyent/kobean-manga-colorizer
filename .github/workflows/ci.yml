@@ -76,6 +76,11 @@ jobs:
         run: |
           pytest -v
 
+      - name: Clean Up Test Artifacts
+        if: always()
+        run: |
+          python scripts/cleanup_test_data.py || true
+
       - name: Cleanup Background Server
         if: always()
         run: |

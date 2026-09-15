@@ -168,9 +168,20 @@ class BatchExportRequest(BaseModel):
 
 class CombinedExportRequest(BaseModel):
     session_ids: Optional[List[str]] = None
-    format: str = "epub"   # "epub" or "pdf"
+    format: str = "epub"   # "epub", "mobi", "pdf"
     title: Optional[str] = "Colorized Manga Collection"
     sync: Optional[bool] = False
+    chunk_by: Optional[str] = "none"       # "none", "volumes", "size_mb"
+    chunk_size: Optional[int] = 3          # e.g. 3 volumes or 400 MB
+    max_dimension: Optional[int] = 1600    # 1600 (Kindle optimal), 1920 (Tablet), 0 (Original)
+    jpeg_quality: Optional[int] = 80       # 80 (E-reader recommended), 85, 90
+    grayscale: Optional[bool] = False      # true for 16-level e-ink optimization
+    colorsoft_tune: Optional[bool] = False # true for Kindle Colorsoft / Color E-Ink vibrancy & contrast boost
+
+class TestCleanupRequest(BaseModel):
+    session_ids: Optional[List[str]] = None
+    purge_all: Optional[bool] = False
+    clean_orphans: Optional[bool] = True
 
 class PreviewRequest(BaseModel):
     session_id: str
@@ -790,7 +801,13 @@ async def _async_combined_export_worker(
     output_filepath: str,
     out_filename: str,
     fmt: str,
-    title: str
+    title: str,
+    chunk_by: str = "none",
+    chunk_size: int = 3,
+    max_dimension: Optional[int] = 1600,
+    jpeg_quality: int = 80,
+    grayscale: bool = False,
+    colorsoft_tune: bool = False,
 ):
     job = COMBINED_EXPORTS.get(job_id)
     if not job:
@@ -806,33 +823,21 @@ async def _async_combined_export_worker(
         return bool(job.get("cancel_requested", False))
 
     try:
-        if fmt == "pdf":
-            await asyncio.to_thread(
-                file_processor.build_combined_pdf,
-                sessions_data,
-                output_filepath,
-                title,
-                progress_callback=on_progress,
-                cancel_check=check_cancelled
-            )
-        elif fmt in ["mobi", "azw3", "kindle"]:
-            await asyncio.to_thread(
-                file_processor.build_combined_mobi,
-                sessions_data,
-                output_filepath,
-                title,
-                progress_callback=on_progress,
-                cancel_check=check_cancelled
-            )
-        else:
-            await asyncio.to_thread(
-                file_processor.build_combined_epub,
-                sessions_data,
-                output_filepath,
-                title,
-                progress_callback=on_progress,
-                cancel_check=check_cancelled
-            )
+        await asyncio.to_thread(
+            file_processor.build_combined_omnibus,
+            sessions_data=sessions_data,
+            output_filepath=output_filepath,
+            export_format=fmt,
+            title=title,
+            chunk_by=chunk_by,
+            chunk_size=chunk_size,
+            max_dimension=max_dimension,
+            jpeg_quality=jpeg_quality,
+            grayscale=grayscale,
+            colorsoft_tune=colorsoft_tune,
+            progress_callback=on_progress,
+            cancel_check=check_cancelled
+        )
 
         if job.get("cancel_requested"):
             job["status"] = "cancelled"
@@ -894,10 +899,12 @@ async def _async_combined_export_worker(
 @app.post("/api/export/combined")
 async def export_combined_volume(req: CombinedExportRequest):
     """
-    Merges all queued volumes into a single file for seamless e-reader reading.
+    Merges all queued volumes into an e-reader optimized file or omnibus package.
 
-    - format='epub'  → one EPUB3 with chapter-level TOC per volume (Kindle, Kobo, Apple Books)
-    - format='pdf'   → one PDF with bookmarks per volume
+    - format='epub'  → EPUB3 with chapter-level TOC per volume (Kindle Send-to-Kindle, Kobo, Apple Books)
+    - format='mobi'  → Amazon Kindle MOBI fixed-layout manga
+    - format='pdf'   → PDF with bookmarks per volume
+    - chunk_by='volumes' / 'size_mb' → creates multi-part omnibus ZIP for huge collections
     """
     sessions_data = []
     if req.session_ids:
@@ -917,12 +924,34 @@ async def export_combined_volume(req: CombinedExportRequest):
                 if sess and sess not in sessions_data:
                     sessions_data.append(sess)
 
+    # Filter out empty or unextracted sessions that have 0 pages
+    sessions_data = [s for s in sessions_data if len(s.get("pages", [])) > 0]
+
     if not sessions_data:
-        raise HTTPException(status_code=404, detail="No valid sessions found to export")
+        raise HTTPException(status_code=404, detail="No valid sessions with pages found to export")
+
+    # Naturally sort sessions by filename so volumes appear in correct reading order (v01, v02, ...)
+    def _natural_volume_key(s):
+        fn = s.get("filename", "").lower()
+        return [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', fn)]
+
+    sessions_data.sort(key=_natural_volume_key)
+
+    # Pre-flight check: ensure at least 1 GB of free disk space is available
+    try:
+        _, _, free_bytes = shutil.disk_usage(str(OUTPUT_DIR))
+        if free_bytes < 1024 * 1024 * 1024:
+            raise HTTPException(
+                status_code=507,
+                detail=f"Low disk space: only {free_bytes // (1024*1024)} MB available. Free up disk space before exporting."
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
 
     fmt   = (req.format or "epub").lower().strip()
     title = (req.title or "Colorized Manga Collection").strip() or "Colorized Manga Collection"
-    # Sanitize title for filename
     clean_title = re.sub(r'[^a-zA-Z0-9_\- ]', '', title).strip().replace(' ', '_')
     if not clean_title:
         clean_title = "manga_collection"
@@ -930,25 +959,51 @@ async def export_combined_volume(req: CombinedExportRequest):
     n     = len(sessions_data)
     total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
 
-    if fmt == "pdf":
-        out_ext = ".pdf"
-    elif fmt in ["mobi", "azw3", "kindle"]:
-        out_ext = ".mobi"
-    else:
-        out_ext = ".epub"
+    chunk_by = (req.chunk_by or "none").lower().strip()
+    chunk_size = req.chunk_size if (req.chunk_size is not None and req.chunk_size > 0) else 3
+    max_dim = req.max_dimension if (req.max_dimension is not None and req.max_dimension > 0) else None
+    jpeg_qual = req.jpeg_quality if (req.jpeg_quality is not None and req.jpeg_quality > 0) else 80
+    is_gray = bool(req.grayscale)
+    colorsoft_tune = bool(req.colorsoft_tune)
 
-    out_filename   = f"{clean_title}_{token}{out_ext}"
+    will_chunk = False
+    if chunk_by == "volumes" and n > chunk_size:
+        will_chunk = True
+    elif chunk_by in ["size_mb", "size"]:
+        avg_kb = 85 if is_gray else 135
+        if (total_pages * avg_kb) > (max(50, chunk_size) * 1024):
+            will_chunk = True
+
+    if will_chunk:
+        out_ext = ".zip"
+        out_filename = f"{clean_title}_Omnibus_{token}.zip"
+    else:
+        if fmt == "pdf":
+            out_ext = ".pdf"
+        elif fmt in ["mobi", "azw3", "kindle"]:
+            out_ext = ".mobi"
+        else:
+            out_ext = ".epub"
+        out_filename = f"{clean_title}_{token}{out_ext}"
+
     output_filepath = str(OUTPUT_DIR / f"combined_{out_filename}")
 
     # Synchronous execution mode (for automated tests or simple scripts)
     if req.sync:
         try:
-            if fmt == "pdf":
-                await asyncio.to_thread(file_processor.build_combined_pdf, sessions_data, output_filepath, title)
-            elif fmt in ["mobi", "azw3", "kindle"]:
-                await asyncio.to_thread(file_processor.build_combined_mobi, sessions_data, output_filepath, title)
-            else:
-                await asyncio.to_thread(file_processor.build_combined_epub, sessions_data, output_filepath, title)
+            await asyncio.to_thread(
+                file_processor.build_combined_omnibus,
+                sessions_data=sessions_data,
+                output_filepath=output_filepath,
+                export_format=fmt,
+                title=title,
+                chunk_by=chunk_by,
+                chunk_size=chunk_size,
+                max_dimension=max_dim,
+                jpeg_quality=jpeg_qual,
+                grayscale=is_gray,
+                colorsoft_tune=colorsoft_tune
+            )
             return JSONResponse({
                 "status": "success",
                 "format": fmt,
@@ -956,6 +1011,7 @@ async def export_combined_volume(req: CombinedExportRequest):
                 "filename": out_filename,
                 "total_volumes": n,
                 "title": title,
+                "is_omnibus": will_chunk
             })
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Combined export failed: {str(e)}")
@@ -971,6 +1027,7 @@ async def export_combined_volume(req: CombinedExportRequest):
         "out_filename": out_filename,
         "total_volumes": n,
         "total_pages": total_pages,
+        "is_omnibus": will_chunk,
         "progress": {
             "percent": 0,
             "processed_pages": 0,
@@ -982,7 +1039,10 @@ async def export_combined_volume(req: CombinedExportRequest):
 
     asyncio.create_task(
         _async_combined_export_worker(
-            job_id, sessions_data, output_filepath, out_filename, fmt, title
+            job_id, sessions_data, output_filepath, out_filename, fmt, title,
+            chunk_by=chunk_by, chunk_size=chunk_size,
+            max_dimension=max_dim, jpeg_quality=jpeg_qual, grayscale=is_gray,
+            colorsoft_tune=colorsoft_tune
         )
     )
 
@@ -993,6 +1053,7 @@ async def export_combined_volume(req: CombinedExportRequest):
         "total_volumes": n,
         "total_pages": total_pages,
         "title": title,
+        "is_omnibus": will_chunk,
         "stream_url": f"/api/export/combined/stream/{job_id}",
         "cancel_url": f"/api/export/combined/cancel/{job_id}"
     })
@@ -1091,9 +1152,16 @@ async def download_combined_file(filename: str):
         media_type = "application/x-mobipocket-ebook"
     elif ext == ".azw3":
         media_type = "application/vnd.amazon.mobi8-ebook"
+    elif ext == ".zip":
+        media_type = "application/zip"
     else:
         media_type = "application/octet-stream"
-    return FileResponse(out_filepath, filename=filename, media_type=media_type)
+    return FileResponse(
+        out_filepath,
+        filename=filename,
+        media_type=media_type,
+        headers={"Accept-Ranges": "bytes"}
+    )
 
 
 
@@ -1379,6 +1447,132 @@ async def delete_session(session_id: str):
         "message": f"Document session {session_id} deleted successfully",
         "deleted_session_id": session_id
     })
+
+
+@app.post("/api/test/cleanup")
+async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
+    """
+    Cleans up sessions, uploaded files, and exported archives generated during testing.
+    Can clean specific session IDs, all test-pattern sessions, or all sessions.
+    """
+    session_ids = req.session_ids if req else None
+    purge_all = req.purge_all if req else False
+    clean_orphans = req.clean_orphans if req else True
+
+    cleaned_sids = []
+    freed_bytes = 0
+
+    def calc_size(p: Path) -> int:
+        try:
+            if p.is_file():
+                return p.stat().st_size
+            elif p.is_dir():
+                return sum(f.stat().st_size for f in p.rglob('*') if f.is_file())
+        except Exception:
+            pass
+        return 0
+
+    # 1. Determine target session IDs
+    target_sids = set()
+    if session_ids:
+        target_sids.update(session_ids)
+    elif purge_all:
+        target_sids.update(list(SESSIONS.keys()))
+        for d in STORAGE_DIR.iterdir():
+            if d.is_dir():
+                target_sids.add(d.name)
+    else:
+        all_sids = set(list(SESSIONS.keys()))
+        for d in STORAGE_DIR.iterdir():
+            if d.is_dir():
+                all_sids.add(d.name)
+
+        test_keywords = ["test", "sample", "cancel", "switch", "kindle_test", "batch_test"]
+        for sid in all_sids:
+            sess = SESSIONS.get(sid) or get_or_restore_session(sid)
+            fn = (sess.get("filename") or "").lower() if sess else ""
+            title = (sess.get("title") or "").lower() if sess else ""
+            # Preserve user volumes like Dr. Slump unless purge_all is explicitly requested
+            if "slump" in fn or "slump" in title:
+                continue
+            is_test = False
+            for kw in test_keywords:
+                if kw in sid.lower() or kw in fn or kw in title:
+                    is_test = True
+                    break
+            if is_test:
+                target_sids.add(sid)
+
+    # 2. Purge target sessions
+    for sid in target_sids:
+        sess_dir = STORAGE_DIR / sid
+        freed_bytes += calc_size(sess_dir)
+        for f in UPLOAD_DIR.glob(f"{sid}_*"):
+            freed_bytes += calc_size(f)
+            f.unlink(missing_ok=True)
+        for out_f in OUTPUT_DIR.glob(f"{sid}_*"):
+            freed_bytes += calc_size(out_f)
+            out_f.unlink(missing_ok=True)
+        if sess_dir.exists():
+            shutil.rmtree(str(sess_dir), ignore_errors=True)
+        SESSIONS.pop(sid, None)
+        EVENT_QUEUES.pop(sid, None)
+        cleaned_sids.append(sid)
+
+    # 3. Clean orphan or test output files if requested
+    cleaned_output_files = 0
+    if clean_orphans or purge_all:
+        active_sids = set(SESSIONS.keys())
+        for d in STORAGE_DIR.iterdir():
+            if d.is_dir():
+                active_sids.add(d.name)
+
+        test_out_keywords = ["test", "sample", "cancel", "switch", "progress", "kindle"]
+        for f in OUTPUT_DIR.iterdir():
+            if not f.is_file():
+                continue
+            name_lower = f.name.lower()
+            should_delete = False
+            if purge_all:
+                should_delete = True
+            elif any(k in name_lower for k in test_out_keywords):
+                should_delete = True
+            else:
+                prefix = f.name.split("_")[0]
+                if prefix not in active_sids and (f.name.startswith("combined_") or f.name.startswith("batch_")):
+                    should_delete = True
+
+            if should_delete:
+                freed_bytes += calc_size(f)
+                f.unlink(missing_ok=True)
+                cleaned_output_files += 1
+
+        for f in UPLOAD_DIR.iterdir():
+            if not f.is_file():
+                continue
+            name_lower = f.name.lower()
+            should_delete = False
+            if purge_all:
+                should_delete = True
+            elif any(k in name_lower for k in test_out_keywords):
+                should_delete = True
+            else:
+                prefix = f.name.split("_")[0]
+                if prefix not in active_sids:
+                    should_delete = True
+            if should_delete:
+                freed_bytes += calc_size(f)
+                f.unlink(missing_ok=True)
+
+    return JSONResponse({
+        "status": "success",
+        "cleaned_sessions_count": len(cleaned_sids),
+        "cleaned_sessions": cleaned_sids,
+        "cleaned_output_files": cleaned_output_files,
+        "freed_bytes": freed_bytes,
+        "freed_mb": round(freed_bytes / (1024 * 1024), 2)
+    })
+
 
 @app.delete("/api/session/{session_id}/page/{page_index}")
 async def delete_session_page(session_id: str, page_index: int):
