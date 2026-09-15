@@ -1427,12 +1427,6 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
         titleBadge.innerText = `${page.display_name} • ${selectedStyleText}`;
       }
 
-      const btnColorize = document.getElementById("btn-colorize-page");
-      if (btnColorize) {
-        btnColorize.className = "btn btn-secondary btn-sm";
-        btnColorize.innerHTML = `<i class="ri-refresh-line"></i> Re-Colorize`;
-      }
-
       // Open in Before / After Comparator and switch to split view so color is visible
       openSplitPreview(pageIdx, !showToastFeedback);
       setComparatorView("split", true);
@@ -1567,18 +1561,6 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   if (titleBadge) {
     const dim = (page.width && page.height) ? ` [${page.width}×${page.height}]` : "";
     titleBadge.innerText = selectedStyleText ? `${page.display_name}${dim} • ${selectedStyleText}` : `${page.display_name}${dim}`;
-  }
-
-  // Update header action button: "Colorize Page" if pending, "Re-Colorize" if colorized
-  const btnColorize = document.getElementById("btn-colorize-page");
-  if (btnColorize) {
-    if (page.colorized_url) {
-      btnColorize.className = "btn btn-secondary btn-sm";
-      btnColorize.innerHTML = `<i class="ri-refresh-line"></i> Re-Colorize`;
-    } else {
-      btnColorize.className = "btn btn-primary btn-sm";
-      btnColorize.innerHTML = `<i class="ri-sparkles-line"></i> Colorize Page`;
-    }
   }
 
   const btnPreview = document.getElementById("btn-preview-page");
