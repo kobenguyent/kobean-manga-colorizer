@@ -41,6 +41,9 @@
     </div>
 
     <div class="header-status">
+      <button class="btn btn-secondary btn-sm header-history-btn" id="btn-open-history" onclick="openHistoryModal()" title="View processing and document history">
+        <i class="ri-history-line"></i> History <span class="badge badge-accent" id="history-badge-count">0</span>
+      </button>
       <span class="badge badge-model active" id="active-model-badge">
         <i class="ri-dna-line"></i> ResNeXt Deep Generator
       </span>
@@ -68,6 +71,11 @@
           <button class="btn btn-primary" type="button" id="btn-select-files">
             <i class="ri-file-add-line"></i> Select Files (Multiple Supported)
           </button>
+          <div class="idle-history-container hidden" id="idle-history-container" style="margin-top: 1rem;">
+            <button class="btn btn-secondary btn-sm" type="button" onclick="openHistoryModal()">
+              <i class="ri-history-line"></i> View History (<span id="idle-history-count">0</span> loaded)
+            </button>
+          </div>
         </div>
 
         <!-- Uploading & Extraction In-Progress State -->
@@ -98,7 +106,12 @@
               <i class="ri-folders-line"></i>
               <h3>Documents Queue</h3>
             </div>
-            <span class="badge badge-accent" id="doc-queue-badge">1 Document</span>
+            <div class="header-right" style="display: flex; gap: 8px; align-items: center;">
+              <button class="btn btn-secondary btn-xs" onclick="openHistoryModal()" title="View full document history" style="font-size: 0.72rem; padding: 2px 7px;">
+                <i class="ri-history-line"></i> History
+              </button>
+              <span class="badge badge-accent" id="doc-queue-badge">1 Document</span>
+            </div>
           </div>
 
           <!-- Active Document Highlight -->
@@ -122,13 +135,13 @@
 
           <!-- Queue Control Buttons -->
           <div class="queue-btn-group">
-            <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="document.getElementById('add-more-input').click()">
+            <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="triggerAddFiles()">
               <i class="ri-add-line"></i> Add Files
             </button>
             <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-delete-all-files" onclick="clearAllDocuments(event)">
               <i class="ri-delete-bin-line"></i> Delete All
             </button>
-            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" hidden />
+            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" style="display: none;" />
           </div>
         </div>
 
@@ -221,6 +234,17 @@
             <input type="range" id="slider-saturation" min="5" max="25" value="14" class="form-slider" />
           </div>
 
+          <!-- Skip Colored Pages Toggle -->
+          <div class="form-group" style="margin-top: 0.25rem;">
+            <label class="toggle-label" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+              <input type="checkbox" id="chk-skip-colored" style="width:16px;height:16px;accent-color:var(--accent-green);" />
+              <span style="font-size:0.85rem;color:var(--text-secondary);">
+                <i class="ri-image-2-line" style="color:var(--accent-green);"></i>
+                Skip pages that already have color
+              </span>
+            </label>
+          </div>
+
           <!-- Action Buttons -->
           <div class="action-btn-group">
             <button class="btn btn-secondary btn-block" id="btn-preview-page" onclick="previewCurrentPage()">
@@ -231,6 +255,51 @@
             </button>
             <button class="btn btn-primary btn-block hidden" id="btn-start-batch-colorize" onclick="startBatchColorization()">
               <i class="ri-play-list-add-line"></i> Colorize All (<span id="batch-count-text">0</span>) Documents
+            </button>
+          </div>
+        </div>
+
+        <!-- Character Palette Memory Card -->
+        <div class="card" id="palette-card" style="display:none;">
+          <div class="card-header space-between">
+            <div class="header-left">
+              <i class="ri-user-heart-line" style="color:var(--accent-purple,#a855f7);"></i>
+              <h3>Character Palette</h3>
+            </div>
+            <span class="badge badge-accent" id="palette-badge-count">0 Characters</span>
+          </div>
+          <p style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:0.75rem;">
+            Define canonical colors per character so hair &amp; costume stay consistent across panels.
+          </p>
+
+          <!-- Character list -->
+          <div id="palette-character-list" style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:0.75rem;"></div>
+
+          <!-- Add character form -->
+          <div style="border-top:1px solid var(--border-color);padding-top:0.75rem;">
+            <div class="form-group" style="margin-bottom:0.5rem;">
+              <input type="text" id="pal-char-name" placeholder="Character name (e.g. Arale)" class="form-input" style="font-size:0.82rem;" />
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.5rem;">
+              <label style="font-size:0.75rem;color:var(--text-secondary);">
+                Hair
+                <input type="color" id="pal-hair" value="#8B2BE2" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+              </label>
+              <label style="font-size:0.75rem;color:var(--text-secondary);">
+                Skin
+                <input type="color" id="pal-skin" value="#F4C5A0" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+              </label>
+              <label style="font-size:0.75rem;color:var(--text-secondary);">
+                Costume
+                <input type="color" id="pal-costume" value="#3A7BFF" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+              </label>
+              <label style="font-size:0.75rem;color:var(--text-secondary);">
+                Extra
+                <input type="color" id="pal-extra" value="#FFCE47" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+              </label>
+            </div>
+            <button class="btn btn-secondary btn-sm btn-block" onclick="paletteAddCharacter()">
+              <i class="ri-add-line"></i> Add / Update Character
             </button>
           </div>
         </div>
@@ -252,6 +321,9 @@
             <button class="btn btn-accent btn-block" id="btn-sidebar-export-epub" onclick="exportDocument('epub')">
               <i class="ri-book-open-line"></i> Download as EPUB
             </button>
+            <button class="btn btn-warning btn-block" id="btn-sidebar-export-mobi" onclick="exportDocument('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+              <i class="ri-amazon-line"></i> Download Kindle (MOBI)
+            </button>
             <button class="btn btn-secondary btn-block" id="btn-sidebar-export-zip" onclick="exportDocument('zip')">
               <i class="ri-file-zip-line"></i> Download Images ZIP
             </button>
@@ -272,11 +344,71 @@
               <button class="btn btn-accent btn-block" id="btn-batch-export-epub" onclick="exportBatch('epub')">
                 <i class="ri-book-open-line"></i> Export All as EPUBs ZIP
               </button>
+              <button class="btn btn-warning btn-block" id="btn-batch-export-mobi" onclick="exportBatch('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+                <i class="ri-amazon-line"></i> Export All as Kindle (.mobi) ZIP
+              </button>
               <button class="btn btn-secondary btn-block" id="btn-batch-export-pdf" onclick="exportBatch('pdf')">
                 <i class="ri-file-pdf-2-line"></i> Export All as PDFs ZIP
               </button>
             </div>
+
+            <!-- Combined single-file export -->
+            <div style="margin-top:1rem;border-top:1px solid var(--border-color);padding-top:0.85rem;">
+              <div style="display:flex;align-items:center;gap:0.4rem;margin-bottom:0.5rem;">
+                <i class="ri-book-2-line" style="color:var(--accent-purple,#a855f7);font-size:1rem;"></i>
+                <span style="font-weight:600;font-size:0.88rem;">Export as Single E-Reader Copy</span>
+              </div>
+              <p style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.6rem;">
+                Merge all volumes into <strong>one file</strong> with a chapter-per-volume TOC — perfect for Kindle, Kobo &amp; Apple Books.
+              </p>
+              <input type="text" id="combined-title-input"
+                     placeholder="Collection title (optional)"
+                     class="form-input"
+                     style="font-size:0.82rem;margin-bottom:0.5rem;"
+                     value="Colorized Manga Collection" />
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.35rem;">
+                <button class="btn btn-block" id="btn-combined-epub"
+                        onclick="exportCombined('epub')"
+                        style="background:var(--accent-purple,#a855f7);border-color:var(--accent-purple,#a855f7);color:#fff;font-size:0.76rem;padding:6px 2px;"
+                        title="Combined EPUB3 for Send-to-Kindle, Apple Books &amp; Kobo">
+                  <i class="ri-book-2-line"></i> Single EPUB
+                </button>
+                <button class="btn btn-block" id="btn-combined-mobi"
+                        onclick="exportCombined('mobi')"
+                        style="background:#eab308;border-color:#ca8a04;color:#000;font-size:0.76rem;padding:6px 2px;font-weight:600;"
+                        title="Combined MOBI for direct Kindle e-reader USB sideloading">
+                  <i class="ri-amazon-line"></i> Kindle MOBI
+                </button>
+                <button class="btn btn-block" id="btn-combined-pdf"
+                        onclick="exportCombined('pdf')"
+                        style="background:var(--accent-green,#22c55e);border-color:var(--accent-green,#22c55e);color:#fff;font-size:0.76rem;padding:6px 2px;"
+                        title="Combined PDF with volume bookmarks">
+                  <i class="ri-file-pdf-2-line"></i> Single PDF
+                </button>
+              </div>
+
+              <!-- Combined Export Progress & Cancellation Box -->
+              <div id="combined-export-progress-box" class="hidden" style="margin-top:0.75rem;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:8px;padding:0.75rem;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
+                  <span id="combined-progress-title" style="font-size:0.8rem;font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:0.35rem;">
+                    <i class="ri-loader-4-line spin" style="color:var(--accent-purple,#a855f7);"></i>
+                    <span id="combined-progress-title-text">Exporting Single Volume...</span>
+                  </span>
+                  <span id="combined-progress-pct" style="font-size:0.78rem;font-weight:700;color:var(--accent-purple,#a855f7);">0%</span>
+                </div>
+                <div style="background:rgba(255,255,255,0.08);border-radius:999px;height:6px;overflow:hidden;margin-bottom:0.45rem;">
+                  <div id="combined-progress-bar-fill" style="width:0%;height:100%;background:linear-gradient(90deg, var(--accent-purple,#a855f7), var(--accent-green,#22c55e));transition:width 0.2s ease;"></div>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;">
+                  <span id="combined-progress-subtext" style="font-size:0.72rem;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">Preparing volume pages...</span>
+                  <button class="btn btn-danger btn-sm" id="btn-cancel-combined-export" onclick="cancelCombinedExport()" style="padding:2px 8px;font-size:0.72rem;flex-shrink:0;">
+                    <i class="ri-close-circle-line"></i> Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
+
         </div>
 
       </aside>
@@ -310,19 +442,38 @@
               <i class="ri-drag-move-fill"></i>
               <h3>Interactive Before / After Comparator</h3>
             </div>
-            <div class="header-right">
+            <div class="header-right preview-controls-group">
+              <button class="btn-icon btn-nav-preview" id="btn-prev-page" title="Previous Page (Left Arrow)" onclick="navigatePreviewPage(-1)">
+                <i class="ri-arrow-left-s-line"></i>
+              </button>
               <span class="badge" id="preview-page-title">Page 1</span>
+              <button class="btn-icon btn-nav-preview" id="btn-next-page" title="Next Page (Right Arrow)" onclick="navigatePreviewPage(1)">
+                <i class="ri-arrow-right-s-line"></i>
+              </button>
               <button class="btn btn-primary btn-sm" id="btn-colorize-page" onclick="previewCurrentPage()">
                 <i class="ri-sparkles-line"></i> Colorize Page
+              </button>
+              <button class="btn btn-sm" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
+                      style="background:var(--accent-orange,#f97316);border-color:var(--accent-orange,#f97316);color:#fff;"
+                      title="Force re-colorize this page from scratch">
+                <i class="ri-magic-line"></i> Recolorize
               </button>
               <button class="btn-icon btn-danger-icon" title="Delete this page" onclick="deleteCurrentPreviewPage(event)">
                 <i class="ri-delete-bin-line"></i>
               </button>
-              <button class="btn-icon" onclick="closeSplitPreview()"><i class="ri-close-line"></i></button>
+              <button class="btn-icon" onclick="closeSplitPreview()" title="Close Comparator (Esc)"><i class="ri-close-line"></i></button>
             </div>
           </div>
 
           <div class="split-slider-wrapper">
+            <!-- Chevron navigation buttons on the left & right of the preview -->
+            <button class="preview-nav-chevron preview-nav-prev" onclick="navigatePreviewPage(-1)" title="Previous Page (Left Arrow)">
+              <i class="ri-arrow-left-s-line"></i>
+            </button>
+            <button class="preview-nav-chevron preview-nav-next" onclick="navigatePreviewPage(1)" title="Next Page (Right Arrow)">
+              <i class="ri-arrow-right-s-line"></i>
+            </button>
+
             <div class="split-image-container" id="split-container">
               <!-- Colorized Base Image (Bottom/Right) -->
               <img id="split-img-colorized" src="" alt="Colorized Page" draggable="false" />
@@ -369,6 +520,9 @@
             <button class="btn btn-accent" id="btn-export-epub" onclick="exportDocument('epub')">
               <i class="ri-book-open-line"></i> Export EPUB
             </button>
+            <button class="btn" id="btn-export-mobi" onclick="exportDocument('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+              <i class="ri-amazon-line"></i> Kindle MOBI
+            </button>
             <button class="btn btn-secondary" id="btn-export-zip" onclick="exportDocument('zip')">
               <i class="ri-file-zip-line"></i> Export ZIP
             </button>
@@ -407,11 +561,20 @@
               
               <!-- 3 Quick Export Buttons -->
               <div class="gallery-quick-exports">
+                <button class="btn btn-warning btn-sm hidden" id="btn-recolorize-selected"
+                        title="Force re-colorize selected pages even if already colorized"
+                        onclick="recolorizeSelected()"
+                        style="background:var(--accent-orange,#f97316);border-color:var(--accent-orange,#f97316);color:#fff;">
+                  <i class="ri-refresh-line"></i> Recolorize Selected
+                </button>
                 <button class="btn btn-secondary btn-sm" onclick="exportDocument('pdf')" title="Export as PDF">
                   <i class="ri-file-pdf-2-line"></i> PDF
                 </button>
                 <button class="btn btn-secondary btn-sm" onclick="exportDocument('epub')" title="Export as EPUB">
                   <i class="ri-book-open-line"></i> EPUB
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="exportDocument('mobi')" title="Export as Amazon Kindle (MOBI)">
+                  <i class="ri-amazon-line"></i> MOBI
                 </button>
                 <button class="btn btn-secondary btn-sm" onclick="exportDocument('zip')" title="Export as ZIP">
                   <i class="ri-file-zip-line"></i> ZIP
@@ -424,10 +587,118 @@
             <!-- Page Card items rendered here -->
           </div>
         </div>
+      </div>
+    </section>
+  </main>
 
+  <!-- History Modal Overlay -->
+  <div class="modal-overlay hidden" id="history-modal-overlay" onclick="handleHistoryOverlayClick(event)">
+    <div class="history-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="history-modal-title">
+      
+      <!-- Modal Header -->
+      <div class="history-modal-header">
+        <div class="history-modal-header-left">
+          <div class="history-modal-icon">
+            <i class="ri-history-line"></i>
+          </div>
+          <div>
+            <h2 id="history-modal-title" class="history-modal-title">Processing & Document History</h2>
+            <p class="history-modal-subtitle">Browse, switch between, export, or manage loaded manga sessions</p>
+          </div>
+        </div>
+        <button class="btn-icon history-close-btn" onclick="closeHistoryModal()" title="Close history (Esc)">
+          <i class="ri-close-line"></i>
+        </button>
       </div>
 
-    </main>
+      <!-- Overview Stats Summary Bar -->
+      <div class="history-stats-bar">
+        <div class="history-stat-card">
+          <div class="history-stat-icon total"><i class="ri-folders-line"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-total">0</span>
+            <span class="history-stat-label">Total Documents</span>
+          </div>
+        </div>
+        <div class="history-stat-card">
+          <div class="history-stat-icon completed"><i class="ri-checkbox-circle-line"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-completed">0</span>
+            <span class="history-stat-label">Completed</span>
+          </div>
+        </div>
+        <div class="history-stat-card">
+          <div class="history-stat-icon processing"><i class="ri-loader-4-line spin"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-processing">0</span>
+            <span class="history-stat-label">In Progress</span>
+          </div>
+        </div>
+        <div class="history-stat-card">
+          <div class="history-stat-icon idle"><i class="ri-time-line"></i></div>
+          <div class="history-stat-info">
+            <span class="history-stat-val" id="hist-stat-idle">0</span>
+            <span class="history-stat-label">Queued / Idle</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls / Filter Toolbar -->
+      <div class="history-toolbar">
+        <div class="history-search-wrapper">
+          <i class="ri-search-line history-search-icon"></i>
+          <input type="text" id="history-search-input" placeholder="Search by document title..." oninput="filterHistoryList()" />
+          <button class="btn-icon history-search-clear hidden" id="btn-history-clear-search" onclick="clearHistorySearch()" title="Clear search">
+            <i class="ri-close-circle-line"></i>
+          </button>
+        </div>
+
+        <div class="history-filter-tabs">
+          <button class="history-tab-btn active" data-filter="all" onclick="setHistoryFilter('all', this)">
+            All (<span id="hist-tab-all-count">0</span>)
+          </button>
+          <button class="history-tab-btn" data-filter="completed" onclick="setHistoryFilter('completed', this)">
+            Completed (<span id="hist-tab-completed-count">0</span>)
+          </button>
+          <button class="history-tab-btn" data-filter="processing" onclick="setHistoryFilter('processing', this)">
+            Processing (<span id="hist-tab-proc-count">0</span>)
+          </button>
+          <button class="history-tab-btn" data-filter="idle" onclick="setHistoryFilter('idle', this)">
+            Queued (<span id="hist-tab-idle-count">0</span>)
+          </button>
+        </div>
+
+        <button class="btn btn-secondary btn-sm history-refresh-btn" onclick="loadHistoryData(true)" title="Refresh history list">
+          <i class="ri-refresh-line"></i> Refresh
+        </button>
+      </div>
+
+      <!-- Document Sessions List Container -->
+      <div class="history-list-container" id="history-list-container">
+        <!-- Rendered dynamically -->
+        <div class="history-loading-placeholder">
+          <i class="ri-loader-4-line spin"></i>
+          <span>Loading session history...</span>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="history-modal-footer">
+        <div class="history-footer-summary" id="history-footer-summary">
+          Showing 0 documents
+        </div>
+        <div class="history-footer-actions">
+          <button class="btn btn-secondary btn-sm" onclick="exportBatch('auto')" id="btn-history-batch-export" title="Export all colorized documents as a single ZIP archive">
+            <i class="ri-archive-line"></i> Export All Completed ZIP
+          </button>
+          <button class="btn btn-primary btn-sm" onclick="closeHistoryModal()">
+            Close
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
 
   <!-- Notification Toast -->
   <div class="toast hidden" id="toast">

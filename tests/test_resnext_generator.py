@@ -52,5 +52,9 @@ def run_resnext_test():
     assert "ResNeXt" in result_data["engine"]
     print("RESNEXT GENERATOR STAGE TEST PASSED PERFECTLY!")
 
+def test_resnext_generator():
+    run_resnext_test()
+
 if __name__ == "__main__":
     run_resnext_test()
+

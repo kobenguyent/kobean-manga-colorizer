@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from file_processor import MangaFileProcessor
-from colorizer_engine import MangaColorizerEngine
+from colorizer_engine import MangaColorizerEngine, CharacterPalette, CharacterEntry
 
 app = FastAPI(title="Manga Colorizer Pro", version="1.0.0")
 
@@ -149,6 +149,8 @@ class ColorizeRequest(BaseModel):
     line_preserve: float = 0.85
     selected_pages: Optional[List[int]] = None
     force_reprocess: bool = False
+    skip_if_colored: bool = False
+    force_recolorize: bool = False   # when True, re-run even if page already has a colorized file
 
 class BatchColorizeRequest(BaseModel):
     session_ids: List[str]
@@ -159,10 +161,17 @@ class BatchColorizeRequest(BaseModel):
     saturation: float = 1.2
     contrast: float = 1.1
     line_preserve: float = 0.85
+    skip_if_colored: bool = False
 
 class BatchExportRequest(BaseModel):
     session_ids: List[str]
     format: Optional[str] = "auto"
+
+class CombinedExportRequest(BaseModel):
+    session_ids: Optional[List[str]] = None
+    format: str = "epub"   # "epub" or "pdf"
+    title: Optional[str] = "Colorized Manga Collection"
+    sync: Optional[bool] = False
 
 class PreviewRequest(BaseModel):
     session_id: str
@@ -174,6 +183,36 @@ class PreviewRequest(BaseModel):
     saturation: float = 1.2
     contrast: float = 1.1
     line_preserve: float = 0.85
+    skip_if_colored: bool = False
+    force_recolorize: bool = False
+
+# ── Character Palette models ─────────────────────────────────────────
+
+class CharacterEntryModel(BaseModel):
+    name: str
+    hair_hex: str = ""
+    skin_hex: str = ""
+    costume_hex: str = ""
+    extra_hex: str = ""
+
+class PaletteUpsertRequest(BaseModel):
+    session_id: str
+    character: CharacterEntryModel
+
+class PaletteDeleteRequest(BaseModel):
+    session_id: str
+    character_name: str
+
+# In-memory palette store: session_id -> CharacterPalette
+SESSION_PALETTES: Dict[str, CharacterPalette] = {}
+
+
+def _get_palette(session_id: str) -> CharacterPalette:
+    """Returns the palette for a session, creating an empty one if not present."""
+    if session_id not in SESSION_PALETTES:
+        SESSION_PALETTES[session_id] = CharacterPalette()
+    return SESSION_PALETTES[session_id]
+
 
 @app.post("/api/upload")
 async def upload_files(
@@ -405,11 +444,23 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
         color_filename = page_info["filename"]
         output_path = str(colorized_dir / color_filename)
 
-        # Skip if page is already colorized and output file exists on disk (unless force_reprocess is True)
-        if not getattr(req, "force_reprocess", False) and page_info.get("status") == "colorized" and Path(output_path).exists() and Path(output_path).stat().st_size > 0:
+        is_force = bool(req.force_recolorize or getattr(req, "force_reprocess", False))
+        # Skip if page is already colorized and output file exists on disk,
+        # UNLESS the caller explicitly requested a force recolorize.
+        if (not is_force
+                and page_info.get("status") == "colorized"
+                and Path(output_path).exists()
+                and Path(output_path).stat().st_size > 0):
             if not page_info.get("colorized_url"):
                 page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
             continue
+
+        # When forcing recolorize, reset page status so the UI shows it as in-flight
+        if is_force:
+            page_info["status"] = "pending"
+            page_info.pop("skipped_colored", None)
+
+
 
         page_info["status"] = "processing"
         
@@ -421,6 +472,11 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
         })
 
         try:
+            # Resolve palette for this session (if any characters are defined)
+            palette = SESSION_PALETTES.get(session_id)
+            if palette and not palette.characters:
+                palette = None
+
             # Run CPU-bound colorization in a thread without blocking main asyncio loop
             res = await asyncio.to_thread(
                 colorizer_engine.colorize_page,
@@ -432,7 +488,9 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 style=req.style,
                 saturation=req.saturation,
                 contrast=req.contrast,
-                line_preserve=req.line_preserve
+                line_preserve=req.line_preserve,
+                skip_if_colored=req.skip_if_colored,
+                character_palette=palette,
             )
 
             # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -448,9 +506,13 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 })
                 return
 
-            page_info["status"] = "colorized"
+            # "skipped_colored" counts as colorized — output was copied as-is
+            eff_status = "colorized"
+            page_info["status"] = eff_status
             page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
             page_info["engine_used"] = res.get("engine", req.model_provider)
+            if res.get("status") == "skipped_colored":
+                page_info["skipped_colored"] = True
 
             sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
             save_session_meta(session_id)
@@ -548,6 +610,10 @@ async def preview_single_page(req: PreviewRequest):
     output_path = str(colorized_dir / color_filename)
 
     try:
+        palette = SESSION_PALETTES.get(session_id)
+        if palette and not palette.characters:
+            palette = None
+
         res = await asyncio.to_thread(
             colorizer_engine.colorize_page,
             image_path=orig_path,
@@ -558,12 +624,17 @@ async def preview_single_page(req: PreviewRequest):
             style=req.style,
             saturation=req.saturation,
             contrast=req.contrast,
-            line_preserve=req.line_preserve
+            line_preserve=req.line_preserve,
+            skip_if_colored=req.skip_if_colored,
+            character_palette=palette,
         )
 
         page_info["status"] = "colorized"
         page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
         page_info["engine_used"] = res.get("engine", req.model_provider)
+        if res.get("status") == "skipped_colored":
+            page_info["skipped_colored"] = True
+
 
         # Update processed_count and status
         sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
@@ -594,6 +665,76 @@ async def preview_single_page(req: PreviewRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
+@app.get("/api/palette/{session_id}")
+async def get_palette(session_id: str):
+    """Returns the character color palette for the given session."""
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    palette = _get_palette(session_id)
+    return JSONResponse({"session_id": session_id, "palette": palette.to_dict()})
+
+
+@app.post("/api/palette/upsert")
+async def upsert_palette_character(req: PaletteUpsertRequest):
+    """
+    Adds or updates a character entry in the session's palette.
+    If a character with the same name already exists it is replaced.
+    """
+    sess = get_or_restore_session(req.session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    palette = _get_palette(req.session_id)
+    new_entry = CharacterEntry(
+        name=req.character.name,
+        hair_hex=req.character.hair_hex,
+        skin_hex=req.character.skin_hex,
+        costume_hex=req.character.costume_hex,
+        extra_hex=req.character.extra_hex,
+    )
+    # Replace existing entry by name, or append
+    palette.characters = [c for c in palette.characters if c.name.lower() != new_entry.name.lower()]
+    palette.characters.append(new_entry)
+
+    return JSONResponse({
+        "status": "ok",
+        "session_id": req.session_id,
+        "palette": palette.to_dict()
+    })
+
+
+@app.delete("/api/palette/{session_id}/{character_name}")
+async def delete_palette_character(session_id: str, character_name: str):
+    """Removes a single character from the session palette."""
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    palette = _get_palette(session_id)
+    before = len(palette.characters)
+    palette.characters = [c for c in palette.characters if c.name.lower() != character_name.lower()]
+    removed = before - len(palette.characters)
+
+    return JSONResponse({
+        "status": "ok",
+        "removed": removed,
+        "session_id": session_id,
+        "palette": palette.to_dict()
+    })
+
+
+@app.delete("/api/palette/{session_id}")
+async def clear_palette(session_id: str):
+    """Clears all characters from the session palette."""
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    SESSION_PALETTES[session_id] = CharacterPalette()
+    return JSONResponse({"status": "ok", "session_id": session_id, "palette": {"characters": []}})
+
+
 @app.post("/api/export/batch")
 async def export_batch_documents(req: BatchExportRequest):
     """Builds and packages multiple colorized documents into a single archive."""
@@ -609,7 +750,9 @@ async def export_batch_documents(req: BatchExportRequest):
     format_override = (req.format or "auto").lower().strip()
     batch_token = str(uuid.uuid4())[:8]
 
-    if format_override == "epub":
+    if format_override in ["mobi", "azw3", "kindle"]:
+        out_filename = f"colorized_manga_kindle_{batch_token}.zip"
+    elif format_override == "epub":
         out_filename = f"colorized_manga_epubs_{batch_token}.zip"
     elif format_override == "pdf":
         out_filename = f"colorized_manga_pdfs_{batch_token}.zip"
@@ -631,11 +774,339 @@ async def export_batch_documents(req: BatchExportRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Batch export failed: {str(e)}")
 
+
+# ── Combined Export Background State ──────────────────────────────────
+COMBINED_EXPORTS: Dict[str, dict] = {}
+COMBINED_EXPORT_QUEUES: Dict[str, List[asyncio.Queue]] = {}
+
+
+async def notify_combined_sse(job_id: str, event_data: dict):
+    if job_id in COMBINED_EXPORT_QUEUES:
+        for q in list(COMBINED_EXPORT_QUEUES[job_id]):
+            await q.put(event_data)
+
+
+async def _async_combined_export_worker(
+    job_id: str,
+    sessions_data: list,
+    output_filepath: str,
+    out_filename: str,
+    fmt: str,
+    title: str
+):
+    job = COMBINED_EXPORTS.get(job_id)
+    if not job:
+        return
+
+    def on_progress(p_data: dict):
+        job["progress"] = p_data
+        if job_id in COMBINED_EXPORT_QUEUES:
+            for q in list(COMBINED_EXPORT_QUEUES[job_id]):
+                q.put_nowait({"type": "progress", "job_id": job_id, **p_data})
+
+    def check_cancelled() -> bool:
+        return bool(job.get("cancel_requested", False))
+
+    try:
+        if fmt == "pdf":
+            await asyncio.to_thread(
+                file_processor.build_combined_pdf,
+                sessions_data,
+                output_filepath,
+                title,
+                progress_callback=on_progress,
+                cancel_check=check_cancelled
+            )
+        elif fmt in ["mobi", "azw3", "kindle"]:
+            await asyncio.to_thread(
+                file_processor.build_combined_mobi,
+                sessions_data,
+                output_filepath,
+                title,
+                progress_callback=on_progress,
+                cancel_check=check_cancelled
+            )
+        else:
+            await asyncio.to_thread(
+                file_processor.build_combined_epub,
+                sessions_data,
+                output_filepath,
+                title,
+                progress_callback=on_progress,
+                cancel_check=check_cancelled
+            )
+
+        if job.get("cancel_requested"):
+            job["status"] = "cancelled"
+            if os.path.exists(output_filepath):
+                try:
+                    os.remove(output_filepath)
+                except Exception:
+                    pass
+            await notify_combined_sse(job_id, {
+                "type": "cancelled",
+                "job_id": job_id,
+                "message": "Combined export cancelled."
+            })
+            return
+
+        job["status"] = "completed"
+        if "progress" not in job or not job["progress"]:
+            job["progress"] = {}
+        job["progress"]["percent"] = 100
+        download_url = f"/api/download/combined/{out_filename}"
+        job["download_url"] = download_url
+        await notify_combined_sse(job_id, {
+            "type": "completed",
+            "job_id": job_id,
+            "download_url": download_url,
+            "filename": out_filename,
+            "total_volumes": len(sessions_data),
+            "title": title
+        })
+
+    except InterruptedError:
+        job["status"] = "cancelled"
+        if os.path.exists(output_filepath):
+            try:
+                os.remove(output_filepath)
+            except Exception:
+                pass
+        await notify_combined_sse(job_id, {
+            "type": "cancelled",
+            "job_id": job_id,
+            "message": "Combined export cancelled."
+        })
+    except Exception as e:
+        print(f"[Combined Export Error] Job {job_id} failed: {e}")
+        job["status"] = "error"
+        job["error"] = str(e)
+        if os.path.exists(output_filepath):
+            try:
+                os.remove(output_filepath)
+            except Exception:
+                pass
+        await notify_combined_sse(job_id, {
+            "type": "error",
+            "job_id": job_id,
+            "error": str(e)
+        })
+
+
+@app.post("/api/export/combined")
+async def export_combined_volume(req: CombinedExportRequest):
+    """
+    Merges all queued volumes into a single file for seamless e-reader reading.
+
+    - format='epub'  → one EPUB3 with chapter-level TOC per volume (Kindle, Kobo, Apple Books)
+    - format='pdf'   → one PDF with bookmarks per volume
+    """
+    sessions_data = []
+    if req.session_ids:
+        for sid in req.session_ids:
+            sess = SESSIONS.get(sid) or get_or_restore_session(sid)
+            if sess:
+                sessions_data.append(sess)
+
+    # Fallback to all sessions in memory / on disk if none matched or none supplied
+    if not sessions_data:
+        for sid, sess in list(SESSIONS.items()):
+            if sess and sess not in sessions_data:
+                sessions_data.append(sess)
+        for d in sorted(STORAGE_DIR.iterdir()):
+            if d.is_dir():
+                sess = get_or_restore_session(d.name)
+                if sess and sess not in sessions_data:
+                    sessions_data.append(sess)
+
+    if not sessions_data:
+        raise HTTPException(status_code=404, detail="No valid sessions found to export")
+
+    fmt   = (req.format or "epub").lower().strip()
+    title = (req.title or "Colorized Manga Collection").strip() or "Colorized Manga Collection"
+    # Sanitize title for filename
+    clean_title = re.sub(r'[^a-zA-Z0-9_\- ]', '', title).strip().replace(' ', '_')
+    if not clean_title:
+        clean_title = "manga_collection"
+    token = str(uuid.uuid4())[:8]
+    n     = len(sessions_data)
+    total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
+
+    if fmt == "pdf":
+        out_ext = ".pdf"
+    elif fmt in ["mobi", "azw3", "kindle"]:
+        out_ext = ".mobi"
+    else:
+        out_ext = ".epub"
+
+    out_filename   = f"{clean_title}_{token}{out_ext}"
+    output_filepath = str(OUTPUT_DIR / f"combined_{out_filename}")
+
+    # Synchronous execution mode (for automated tests or simple scripts)
+    if req.sync:
+        try:
+            if fmt == "pdf":
+                await asyncio.to_thread(file_processor.build_combined_pdf, sessions_data, output_filepath, title)
+            elif fmt in ["mobi", "azw3", "kindle"]:
+                await asyncio.to_thread(file_processor.build_combined_mobi, sessions_data, output_filepath, title)
+            else:
+                await asyncio.to_thread(file_processor.build_combined_epub, sessions_data, output_filepath, title)
+            return JSONResponse({
+                "status": "success",
+                "format": fmt,
+                "download_url": f"/api/download/combined/{out_filename}",
+                "filename": out_filename,
+                "total_volumes": n,
+                "title": title,
+            })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Combined export failed: {str(e)}")
+
+    # Asynchronous job mode with SSE streaming and cancellation support
+    job_id = token
+    job_info = {
+        "job_id": job_id,
+        "status": "processing",
+        "cancel_requested": False,
+        "format": fmt,
+        "title": title,
+        "out_filename": out_filename,
+        "total_volumes": n,
+        "total_pages": total_pages,
+        "progress": {
+            "percent": 0,
+            "processed_pages": 0,
+            "total_pages": total_pages,
+            "status": "Starting export..."
+        }
+    }
+    COMBINED_EXPORTS[job_id] = job_info
+
+    asyncio.create_task(
+        _async_combined_export_worker(
+            job_id, sessions_data, output_filepath, out_filename, fmt, title
+        )
+    )
+
+    return JSONResponse({
+        "status": "started",
+        "job_id": job_id,
+        "format": fmt,
+        "total_volumes": n,
+        "total_pages": total_pages,
+        "title": title,
+        "stream_url": f"/api/export/combined/stream/{job_id}",
+        "cancel_url": f"/api/export/combined/cancel/{job_id}"
+    })
+
+
+@app.get("/api/export/combined/stream/{job_id}")
+async def stream_combined_export_progress(job_id: str):
+    """Streams real-time progress and completion events for a combined export job."""
+    job = COMBINED_EXPORTS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Combined export job not found")
+
+    q = asyncio.Queue()
+    if job_id not in COMBINED_EXPORT_QUEUES:
+        COMBINED_EXPORT_QUEUES[job_id] = []
+    COMBINED_EXPORT_QUEUES[job_id].append(q)
+
+    async def event_generator():
+        try:
+            init_data = {
+                "type": "init",
+                "job_id": job_id,
+                "status": job.get("status", "processing"),
+                "progress": job.get("progress", {})
+            }
+            yield f"data: {json.dumps(init_data)}\n\n"
+
+            if job.get("status") == "completed":
+                download_url = f"/api/download/combined/{job.get('out_filename', '')}"
+                yield f"data: {json.dumps({'type': 'completed', 'job_id': job_id, 'download_url': download_url, 'filename': job.get('out_filename', '')})}\n\n"
+                return
+            elif job.get("status") == "cancelled":
+                yield f"data: {json.dumps({'type': 'cancelled', 'job_id': job_id})}\n\n"
+                return
+            elif job.get("status") == "error":
+                yield f"data: {json.dumps({'type': 'error', 'job_id': job_id, 'error': job.get('error', 'Export failed')})}\n\n"
+                return
+
+            while True:
+                data = await q.get()
+                yield f"data: {json.dumps(data)}\n\n"
+                if data.get("type") in ["completed", "error", "cancelled"]:
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if job_id in COMBINED_EXPORT_QUEUES and q in COMBINED_EXPORT_QUEUES[job_id]:
+                COMBINED_EXPORT_QUEUES[job_id].remove(q)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/export/combined/cancel/{job_id}")
+async def cancel_combined_export(job_id: str):
+    """Cancels an active combined export job immediately and deletes partial files."""
+    job = COMBINED_EXPORTS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Combined export job not found")
+
+    job["cancel_requested"] = True
+    job["status"] = "cancelled"
+    await notify_combined_sse(job_id, {
+        "type": "cancelled",
+        "job_id": job_id,
+        "message": "Combined export cancellation requested."
+    })
+    return JSONResponse({"status": "cancelled", "job_id": job_id})
+
+
+@app.get("/api/export/combined/status/{job_id}")
+async def get_combined_export_status(job_id: str):
+    """Returns the current progress status of a combined export job."""
+    job = COMBINED_EXPORTS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Combined export job not found")
+    return JSONResponse({
+        "job_id": job_id,
+        "status": job.get("status"),
+        "progress": job.get("progress", {}),
+        "cancel_requested": job.get("cancel_requested", False)
+    })
+
+
+@app.get("/api/download/combined/{filename}")
+async def download_combined_file(filename: str):
+    """Serves a combined single-volume export file."""
+    out_filepath = str(OUTPUT_DIR / f"combined_{filename}")
+    if not os.path.exists(out_filepath):
+        raise HTTPException(status_code=404, detail="Combined export not found or expired")
+    ext = Path(filename).suffix.lower()
+    if ext == ".epub":
+        media_type = "application/epub+zip"
+    elif ext == ".pdf":
+        media_type = "application/pdf"
+    elif ext == ".mobi":
+        media_type = "application/x-mobipocket-ebook"
+    elif ext == ".azw3":
+        media_type = "application/vnd.amazon.mobi8-ebook"
+    else:
+        media_type = "application/octet-stream"
+    return FileResponse(out_filepath, filename=filename, media_type=media_type)
+
+
+
 @app.post("/api/export/{session_id}")
 async def export_document(session_id: str, format: Optional[str] = None):
+    if session_id in ("combined", "batch"):
+        raise HTTPException(status_code=400, detail=f"'{session_id}' is a reserved route, not a session ID.")
     sess = get_or_restore_session(session_id)
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
+
 
     ext = sess["ext"]
     original_path = sess["file_path"]
@@ -662,6 +1133,13 @@ async def export_document(session_id: str, format: Optional[str] = None):
             output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
             file_processor.build_colorized_pdf(pages_meta, session_id, output_filepath)
 
+        elif target_format in ["mobi", "azw3", "kindle"]:
+            out_filename = f"colorized_{stem}.mobi"
+            output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
+            file_processor.build_colorized_mobi(
+                pages_meta, session_id, output_filepath, title=f"Colorized - {stem}"
+            )
+
         elif target_format == "epub":
             out_filename = f"colorized_{stem}.epub"
             output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
@@ -685,7 +1163,7 @@ async def export_document(session_id: str, format: Optional[str] = None):
                 output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
                 file_processor.build_colorized_zip(pages_meta, session_id, output_filepath)
         else:
-            raise HTTPException(status_code=400, detail=f"Unsupported export format: {target_format}. Supported: pdf, epub, zip, image")
+            raise HTTPException(status_code=400, detail=f"Unsupported export format: {target_format}. Supported: pdf, epub, mobi, azw3, zip, image")
 
         download_url = f"/api/download/{session_id}/{out_filename}"
         return JSONResponse({
@@ -703,10 +1181,23 @@ async def download_file(session_id: str, filename: str):
     if not os.path.exists(out_filepath):
         raise HTTPException(status_code=404, detail="File not found or export expired")
 
+    ext = Path(filename).suffix.lower()
+    media_map = {
+        ".epub": "application/epub+zip",
+        ".pdf": "application/pdf",
+        ".mobi": "application/x-mobipocket-ebook",
+        ".azw3": "application/vnd.amazon.mobi8-ebook",
+        ".zip": "application/zip",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+    }
+    media_type = media_map.get(ext, "application/octet-stream")
+
     return FileResponse(
         out_filepath,
         filename=filename,
-        media_type="application/octet-stream"
+        media_type=media_type
     )
 
 @app.get("/api/sessions")

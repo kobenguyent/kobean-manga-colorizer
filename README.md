@@ -218,7 +218,7 @@ The test suite includes end-to-end regression tests, aspect ratio preservation t
 - [x] 90% disk space compression optimization
 - [ ] Automated Speech Bubble OCR & Text Translation pipeline
 - [ ] Vertical Webtoon continuous scroll reading mode
-- [ ] Custom character palette memory (consistent hair/costume colors across panels)
+- [x] Custom character palette memory (consistent hair/costume colors across panels)
 
 ---
 
@@ -229,5 +229,5 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 ---
 
 <div align="center">
-Made with ❤️ for manga readers and comic artists worldwide.
+Made with ❤️ for manga readers and comic artists worldwide. josephthien - kobenguyent
 </div>

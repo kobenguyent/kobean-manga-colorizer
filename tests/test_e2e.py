@@ -97,5 +97,8 @@ def run_test():
     out_doc.close()
     print("E2E INTEGRATION TEST PASSED SUCCESSFULLY!")
 
+def test_e2e():
+    run_test()
+
 if __name__ == "__main__":
     run_test()

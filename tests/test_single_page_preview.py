@@ -62,5 +62,9 @@ def run_preview_test():
 
     print("SINGLE PAGE PREVIEW TEST PASSED PERFECTLY!")
 
+def test_single_page_preview():
+    run_preview_test()
+
 if __name__ == "__main__":
     run_preview_test()
+

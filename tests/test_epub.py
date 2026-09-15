@@ -72,5 +72,9 @@ def run_epub_test():
         assert 'OEBPS/images/page_02.png' in names
     print("EPUB INTEGRATION TEST PASSED SUCCESSFULLY!")
 
+def test_epub():
+    run_epub_test()
+
 if __name__ == "__main__":
     run_epub_test()
+

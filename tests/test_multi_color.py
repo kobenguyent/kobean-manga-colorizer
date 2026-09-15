@@ -54,5 +54,9 @@ def run_test():
     assert os.path.exists(test_out_path)
     print("MULTI-COLOR COLORIZATION TEST PASSED SUCCESSFULLY!")
 
+def test_multi_color():
+    run_test()
+
 if __name__ == "__main__":
     run_test()
+

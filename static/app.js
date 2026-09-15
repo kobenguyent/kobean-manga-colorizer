@@ -9,6 +9,9 @@ let currentPreviewPageIndex = 0;
 let isBatchColorizing = false;
 let batchQueuePoller = null;
 let selectedPages = new Set();
+let historyData = [];
+let currentHistoryFilter = "all";
+let currentHistorySearch = "";
 
 
 // Sub-model options per provider
@@ -284,29 +287,34 @@ document.addEventListener("DOMContentLoaded", () => {
     })
     .catch(() => {});
 
-  // Fetch recent sessions to populate the documents queue
+  // Fetch recent sessions to populate the documents queue and history badges
   fetch("/api/sessions")
     .then(res => res.ok ? res.json() : null)
     .then(data => {
-      if (data && data.sessions && data.sessions.length > 0) {
-        activeSessions = data.sessions;
-        renderDocumentQueue();
+      if (data && data.sessions) {
+        historyData = data.sessions;
+        updateHistoryBadges();
 
-        // Check if a batch is active on the server
-        fetch("/api/colorize/batch/status")
-          .then(res => res.ok ? res.json() : null)
-          .then(batchData => {
-            if (batchData && batchData.is_running) {
-              isBatchColorizing = true;
-              startBatchQueuePoller();
-              if (batchData.current_session_id) {
-                if (!currentSession || currentSession.session_id === batchData.current_session_id) {
-                  subscribeToProgressStream(batchData.current_session_id);
+        if (data.sessions.length > 0) {
+          activeSessions = data.sessions;
+          renderDocumentQueue();
+
+          // Check if a batch is active on the server
+          fetch("/api/colorize/batch/status")
+            .then(res => res.ok ? res.json() : null)
+            .then(batchData => {
+              if (batchData && batchData.is_running) {
+                isBatchColorizing = true;
+                startBatchQueuePoller();
+                if (batchData.current_session_id) {
+                  if (!currentSession || currentSession.session_id === batchData.current_session_id) {
+                    subscribeToProgressStream(batchData.current_session_id);
+                  }
                 }
               }
-            }
-          })
-          .catch(() => {});
+            })
+            .catch(() => {});
+        }
       }
     })
     .catch(() => {});
@@ -344,7 +352,16 @@ function startBatchQueuePoller() {
         const sessData = await sessRes.json();
         if (sessData && sessData.sessions) {
           activeSessions = sessData.sessions;
+          historyData = sessData.sessions;
+          updateHistoryBadges();
           renderDocumentQueue();
+
+          const histOverlay = document.getElementById("history-modal-overlay");
+          if (histOverlay && !histOverlay.classList.contains("hidden")) {
+            updateHistoryStatsBar();
+            renderHistoryList();
+          }
+
           if (currentSession) {
             const updatedCurr = activeSessions.find(s => s.session_id === currentSession.session_id);
             if (updatedCurr) {
@@ -403,11 +420,63 @@ function setupEventListeners() {
 
   if (addMoreInput) {
     addMoreInput.addEventListener("change", (e) => {
-      if (addMoreInput.files.length > 0) {
+      if (addMoreInput.files && addMoreInput.files.length > 0) {
         handleFileSelection(addMoreInput.files);
       }
     });
   }
+
+  // Window-level drag & drop support so dropping files anywhere on the page uploads them
+  ["dragenter", "dragover"].forEach(eventName => {
+    window.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      const dropzone = document.getElementById("dropzone");
+      if (dropzone) dropzone.classList.add("dragover");
+    });
+  });
+
+  ["dragleave"].forEach(eventName => {
+    window.addEventListener(eventName, (e) => {
+      if (e.clientX <= 0 || e.clientY <= 0 || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
+        const dropzone = document.getElementById("dropzone");
+        if (dropzone) dropzone.classList.remove("dragover");
+      }
+    });
+  });
+
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const dropzone = document.getElementById("dropzone");
+    if (dropzone) dropzone.classList.remove("dragover");
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFileSelection(e.dataTransfer.files);
+    }
+  });
+
+  // Keyboard navigation for split comparator & modal dismissal (Escape, ArrowLeft, ArrowRight)
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const histOverlay = document.getElementById("history-modal-overlay");
+      if (histOverlay && !histOverlay.classList.contains("hidden")) {
+        closeHistoryModal();
+        return;
+      }
+    }
+
+    const splitCard = document.getElementById("split-preview-card");
+    if (!splitCard || splitCard.classList.contains("hidden")) return;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      navigatePreviewPage(-1);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      navigatePreviewPage(1);
+    } else if (e.key === "Escape") {
+      closeSplitPreview();
+    }
+  });
 
   // Slider Value Displays with Real-time Live Preview Trigger
   const sliderLine = document.getElementById("slider-line");
@@ -448,6 +517,15 @@ function setupEventListeners() {
   // Setup Split Slider Dragging
   setupSplitSlider();
 }
+
+function triggerAddFiles() {
+  const addMoreInput = document.getElementById("add-more-input");
+  if (addMoreInput) {
+    addMoreInput.value = "";
+    addMoreInput.click();
+  }
+}
+window.triggerAddFiles = triggerAddFiles;
 
 let livePreviewDebounceTimer = null;
 function triggerLivePreview(delay = 300) {
@@ -548,7 +626,16 @@ async function handleFileSelection(fileOrFiles) {
     return;
   }
 
-  // Show dropzone upload loading UI
+  // Visual feedback on the Add Files button in the sidebar
+  const addBtn = document.getElementById("btn-add-files");
+  let origAddBtnHTML = "";
+  if (addBtn) {
+    origAddBtnHTML = addBtn.innerHTML;
+    addBtn.disabled = true;
+    addBtn.innerHTML = '<i class="ri-loader-4-line spin"></i> Adding...';
+  }
+
+  // Show dropzone upload loading UI (for initial landing page state)
   const idleContent = document.getElementById("dropzone-idle-content");
   const loadingContent = document.getElementById("dropzone-loading-content");
   const filenameText = document.getElementById("upload-filename-text");
@@ -577,38 +664,32 @@ async function handleFileSelection(fileOrFiles) {
 
     const data = await resp.json();
     if (resp.ok && data.status === "success") {
-      currentSession = data;
+      // 1. Refresh activeSessions from server to get accurate natural sort and status
+      const sessRes = await fetch("/api/sessions");
+      if (sessRes.ok) {
+        const sessData = await sessRes.json();
+        if (sessData && sessData.sessions) {
+          activeSessions = sessData.sessions;
+        }
+      }
+
+      // 2. Fetch full session details for the newly uploaded primary document
+      const newSessionId = data.session_id;
+      const fullSessRes = await fetch(`/api/session/${newSessionId}`);
+      if (fullSessRes.ok) {
+        currentSession = await fullSessRes.json();
+      } else {
+        currentSession = data;
+      }
       currentBatchId = data.batch_id || currentBatchId;
-      sessionStorage.setItem("active_session_id", data.session_id);
+      sessionStorage.setItem("active_session_id", currentSession.session_id);
       if (currentBatchId) {
         sessionStorage.setItem("active_batch_id", currentBatchId);
       }
 
-      if (data.sessions && data.sessions.length > 0) {
-        data.sessions.forEach(newSess => {
-          const existingIdx = activeSessions.findIndex(s => s.session_id === newSess.session_id);
-          if (existingIdx !== -1) {
-            activeSessions[existingIdx] = newSess;
-          } else {
-            activeSessions.push(newSess);
-          }
-        });
-      } else {
-        if (!activeSessions.some(s => s.session_id === data.session_id)) {
-          activeSessions.push({
-            session_id: data.session_id,
-            filename: data.filename,
-            ext: data.ext || "." + data.filename.split(".").pop(),
-            total_pages: data.total_pages,
-            status: data.status || "idle",
-            processed_count: data.processed_count || 0
-          });
-        }
-      }
-
       renderDashboard();
       renderDocumentQueue();
-      showToast(`Uploaded ${validFiles.length} file(s) with ${data.total_pages} total pages!`, "success");
+      showToast(`Added ${validFiles.length} document(s) with ${data.total_pages || 0} pages!`, "success");
     } else {
       showToast(data.detail || "Upload failed.", "error");
       if (idleContent) idleContent.classList.remove("hidden");
@@ -618,6 +699,15 @@ async function handleFileSelection(fileOrFiles) {
     showToast(`Error: ${err.message}`, "error");
     if (idleContent) idleContent.classList.remove("hidden");
     if (loadingContent) loadingContent.classList.add("hidden");
+  } finally {
+    if (addBtn && origAddBtnHTML) {
+      addBtn.disabled = false;
+      addBtn.innerHTML = origAddBtnHTML;
+    }
+    const addMore = document.getElementById("add-more-input");
+    if (addMore) addMore.value = "";
+    const fileInput = document.getElementById("file-input");
+    if (fileInput) fileInput.value = "";
   }
 }
 
@@ -777,6 +867,11 @@ function renderDashboard() {
   document.getElementById("gallery-total-count").innerText = currentSession.total_pages;
   renderGalleryGrid();
   renderDocumentQueue();
+
+  // Show palette card and load existing characters for this session
+  const paletteCard = document.getElementById("palette-card");
+  if (paletteCard) paletteCard.style.display = "";
+  paletteLoadFromServer();
 }
 
 function updateColorizedCount() {
@@ -801,6 +896,16 @@ function updateColorizedCount() {
   } else {
     if (exportCard) exportCard.classList.add("hidden");
     if (sidebarExportCard) sidebarExportCard.classList.add("hidden");
+  }
+
+  // Show "Recolorize Selected" button when at least one page is already colorized
+  const btnRecolorizeSelected = document.getElementById("btn-recolorize-selected");
+  if (btnRecolorizeSelected) {
+    if (colorizedCount > 0) {
+      btnRecolorizeSelected.classList.remove("hidden");
+    } else {
+      btnRecolorizeSelected.classList.add("hidden");
+    }
   }
 
   // Synchronize with activeSessions sidebar queue
@@ -832,6 +937,17 @@ function renderGalleryGrid() {
     const thumbUrl = page.colorized_url || origUrl;
     const dimText = (page.width && page.height) ? `${page.width} × ${page.height}` : "";
 
+    // Show a small recolorize button on colorized pages
+    const recolorizeBtn = page.status === "colorized"
+      ? `<button class="page-recolorize-btn" title="Force re-colorize this page"
+               onclick="event.stopPropagation(); recolorizePage(${idx})"
+               style="position:absolute;bottom:28px;right:6px;z-index:4;
+                      background:rgba(249,115,22,0.92);border:none;border-radius:4px;
+                      padding:3px 7px;cursor:pointer;color:#fff;font-size:0.7rem;
+                      display:flex;align-items:center;gap:3px;">
+           <i class="ri-refresh-line"></i> Recolorize
+         </button>`
+      : "";
     card.innerHTML = `
       <div class="page-thumb-container">
         <label class="page-select-checkbox ${isSelected ? 'checked' : ''}" onclick="event.stopPropagation()" title="Select/Deselect page for colorization">
@@ -844,6 +960,7 @@ function renderGalleryGrid() {
         <span class="page-status-badge status-${page.status}" id="page-badge-${idx}">
           ${page.status.toUpperCase()}
         </span>
+        ${recolorizeBtn}
         <img class="page-thumb-img" id="page-img-${idx}" src="${thumbUrl}" alt="${page.display_name}" loading="lazy" />
       </div>
       <div class="page-card-footer">
@@ -998,7 +1115,8 @@ async function startColorization() {
     contrast: 1.1,
     line_preserve: linePreserve,
     selected_pages: pagesToColorize,
-    force_reprocess: isForceReprocess
+    force_reprocess: isForceReprocess,
+    skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
   };
 
   // UI state updates
@@ -1185,9 +1303,15 @@ window.subscribeToProgressStream = subscribeToProgressStream;
 window.connectProgressStream = subscribeToProgressStream;
 
 async function cancelColorization() {
+  if (currentCombinedExportJobId) {
+    await cancelCombinedExport();
+    return;
+  }
+
   if (!currentSession) return;
 
   const btnCancel = document.getElementById("btn-cancel-colorize");
+
   if (btnCancel) {
     btnCancel.disabled = true;
     btnCancel.innerHTML = '<i class="ri-loader-4-line"></i> Cancelling...';
@@ -1470,6 +1594,18 @@ function openSplitPreview(pageIdx, preventScroll = false) {
     splitCard.scrollIntoView({ behavior: 'smooth' });
   }
 
+  // Update prev / next buttons and floating chevron indicators
+  const totalPages = currentSession?.pages?.length || 0;
+  const prevBtn = document.getElementById("btn-prev-page");
+  const nextBtn = document.getElementById("btn-next-page");
+  if (prevBtn) prevBtn.disabled = pageIdx <= 0;
+  if (nextBtn) nextBtn.disabled = pageIdx >= totalPages - 1;
+
+  const chevronPrev = document.querySelector(".preview-nav-prev");
+  const chevronNext = document.querySelector(".preview-nav-next");
+  if (chevronPrev) chevronPrev.style.display = pageIdx <= 0 ? "none" : "flex";
+  if (chevronNext) chevronNext.style.display = pageIdx >= totalPages - 1 ? "none" : "flex";
+
   // Setup slider listeners
   setupSplitSlider();
 
@@ -1479,6 +1615,9 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   } else {
     setComparatorView("bw", false);
   }
+
+  // Reset handle with container dimensions applied
+  requestAnimationFrame(() => setSplitPosition(currentSplitPct));
 }
 
 function closeSplitPreview() {
@@ -1496,14 +1635,7 @@ function setupSplitSlider() {
 
   let isDragging = false;
 
-  const getClientX = (e) => {
-    if (e.clientX !== undefined && e.clientX !== 0) return e.clientX;
-    if (e.touches && e.touches[0]) return e.touches[0].clientX;
-    if (e.changedTouches && e.changedTouches[0]) return e.changedTouches[0].clientX;
-    return 0;
-  };
-
-  const updateSplitFromClientX = (clientX) => {
+  const updateFromPointer = (clientX) => {
     const rect = container.getBoundingClientRect();
     if (rect.width <= 0) return;
     let x = clientX - rect.left;
@@ -1511,77 +1643,66 @@ function setupSplitSlider() {
     if (x > rect.width) x = rect.width;
     const pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
 
-    // When dragging manually, update view mode button states
-    currentViewMode = pct <= 2 ? "color" : (pct >= 98 ? "bw" : "split");
-    ["bw", "split", "color"].forEach(m => {
-      const btn = document.getElementById(`btn-view-${m}`);
-      if (btn) btn.classList.toggle("active", m === currentViewMode);
-    });
     const btnLeft = document.querySelector(".split-label.label-left");
     const btnRight = document.getElementById("split-label-right");
-    if (btnLeft) btnLeft.classList.toggle("active", currentViewMode === "bw");
-    if (btnRight) btnRight.classList.toggle("active", currentViewMode === "color");
+    if (btnLeft) btnLeft.classList.toggle("active", pct >= 98);
+    if (btnRight) btnRight.classList.toggle("active", pct <= 2);
 
     setSplitPosition(pct);
   };
 
-  const startDrag = (e) => {
-    // Accept primary mouse button (0) or touch/pen
+  // Modern Pointer Events API (supports Mouse, Touch, and Stylus without native drag interference)
+  container.addEventListener("pointerdown", (e) => {
     if (e.button !== undefined && e.button !== 0) return;
     isDragging = true;
     if (handle) handle.classList.add("active");
-    if (container.setPointerCapture && e.pointerId !== undefined) {
-      try {
-        container.setPointerCapture(e.pointerId);
-      } catch (_) {}
-    }
-    updateSplitFromClientX(getClientX(e));
-    if (e.cancelable) e.preventDefault();
-  };
+    try {
+      container.setPointerCapture(e.pointerId);
+    } catch (err) {}
+    updateFromPointer(e.clientX);
+    e.preventDefault();
+  });
 
-  const onDrag = (e) => {
+  container.addEventListener("pointermove", (e) => {
     if (!isDragging) return;
-    updateSplitFromClientX(getClientX(e));
-    if (e.cancelable) e.preventDefault();
-  };
+    updateFromPointer(e.clientX);
+    e.preventDefault();
+  });
 
   const stopDrag = (e) => {
-    if (!isDragging) return;
-    isDragging = false;
-    if (handle) handle.classList.remove("active");
-    if (container.releasePointerCapture && e.pointerId !== undefined) {
+    if (isDragging) {
+      isDragging = false;
+      if (handle) handle.classList.remove("active");
       try {
         container.releasePointerCapture(e.pointerId);
-      } catch (_) {}
+      } catch (err) {}
     }
   };
 
-  // Modern Pointer Events (mouse, touch, stylus)
-  container.addEventListener("pointerdown", startDrag);
-  window.addEventListener("pointermove", onDrag, { passive: false });
-  window.addEventListener("pointerup", stopDrag);
-  window.addEventListener("pointercancel", stopDrag);
-
-  // Mouse event fallbacks
-  container.addEventListener("mousedown", startDrag);
-  window.addEventListener("mousemove", onDrag);
-  window.addEventListener("mouseup", stopDrag);
-
-  // Touch event fallbacks
-  container.addEventListener("touchstart", startDrag, { passive: false });
-  window.addEventListener("touchmove", onDrag, { passive: false });
-  window.addEventListener("touchend", stopDrag);
+  container.addEventListener("pointerup", stopDrag);
+  container.addEventListener("pointercancel", stopDrag);
 
   // Prevent browser native image dragging and selection
   container.addEventListener("dragstart", (e) => e.preventDefault());
   container.addEventListener("selectstart", (e) => e.preventDefault());
 
-  // Window resize handler
-  window.addEventListener("resize", () => setSplitPosition(currentSplitPct));
+  // Horizontal Trackpad / Wheel Scroll Support (Swipe left/right to slide divider)
+  container.addEventListener("wheel", (e) => {
+    const isHorizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    const delta = isHorizontal ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
+    if (delta !== 0) {
+      e.preventDefault();
+      const step = (delta / (container.clientWidth || 600)) * 100 * 1.2;
+      const newPct = Math.max(0, Math.min(100, currentSplitPct + step));
+      setSplitPosition(newPct);
+    }
+  }, { passive: false });
 
-  // ResizeObserver keeps overlay image exactly aligned with container
+  // Window resize & ResizeObserver for dynamic image alignment
+  window.addEventListener("resize", () => setSplitPosition(currentSplitPct));
   if (window.ResizeObserver) {
-    new ResizeObserver(() => setSplitPosition(currentSplitPct)).observe(container);
+    const ro = new ResizeObserver(() => setSplitPosition(currentSplitPct));
+    ro.observe(container);
   }
 }
 
@@ -1605,12 +1726,27 @@ function setSplitPosition(pct) {
   }
 }
 
+function navigatePreviewPage(direction) {
+  if (!currentSession || !currentSession.pages || currentSession.pages.length === 0) return;
+  const newIndex = currentPreviewPageIndex + direction;
+  if (newIndex >= 0 && newIndex < currentSession.pages.length) {
+    openSplitPreview(newIndex, true);
+  } else if (newIndex < 0) {
+    showToast("Already on the first page.", "info");
+  } else {
+    showToast("Already on the last page.", "info");
+  }
+}
+window.navigatePreviewPage = navigatePreviewPage;
+
 async function exportDocument(format = "auto") {
   if (!currentSession) return;
 
   const formatLabels = {
     pdf: "PDF document",
     epub: "EPUB e-book",
+    mobi: "Kindle MOBI e-book",
+    azw3: "Kindle AZW3 e-book",
     zip: "ZIP images archive",
     auto: "colorized document"
   };
@@ -1738,7 +1874,8 @@ async function exportBatch(format = "auto") {
   const formatNames = {
     auto: "collection (preserving original formats)",
     epub: "all documents as EPUBs",
-    pdf: "all documents as PDFs"
+    pdf: "all documents as PDFs",
+    mobi: "all documents as Kindle MOBIs"
   };
   const label = formatNames[format] || format;
 
@@ -1776,6 +1913,249 @@ async function exportBatch(format = "auto") {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+//  Combined Single-Volume Export with Real-time Progress & Cancel
+// ─────────────────────────────────────────────────────────────────────
+
+let currentCombinedExportJobId = null;
+let combinedExportEventSource = null;
+
+function resetCombinedExportUI() {
+  const epubBtn = document.getElementById("btn-combined-epub");
+  const mobiBtn = document.getElementById("btn-combined-mobi");
+  const pdfBtn  = document.getElementById("btn-combined-pdf");
+  if (epubBtn) epubBtn.disabled = false;
+  if (mobiBtn) mobiBtn.disabled = false;
+  if (pdfBtn)  pdfBtn.disabled  = false;
+
+  const progressBox = document.getElementById("combined-export-progress-box");
+  if (progressBox) progressBox.classList.add("hidden");
+
+  const progCard = document.getElementById("progress-card");
+  if (progCard && progCard.dataset.combinedExport === "true") {
+    progCard.classList.add("hidden");
+    progCard.dataset.combinedExport = "false";
+  }
+
+  if (combinedExportEventSource) {
+    try { combinedExportEventSource.close(); } catch (_) {}
+    combinedExportEventSource = null;
+  }
+  currentCombinedExportJobId = null;
+}
+
+async function cancelCombinedExport() {
+  if (!currentCombinedExportJobId) {
+    showToast("No active combined export to cancel.", "warning");
+    return;
+  }
+
+  const btnCancel = document.getElementById("btn-cancel-combined-export");
+  if (btnCancel) {
+    btnCancel.disabled = true;
+    btnCancel.innerHTML = '<i class="ri-loader-4-line spin"></i> Cancelling...';
+  }
+
+  showToast("Cancelling combined export...", "info");
+
+  try {
+    await fetch(`/api/export/combined/cancel/${currentCombinedExportJobId}`, {
+      method: "POST"
+    });
+  } catch (err) {
+    console.error("Cancel combined export request error:", err);
+  }
+}
+
+/**
+ * Merges all active sessions into a single EPUB, MOBI, or PDF file with live progress.
+ *
+ * @param {"epub"|"mobi"|"pdf"} format
+ */
+async function exportCombined(format = "epub") {
+  let sessionList = (activeSessions && activeSessions.length > 0)
+    ? activeSessions
+    : (currentSession ? [currentSession] : []);
+
+  if (sessionList.length === 0 && Array.isArray(historyData) && historyData.length > 0) {
+    sessionList = historyData;
+  }
+
+  const sessionIds = sessionList.map(s => s.session_id).filter(Boolean);
+  const title = document.getElementById("combined-title-input")?.value?.trim()
+    || "Colorized Manga Collection";
+
+  const fmtLabel = format === "pdf" ? "Single PDF" : (format === "mobi" ? "Single Kindle MOBI" : "Single EPUB");
+
+  const epubBtn = document.getElementById("btn-combined-epub");
+  const mobiBtn = document.getElementById("btn-combined-mobi");
+  const pdfBtn  = document.getElementById("btn-combined-pdf");
+  if (epubBtn) epubBtn.disabled = true;
+  if (mobiBtn) mobiBtn.disabled = true;
+  if (pdfBtn)  pdfBtn.disabled  = true;
+
+  // Sidebar progress box
+  const progressBox = document.getElementById("combined-export-progress-box");
+  const progressTitle = document.getElementById("combined-progress-title-text");
+  const progressPct = document.getElementById("combined-progress-pct");
+  const progressBarFill = document.getElementById("combined-progress-bar-fill");
+  const progressSubtext = document.getElementById("combined-progress-subtext");
+  const btnCancel = document.getElementById("btn-cancel-combined-export");
+
+  if (progressBox) progressBox.classList.remove("hidden");
+  if (progressTitle) progressTitle.innerText = `Exporting ${fmtLabel}...`;
+  if (progressPct) progressPct.innerText = "0%";
+  if (progressBarFill) progressBarFill.style.width = "0%";
+  if (progressSubtext) progressSubtext.innerText = "Starting packager...";
+  if (btnCancel) {
+    btnCancel.disabled = false;
+    btnCancel.innerHTML = '<i class="ri-close-circle-line"></i> Cancel';
+  }
+
+  // Main banner progress card
+  const progCard = document.getElementById("progress-card");
+  const progStatus = document.getElementById("progress-status-text");
+  const progSub = document.getElementById("progress-subtext");
+  const progCounter = document.getElementById("progress-counter-text");
+  const progFill = document.getElementById("progress-bar-fill");
+  if (progCard) {
+    progCard.classList.remove("hidden");
+    progCard.dataset.combinedExport = "true";
+  }
+  if (progStatus) progStatus.innerText = `Assembling ${fmtLabel}...`;
+  if (progSub) progSub.innerText = `Preparing ${sessionIds.length || 'all'} volumes: "${title}"`;
+  if (progCounter) progCounter.innerText = "0%";
+  if (progFill) progFill.style.width = "0%";
+
+  showToast(`Preparing ${fmtLabel} (${sessionIds.length || 'all'} volumes)...`, "info");
+
+  try {
+    const resp = await fetch("/api/export/combined", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_ids: sessionIds, format, title })
+    });
+
+    const data = await resp.json();
+    if (!resp.ok || !data.job_id) {
+      throw new Error(data.detail || `${fmtLabel} export failed to start.`);
+    }
+
+    currentCombinedExportJobId = data.job_id;
+
+    if (combinedExportEventSource) {
+      try { combinedExportEventSource.close(); } catch (_) {}
+    }
+
+    const sseUrl = data.stream_url || `/api/export/combined/stream/${data.job_id}`;
+    combinedExportEventSource = new EventSource(sseUrl);
+
+    combinedExportEventSource.onmessage = (event) => {
+      try {
+        const ev = JSON.parse(event.data);
+
+        if (ev.type === "progress") {
+          const pct = Math.min(100, Math.max(0, ev.percent || 0));
+          if (progressPct) progressPct.innerText = `${pct}%`;
+          if (progressBarFill) progressBarFill.style.width = `${pct}%`;
+          if (progressSubtext) {
+            progressSubtext.innerText = ev.status || `Page ${ev.processed_pages}/${ev.total_pages}`;
+          }
+
+          if (progCounter) progCounter.innerText = `${ev.processed_pages || 0} / ${ev.total_pages || 0} (${pct}%)`;
+          if (progFill) progFill.style.width = `${pct}%`;
+          if (progSub && ev.status) progSub.innerText = ev.status;
+
+        } else if (ev.type === "completed") {
+          resetCombinedExportUI();
+          showToast(`${fmtLabel} ready — ${ev.total_volumes || 'All'} volume(s) merged! Downloading…`, "success");
+
+          const a = document.createElement("a");
+          a.href = ev.download_url;
+          a.download = ev.filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+
+        } else if (ev.type === "cancelled") {
+          resetCombinedExportUI();
+          showToast(`Combined ${fmtLabel} export cancelled.`, "warning");
+
+        } else if (ev.type === "error") {
+          resetCombinedExportUI();
+          showToast(`Combined export error: ${ev.error || 'Failed'}`, "error");
+        }
+      } catch (e) {
+        console.error("Error parsing combined export SSE message:", e);
+      }
+    };
+
+    combinedExportEventSource.onerror = () => {
+      if (currentCombinedExportJobId) {
+        pollCombinedExportFallback(currentCombinedExportJobId, fmtLabel);
+      }
+    };
+
+  } catch (err) {
+    resetCombinedExportUI();
+    showToast(`Combined export error: ${err.message}`, "error");
+  }
+}
+
+async function pollCombinedExportFallback(jobId, fmtLabel) {
+  const pollInterval = setInterval(async () => {
+    if (!currentCombinedExportJobId || currentCombinedExportJobId !== jobId) {
+      clearInterval(pollInterval);
+      return;
+    }
+
+    try {
+      const resp = await fetch(`/api/export/combined/status/${jobId}`);
+      if (!resp.ok) {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        return;
+      }
+      const data = await resp.json();
+      if (data.status === "completed") {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        const dlUrl = `/api/download/combined/${data.out_filename || ('collection.' + (data.format || 'epub'))}`;
+        const a = document.createElement("a");
+        a.href = dlUrl;
+        a.download = data.out_filename || "combined_manga";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        showToast(`${fmtLabel} download started!`, "success");
+      } else if (data.status === "cancelled") {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        showToast(`Combined export cancelled.`, "warning");
+      } else if (data.status === "error") {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        showToast(`Export error: ${data.error || 'Failed'}`, "error");
+      } else if (data.progress) {
+        const pct = data.progress.percent || 0;
+        const progressPct = document.getElementById("combined-progress-pct");
+        const progressBarFill = document.getElementById("combined-progress-bar-fill");
+        const progressSubtext = document.getElementById("combined-progress-subtext");
+        if (progressPct) progressPct.innerText = `${pct}%`;
+        if (progressBarFill) progressBarFill.style.width = `${pct}%`;
+        if (progressSubtext && data.progress.status) progressSubtext.innerText = data.progress.status;
+      }
+    } catch (_) {
+      clearInterval(pollInterval);
+      resetCombinedExportUI();
+    }
+  }, 1000);
+}
+
+window.exportCombined = exportCombined;
+window.cancelCombinedExport = cancelCombinedExport;
+
+
 // ─── File & Page Deletion Handlers ──────────────────────────────────
 
 async function deleteDocument(event, sessionId) {
@@ -1796,6 +2176,9 @@ async function deleteDocument(event, sessionId) {
 
     if (resp.ok) {
       activeSessions = activeSessions.filter(s => s.session_id !== sessionId);
+      historyData = historyData.filter(s => s.session_id !== sessionId);
+      updateHistoryBadges();
+      updateHistoryStatsBar();
 
       if (currentSession && currentSession.session_id === sessionId) {
         if (activeSessions.length > 0) {
@@ -1948,3 +2331,615 @@ function showToast(message, type = "info") {
     toast.classList.add("hidden");
   }, 4000);
 }
+
+// ─── Document & Processing History Modal Logic ─────────────────────────────
+
+function openHistoryModal() {
+  const overlay = document.getElementById("history-modal-overlay");
+  if (!overlay) return;
+  overlay.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+
+  loadHistoryData();
+
+  setTimeout(() => {
+    const input = document.getElementById("history-search-input");
+    if (input) input.focus();
+  }, 100);
+}
+
+function closeHistoryModal() {
+  const overlay = document.getElementById("history-modal-overlay");
+  if (!overlay) return;
+  overlay.classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+function handleHistoryOverlayClick(event) {
+  if (event.target && event.target.id === "history-modal-overlay") {
+    closeHistoryModal();
+  }
+}
+
+function updateHistoryBadges() {
+  const count = historyData ? historyData.length : 0;
+  const badge = document.getElementById("history-badge-count");
+  if (badge) badge.innerText = count;
+
+  const idleContainer = document.getElementById("idle-history-container");
+  const idleCount = document.getElementById("idle-history-count");
+  if (idleContainer && idleCount) {
+    if (count > 0) {
+      idleCount.innerText = count;
+      idleContainer.classList.remove("hidden");
+    } else {
+      idleContainer.classList.add("hidden");
+    }
+  }
+}
+
+async function loadHistoryData(forceRefresh = false) {
+  const listContainer = document.getElementById("history-list-container");
+  if (forceRefresh && listContainer) {
+    listContainer.innerHTML = `
+      <div class="history-loading-placeholder">
+        <i class="ri-loader-4-line spin" style="font-size: 2rem; color: var(--accent-cyan);"></i>
+        <span>Refreshing document sessions...</span>
+      </div>
+    `;
+  }
+
+  try {
+    const res = await fetch("/api/sessions");
+    if (!res.ok) throw new Error("Failed to load sessions");
+    const data = await res.json();
+    historyData = data.sessions || [];
+
+    // Keep activeSessions in sync if needed
+    if (historyData.length > 0 && (!activeSessions || activeSessions.length === 0)) {
+      activeSessions = historyData;
+      renderDocumentQueue();
+    }
+
+    updateHistoryBadges();
+    updateHistoryStatsBar();
+    renderHistoryList();
+  } catch (err) {
+    if (listContainer) {
+      listContainer.innerHTML = `
+        <div class="history-empty-state">
+          <i class="ri-error-warning-line history-empty-icon" style="color: #ef4444;"></i>
+          <h4 class="history-empty-title">Unable to Load History</h4>
+          <p class="history-empty-desc">${err.message}</p>
+          <button class="btn btn-secondary btn-sm" onclick="loadHistoryData(true)">Try Again</button>
+        </div>
+      `;
+    }
+  }
+}
+
+function updateHistoryStatsBar() {
+  const total = historyData.length;
+  const completed = historyData.filter(s => s.status === "completed").length;
+  const processing = historyData.filter(s => s.status === "processing").length;
+  const idle = historyData.filter(s => s.status !== "completed" && s.status !== "processing").length;
+
+  const totalEl = document.getElementById("hist-stat-total");
+  const compEl = document.getElementById("hist-stat-completed");
+  const procEl = document.getElementById("hist-stat-processing");
+  const idleEl = document.getElementById("hist-stat-idle");
+
+  if (totalEl) totalEl.innerText = total;
+  if (compEl) compEl.innerText = completed;
+  if (procEl) procEl.innerText = processing;
+  if (idleEl) idleEl.innerText = idle;
+
+  const tabAll = document.getElementById("hist-tab-all-count");
+  const tabComp = document.getElementById("hist-tab-completed-count");
+  const tabProc = document.getElementById("hist-tab-proc-count");
+  const tabIdle = document.getElementById("hist-tab-idle-count");
+
+  if (tabAll) tabAll.innerText = total;
+  if (tabComp) tabComp.innerText = completed;
+  if (tabProc) tabProc.innerText = processing;
+  if (tabIdle) tabIdle.innerText = idle;
+
+  const batchExportBtn = document.getElementById("btn-history-batch-export");
+  if (batchExportBtn) {
+    batchExportBtn.disabled = completed === 0;
+  }
+}
+
+function setHistoryFilter(filter, tabBtn) {
+  currentHistoryFilter = filter;
+  const tabs = document.querySelectorAll(".history-tab-btn");
+  tabs.forEach(t => t.classList.remove("active"));
+  if (tabBtn) tabBtn.classList.add("active");
+  renderHistoryList();
+}
+
+function filterHistoryList() {
+  const input = document.getElementById("history-search-input");
+  const clearBtn = document.getElementById("btn-history-clear-search");
+  currentHistorySearch = input ? input.value.trim().toLowerCase() : "";
+
+  if (clearBtn) {
+    if (currentHistorySearch) {
+      clearBtn.classList.remove("hidden");
+    } else {
+      clearBtn.classList.add("hidden");
+    }
+  }
+
+  renderHistoryList();
+}
+
+function clearHistorySearch() {
+  const input = document.getElementById("history-search-input");
+  if (input) input.value = "";
+  filterHistoryList();
+}
+
+function renderHistoryList() {
+  const container = document.getElementById("history-list-container");
+  const summaryEl = document.getElementById("history-footer-summary");
+  if (!container) return;
+
+  // Filter items
+  let filtered = historyData.filter(item => {
+    // Status filter
+    if (currentHistoryFilter === "completed" && item.status !== "completed") return false;
+    if (currentHistoryFilter === "processing" && item.status !== "processing") return false;
+    if (currentHistoryFilter === "idle" && (item.status === "completed" || item.status === "processing")) return false;
+
+    // Search query filter
+    if (currentHistorySearch) {
+      const name = (item.filename || "").toLowerCase();
+      if (!name.includes(currentHistorySearch)) return false;
+    }
+
+    return true;
+  });
+
+  if (summaryEl) {
+    summaryEl.innerText = `Showing ${filtered.length} of ${historyData.length} documents`;
+  }
+
+  if (filtered.length === 0) {
+    let emptyMsg = "No documents uploaded or processed yet.";
+    let emptyDesc = "Drag & drop manga files onto the upload area to start colorizing!";
+    if (currentHistorySearch || currentHistoryFilter !== "all") {
+      emptyMsg = "No matching documents found.";
+      emptyDesc = "Try adjusting your search query or status filter tab above.";
+    }
+
+    container.innerHTML = `
+      <div class="history-empty-state">
+        <i class="ri-folder-history-line history-empty-icon"></i>
+        <h4 class="history-empty-title">${emptyMsg}</h4>
+        <p class="history-empty-desc">${emptyDesc}</p>
+        ${currentHistorySearch || currentHistoryFilter !== "all" ? `
+          <button class="btn btn-secondary btn-sm" onclick="clearHistorySearch(); setHistoryFilter('all', document.querySelector('.history-tab-btn[data-filter=all]'));">
+            Reset Filters
+          </button>
+        ` : ""}
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = "";
+
+  filtered.forEach(item => {
+    const isCurrent = currentSession && currentSession.session_id === item.session_id;
+    const totalPages = item.total_pages || 0;
+    const processedPages = item.processed_count || 0;
+    const pct = totalPages > 0 ? Math.min(100, Math.round((processedPages / totalPages) * 100)) : 0;
+
+    const fn = (item.filename || "").toLowerCase();
+    let iconHTML = '<i class="ri-image-fill" style="color: #06b6d4;"></i>';
+    if (fn.endsWith(".epub")) {
+      iconHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
+    } else if (fn.endsWith(".pdf")) {
+      iconHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
+    } else if (fn.endsWith(".zip")) {
+      iconHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
+    }
+
+    let statusBadgeClass = "status-pending";
+    let statusText = "Queued";
+    if (item.status === "completed") {
+      statusBadgeClass = "status-colorized";
+      statusText = "Completed";
+    } else if (item.status === "processing") {
+      statusBadgeClass = "status-processing";
+      statusText = `<i class="ri-loader-4-line spin"></i> Processing (${processedPages}/${totalPages})`;
+    }
+
+    const row = document.createElement("div");
+    row.className = `history-item ${isCurrent ? "is-current" : ""}`;
+    row.id = `history-item-${item.session_id}`;
+
+    row.innerHTML = `
+      <div class="history-item-icon">
+        ${iconHTML}
+      </div>
+      <div class="history-item-details">
+        <div class="history-item-title-row">
+          <span class="history-item-title" title="${item.filename}" onclick="switchFromHistory('${item.session_id}')">
+            ${item.filename}
+          </span>
+          ${isCurrent ? '<span class="history-active-tag">Active</span>' : ''}
+        </div>
+        <div class="history-item-meta">
+          <span class="page-status-badge ${statusBadgeClass}" style="font-size: 0.7rem; padding: 2px 8px;">
+            ${statusText}
+          </span>
+          <span>${processedPages} / ${totalPages} pages (${pct}%)</span>
+          <div class="history-progress-track">
+            <div class="history-progress-fill" style="width: ${pct}%;"></div>
+          </div>
+        </div>
+      </div>
+      <div class="history-item-actions">
+        <button class="btn btn-secondary btn-sm btn-history-open" onclick="switchFromHistory('${item.session_id}')" title="Open and view in workspace">
+          <i class="ri-arrow-right-line"></i> Open
+        </button>
+        ${item.status === "completed" ? `
+          <button class="btn btn-secondary btn-sm" onclick="exportDocumentFromHistory('${item.session_id}')" title="Export colorized document">
+            <i class="ri-download-cloud-2-line"></i> Export
+          </button>
+        ` : ""}
+        <button class="btn-icon btn-danger-icon" onclick="deleteFromHistory(event, '${item.session_id}')" title="Delete document session">
+          <i class="ri-delete-bin-line"></i>
+        </button>
+      </div>
+    `;
+
+    container.appendChild(row);
+  });
+}
+
+async function switchFromHistory(sessionId) {
+  closeHistoryModal();
+  await switchActiveDocument(sessionId);
+}
+
+async function exportDocumentFromHistory(sessionId, format = "auto") {
+  const sess = historyData.find(s => s.session_id === sessionId) || (currentSession?.session_id === sessionId ? currentSession : null);
+  const docName = sess ? sess.filename : "document";
+
+  showToast(`Preparing export for "${docName}"...`, "info");
+
+  try {
+    const queryParam = format && format !== "auto" ? `?format=${encodeURIComponent(format)}` : "";
+    const resp = await fetch(`/api/export/${sessionId}${queryParam}`, {
+      method: "POST"
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.download_url) {
+      showToast(`Exported "${data.filename}" successfully! Downloading...`, "success");
+      const a = document.createElement("a");
+      a.href = data.download_url;
+      a.download = data.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } else {
+      showToast(data.detail || "Export failed.", "error");
+    }
+  } catch (err) {
+    showToast(`Export error: ${err.message}`, "error");
+  }
+}
+
+async function deleteFromHistory(event, sessionId) {
+  if (event) event.stopPropagation();
+
+  await deleteDocument(event, sessionId);
+
+  // Refresh data in history list
+  loadHistoryData(false);
+}
+
+// Make history handlers globally available
+window.openHistoryModal = openHistoryModal;
+window.closeHistoryModal = closeHistoryModal;
+window.handleHistoryOverlayClick = handleHistoryOverlayClick;
+window.loadHistoryData = loadHistoryData;
+window.setHistoryFilter = setHistoryFilter;
+window.filterHistoryList = filterHistoryList;
+window.clearHistorySearch = clearHistorySearch;
+window.switchFromHistory = switchFromHistory;
+window.exportDocumentFromHistory = exportDocumentFromHistory;
+window.deleteFromHistory = deleteFromHistory;
+
+
+// ─────────────────────────────────────────────────────────────────────
+//  Character Palette Manager
+// ─────────────────────────────────────────────────────────────────────
+
+/** In-memory palette state for the active session. */
+let paletteCharacters = [];
+
+/**
+ * Fetches the current session's palette from the server and re-renders the list.
+ */
+async function paletteLoadFromServer() {
+  if (!currentSession) return;
+  try {
+    const resp = await fetch(`/api/palette/${currentSession.session_id}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    paletteRender();
+  } catch (_) {
+    // Silent — palette is optional
+  }
+}
+
+/**
+ * Renders the character list inside #palette-character-list.
+ * Each row shows the name + color swatches + a delete button.
+ */
+function paletteRender() {
+  const list = document.getElementById("palette-character-list");
+  const badge = document.getElementById("palette-badge-count");
+  if (!list) return;
+
+  if (badge) badge.innerText = `${paletteCharacters.length} Character${paletteCharacters.length !== 1 ? "s" : ""}`;
+
+  if (paletteCharacters.length === 0) {
+    list.innerHTML = `<p style="font-size:0.78rem;color:var(--text-secondary);text-align:center;padding:0.5rem 0;">
+      No characters yet. Add one below.
+    </p>`;
+    return;
+  }
+
+  list.innerHTML = paletteCharacters.map((ch, i) => {
+    const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+      .filter(Boolean)
+      .map(hx => `<span title="${hx}" style="
+        display:inline-block;width:14px;height:14px;border-radius:3px;
+        background:${hx};border:1px solid rgba(255,255,255,0.2);vertical-align:middle;"></span>`)
+      .join(" ");
+
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;
+                  background:var(--card-bg,#1e1e2e);border:1px solid var(--border-color);
+                  border-radius:6px;padding:6px 10px;gap:6px;">
+        <span style="font-size:0.82rem;font-weight:500;flex:1;min-width:0;
+                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+              title="${ch.name}">${ch.name}</span>
+        <span style="display:flex;gap:3px;align-items:center;">${swatches}</span>
+        <button class="btn-icon" title="Remove ${ch.name}"
+                onclick="paletteDeleteCharacter(${i})"
+                style="padding:2px 5px;opacity:0.6;flex-shrink:0;">
+          <i class="ri-delete-bin-line" style="font-size:0.85rem;"></i>
+        </button>
+      </div>`;
+  }).join("");
+}
+
+/**
+ * Reads the add-character form, calls POST /api/palette/upsert, and refreshes.
+ */
+async function paletteAddCharacter() {
+  if (!currentSession) { showToast("No active session.", "warning"); return; }
+
+  const name = (document.getElementById("pal-char-name")?.value || "").trim();
+  if (!name) { showToast("Please enter a character name.", "warning"); return; }
+
+  const hairHex    = document.getElementById("pal-hair")?.value    || "";
+  const skinHex    = document.getElementById("pal-skin")?.value    || "";
+  const costumeHex = document.getElementById("pal-costume")?.value || "";
+  const extraHex   = document.getElementById("pal-extra")?.value   || "";
+
+  try {
+    const resp = await fetch("/api/palette/upsert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: currentSession.session_id,
+        character: { name, hair_hex: hairHex, skin_hex: skinHex, costume_hex: costumeHex, extra_hex: extraHex }
+      })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    paletteRender();
+    const nameInput = document.getElementById("pal-char-name");
+    if (nameInput) nameInput.value = "";
+    showToast(`Character "${name}" saved to palette.`, "success");
+  } catch (err) {
+    showToast(`Palette error: ${err.message}`, "error");
+  }
+}
+
+/**
+ * Removes a character by index from the local list and calls DELETE on the server.
+ */
+async function paletteDeleteCharacter(index) {
+  if (!currentSession) return;
+  const ch = paletteCharacters[index];
+  if (!ch) return;
+
+  try {
+    const resp = await fetch(
+      `/api/palette/${currentSession.session_id}/${encodeURIComponent(ch.name)}`,
+      { method: "DELETE" }
+    );
+    if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    paletteRender();
+    showToast(`"${ch.name}" removed from palette.`, "info");
+  } catch (err) {
+    showToast(`Could not remove character: ${err.message}`, "error");
+  }
+}
+
+window.paletteAddCharacter    = paletteAddCharacter;
+window.paletteDeleteCharacter = paletteDeleteCharacter;
+window.paletteLoadFromServer  = paletteLoadFromServer;
+
+
+// ─────────────────────────────────────────────────────────────────────
+//  Recolorize — force re-run colorization on already-done pages
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Force-recolorizes a single page using the preview endpoint.
+ * Works from both the split preview header and the per-card button.
+ *
+ * @param {number} pageIdx  - 0-based page index
+ */
+async function recolorizePage(pageIdx) {
+  if (!currentSession) return;
+  const page = currentSession.pages[pageIdx];
+  if (!page) return;
+
+  const modelVariant  = document.getElementById("model-variant-select")?.value || "";
+  const apiKey        = document.getElementById("api-key-input")?.value || "";
+  const style         = document.getElementById("style-select")?.value || "gemini_anime";
+  const linePreserve  = parseFloat(document.getElementById("slider-line")?.value || "85") / 100.0;
+  const saturation    = parseFloat(document.getElementById("slider-saturation")?.value || "14") / 10.0;
+
+  // Show loading state in split preview header
+  const recolorBtn = document.getElementById("btn-recolorize-page");
+  if (recolorBtn) {
+    recolorBtn.disabled = true;
+    recolorBtn.innerHTML = '<i class="ri-loader-4-line spinner"></i> Recolorizing…';
+  }
+
+  // Mark card badge as processing
+  const badge = document.getElementById(`page-badge-${pageIdx}`);
+  if (badge) { badge.className = "page-status-badge status-processing"; badge.innerText = "PROCESSING"; }
+
+  showToast(`Recolorizing ${page.display_name}…`, "info");
+
+  try {
+    const resp = await fetch("/api/colorize/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id:      currentSession.session_id,
+        page_index:      pageIdx,
+        model_provider:  activeProvider,
+        model_name:      modelVariant,
+        api_key:         apiKey,
+        style:           style,
+        saturation:      saturation,
+        contrast:        1.1,
+        line_preserve:   linePreserve,
+        force_recolorize: true,
+      })
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.status === "success") {
+      page.status = "colorized";
+      page.colorized_url = data.colorized_url;
+      const ts = Date.now();
+
+      // Update gallery thumbnail
+      const imgElem = document.getElementById(`page-img-${pageIdx}`);
+      if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
+
+      if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
+
+      // Refresh split preview images
+      const colorImg = document.getElementById("split-img-colorized");
+      if (colorImg && currentPreviewPageIndex === pageIdx) {
+        colorImg.src = `${data.colorized_url}?t=${ts}`;
+      }
+
+      showToast(`${page.display_name} recolorized!`, "success");
+      updateColorizedCount();
+      // Re-render gallery so card recolorize button refreshes
+      renderGalleryGrid();
+    } else {
+      if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
+      showToast(data.detail || "Recolorize failed.", "error");
+    }
+  } catch (err) {
+    if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
+    showToast(`Error: ${err.message}`, "error");
+  } finally {
+    if (recolorBtn) {
+      recolorBtn.disabled = false;
+      recolorBtn.innerHTML = '<i class="ri-magic-line"></i> Recolorize';
+    }
+  }
+}
+
+/**
+ * Force-recolorizes all currently selected pages.
+ * Mirrors startColorization() but always passes force_recolorize=true.
+ */
+async function recolorizeSelected() {
+  if (!currentSession) return;
+
+  const pagesToRecolorize = selectedPages.size > 0
+    ? Array.from(selectedPages).sort((a, b) => a - b)
+    : null;
+
+  if (!pagesToRecolorize || pagesToRecolorize.length === 0) {
+    showToast("No pages selected.", "warning");
+    return;
+  }
+
+  const modelVariant = document.getElementById("model-variant-select")?.value || "";
+  const apiKey       = document.getElementById("api-key-input")?.value || "";
+  const style        = document.getElementById("style-select")?.value || "gemini_anime";
+  const linePreserve = parseFloat(document.getElementById("slider-line")?.value || "85") / 100.0;
+  const saturation   = parseFloat(document.getElementById("slider-saturation")?.value || "14") / 10.0;
+
+  const payload = {
+    session_id:       currentSession.session_id,
+    model_provider:   activeProvider,
+    model_name:       modelVariant,
+    api_key:          apiKey,
+    style:            style,
+    saturation:       saturation,
+    contrast:         1.1,
+    line_preserve:    linePreserve,
+    selected_pages:   pagesToRecolorize,
+    force_recolorize: true,
+    skip_if_colored:  false,
+  };
+
+  // UI feedback
+  document.getElementById("progress-card")?.classList.remove("hidden");
+  document.getElementById("export-card")?.classList.add("hidden");
+  document.getElementById("btn-start-colorize").disabled = true;
+
+  const pageCountText = `${pagesToRecolorize.length} Page${pagesToRecolorize.length !== 1 ? "s" : ""}`;
+  const progSub = document.getElementById("progress-subtext");
+  if (progSub) progSub.innerText = `Force recolorizing ${pageCountText}…`;
+
+  showToast(`Recolorizing ${pagesToRecolorize.length} page(s)…`, "info");
+
+  try {
+    const resp = await fetch("/api/colorize/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (resp.ok) {
+      subscribeToProgressStream();
+    } else {
+      const err = await resp.json();
+      showToast(err.detail || "Failed to start recolorization.", "error");
+      document.getElementById("btn-start-colorize").disabled = false;
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+    document.getElementById("btn-start-colorize").disabled = false;
+  }
+}
+
+window.recolorizePage     = recolorizePage;
+window.recolorizeSelected = recolorizeSelected;
