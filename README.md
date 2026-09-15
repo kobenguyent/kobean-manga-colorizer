@@ -229,5 +229,5 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 ---
 
 <div align="center">
-Made with ❤️ for manga readers and comic artists worldwide.
+Made with ❤️ for manga readers and comic artists worldwide. josephthien - kobenguyent
 </div>
