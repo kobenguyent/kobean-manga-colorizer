@@ -459,6 +459,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             page_info.pop("skipped_colored", None)
 
 
+
         page_info["status"] = "processing"
         
         await notify_sse_listeners(session_id, {
@@ -1476,4 +1477,3 @@ async def get_favicon():
 
 # Serve Frontend static assets
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
-

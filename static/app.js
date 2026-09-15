@@ -39,10 +39,225 @@ const MODEL_VARIANTS = {
   ]
 };
 
+// ==========================================================================
+// Smooth & Elegant Custom Dropdown System
+// ==========================================================================
+function initCustomSelect(selectElement) {
+  if (!selectElement || selectElement.dataset.customSelectInitialized) return;
+  selectElement.dataset.customSelectInitialized = "true";
+
+  // Create container
+  const container = document.createElement("div");
+  container.className = "custom-select-container";
+  container.id = `custom-select-${selectElement.id}`;
+
+  // Create trigger button
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "custom-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+
+  const labelSpan = document.createElement("span");
+  labelSpan.className = "custom-select-label";
+
+  const arrowSpan = document.createElement("span");
+  arrowSpan.className = "custom-select-arrow";
+  arrowSpan.innerHTML = '<i class="ri-arrow-down-s-line"></i>';
+
+  trigger.appendChild(labelSpan);
+  trigger.appendChild(arrowSpan);
+
+  // Create floating dropdown menu
+  const dropdown = document.createElement("div");
+  dropdown.className = "custom-select-dropdown";
+  dropdown.setAttribute("role", "listbox");
+
+  const optionsContainer = document.createElement("div");
+  optionsContainer.className = "custom-select-options";
+  dropdown.appendChild(optionsContainer);
+
+  // Insert container in place of native select
+  selectElement.parentNode.insertBefore(container, selectElement);
+  container.appendChild(selectElement);
+  container.appendChild(trigger);
+  container.appendChild(dropdown);
+
+  // Hide native select visually while keeping it fully functional in DOM
+  selectElement.classList.add("custom-select-hidden");
+
+  function syncOptions() {
+    optionsContainer.innerHTML = "";
+    const options = Array.from(selectElement.options);
+    const selectedOpt = selectElement.options[selectElement.selectedIndex] || options[0];
+
+    if (selectedOpt) {
+      labelSpan.innerText = selectedOpt.text;
+    } else {
+      labelSpan.innerText = "";
+    }
+
+    options.forEach((opt, idx) => {
+      const isSelected = opt.selected || opt.value === selectElement.value;
+      const optElem = document.createElement("div");
+      optElem.className = `custom-select-option ${isSelected ? "selected" : ""}`;
+      optElem.setAttribute("role", "option");
+      optElem.setAttribute("aria-selected", isSelected ? "true" : "false");
+      optElem.dataset.value = opt.value;
+      optElem.style.animationDelay = `${Math.min(idx * 28, 200)}ms`;
+
+      optElem.innerHTML = `
+        <span class="custom-option-text">${opt.text}</span>
+        <i class="ri-check-line custom-option-check"></i>
+      `;
+
+      optElem.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        selectOption(opt.value);
+      });
+
+      optionsContainer.appendChild(optElem);
+    });
+  }
+
+  function selectOption(value) {
+    if (selectElement.value !== value) {
+      selectElement.value = value;
+      selectElement.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    syncOptions();
+    closeDropdown();
+  }
+
+  function openDropdown() {
+    // Close other open custom selects
+    document.querySelectorAll(".custom-select-container.open").forEach(other => {
+      if (other !== container) {
+        other.classList.remove("open");
+        const trig = other.querySelector(".custom-select-trigger");
+        if (trig) trig.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    // Smart viewport collision detection: open upwards only if genuinely restricted below
+    const rect = trigger.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const estHeight = Math.min((selectElement.options.length * 44) + 20, 280);
+    if (spaceBelow < estHeight && rect.top > estHeight) {
+      dropdown.style.top = "auto";
+      dropdown.style.bottom = "calc(100% + 6px)";
+      dropdown.style.transformOrigin = "bottom center";
+    } else {
+      dropdown.style.top = "calc(100% + 6px)";
+      dropdown.style.bottom = "auto";
+      dropdown.style.transformOrigin = "top center";
+    }
+
+    container.classList.add("open");
+    trigger.setAttribute("aria-expanded", "true");
+
+    const selected = optionsContainer.querySelector(".custom-select-option.selected");
+    if (selected) {
+      selected.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function closeDropdown() {
+    container.classList.remove("open");
+    trigger.setAttribute("aria-expanded", "false");
+  }
+
+  function toggleDropdown() {
+    if (container.classList.contains("open")) {
+      closeDropdown();
+    } else {
+      openDropdown();
+    }
+  }
+
+  trigger.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleDropdown();
+  });
+
+  // Keyboard navigation & accessibility
+  trigger.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (!container.classList.contains("open")) {
+        openDropdown();
+      } else if (e.key === "ArrowDown") {
+        focusNextOption(1);
+      } else if (e.key === "Enter" || e.key === " ") {
+        const focused = optionsContainer.querySelector(".custom-select-option.focused");
+        if (focused && focused.dataset.value) {
+          selectOption(focused.dataset.value);
+        } else {
+          closeDropdown();
+        }
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (container.classList.contains("open")) {
+        focusNextOption(-1);
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeDropdown();
+    }
+  });
+
+  function focusNextOption(direction) {
+    const opts = Array.from(optionsContainer.querySelectorAll(".custom-select-option"));
+    if (opts.length === 0) return;
+    let focusedIndex = opts.findIndex(o => o.classList.contains("focused") || o.classList.contains("selected"));
+    if (focusedIndex === -1) focusedIndex = 0;
+    else focusedIndex = (focusedIndex + direction + opts.length) % opts.length;
+
+    opts.forEach((o, i) => o.classList.toggle("focused", i === focusedIndex));
+    opts[focusedIndex].scrollIntoView({ block: "nearest" });
+  }
+
+  // React to programmatic native select change events
+  selectElement.addEventListener("change", () => {
+    syncOptions();
+  });
+
+  // Observe option modifications on native select
+  const observer = new MutationObserver(() => {
+    syncOptions();
+  });
+  observer.observe(selectElement, { childList: true, subtree: true });
+
+  // Store refresh hook on native select
+  selectElement.refreshCustomSelect = syncOptions;
+
+  // Initial sync
+  syncOptions();
+}
+
+function initAllCustomSelects() {
+  document.querySelectorAll("select.form-select").forEach(initCustomSelect);
+}
+
+// Global click-outside listener to close dropdowns smoothly
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".custom-select-container")) {
+    document.querySelectorAll(".custom-select-container.open").forEach(c => {
+      c.classList.remove("open");
+      const trig = c.querySelector(".custom-select-trigger");
+      if (trig) trig.setAttribute("aria-expanded", "false");
+    });
+  }
+});
+
 
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
   updateModelVariants("resnext_generator");
+  initAllCustomSelects();
 
   // Auto-restore session from sessionStorage or fetch the latest active session
   const savedSessionId = sessionStorage.getItem("active_session_id");
@@ -264,25 +479,40 @@ function setupEventListeners() {
   });
 
   // Slider Value Displays with Real-time Live Preview Trigger
-  document.getElementById("slider-line").addEventListener("input", (e) => {
-    document.getElementById("val-line").innerText = `${e.target.value}%`;
-    triggerLivePreview(350);
-  });
+  const sliderLine = document.getElementById("slider-line");
+  if (sliderLine) {
+    sliderLine.addEventListener("input", (e) => {
+      const valLine = document.getElementById("val-line");
+      if (valLine) valLine.innerText = `${e.target.value}%`;
+      triggerLivePreview(350);
+    });
+  }
 
-  document.getElementById("slider-saturation").addEventListener("input", (e) => {
-    document.getElementById("val-saturation").innerText = `${(e.target.value / 10).toFixed(1)}x`;
-    triggerLivePreview(350);
-  });
+  const sliderSat = document.getElementById("slider-saturation");
+  if (sliderSat) {
+    sliderSat.addEventListener("input", (e) => {
+      const valSat = document.getElementById("val-saturation");
+      if (valSat) valSat.innerText = `${(e.target.value / 10).toFixed(1)}x`;
+      triggerLivePreview(350);
+    });
+  }
 
   // Style and Variant Dropdown Listeners
-  document.getElementById("style-select").addEventListener("change", () => triggerLivePreview(100));
-  document.getElementById("model-variant-select").addEventListener("change", () => triggerLivePreview(100));
+  const styleSelect = document.getElementById("style-select");
+  if (styleSelect) styleSelect.addEventListener("change", () => triggerLivePreview(100));
+
+  const modelVariantSelect = document.getElementById("model-variant-select");
+  if (modelVariantSelect) modelVariantSelect.addEventListener("change", () => triggerLivePreview(100));
 
   // Buttons
-  document.getElementById("btn-start-colorize").addEventListener("click", startColorization);
+  const btnStartColorize = document.getElementById("btn-start-colorize");
+  if (btnStartColorize) btnStartColorize.addEventListener("click", startColorization);
+
   const mainExportBtn = document.getElementById("btn-export");
   if (mainExportBtn) mainExportBtn.addEventListener("click", () => exportDocument("auto"));
-  document.getElementById("btn-change-file").addEventListener("click", resetUpload);
+
+  const btnChangeFile = document.getElementById("btn-change-file");
+  if (btnChangeFile) btnChangeFile.addEventListener("click", resetUpload);
 
   // Setup Split Slider Dragging
   setupSplitSlider();
@@ -354,6 +584,7 @@ function selectProvider(provider) {
 
 function updateModelVariants(provider) {
   const select = document.getElementById("model-variant-select");
+  if (!select) return;
   select.innerHTML = "";
   const variants = MODEL_VARIANTS[provider] || [];
   
@@ -363,6 +594,10 @@ function updateModelVariants(provider) {
     opt.innerText = v.label;
     select.appendChild(opt);
   });
+
+  if (select.refreshCustomSelect) {
+    select.refreshCustomSelect();
+  }
 }
 
 function toggleApiKeyVisibility() {
@@ -688,6 +923,7 @@ function updateColorizedCount() {
 
 function renderGalleryGrid() {
   const grid = document.getElementById("pages-grid");
+  if (!grid || !currentSession || !currentSession.pages) return;
   grid.innerHTML = "";
 
   currentSession.pages.forEach((page, idx) => {
@@ -697,8 +933,8 @@ function renderGalleryGrid() {
     card.id = `page-card-${idx}`;
     card.onclick = () => openSplitPreview(idx);
 
-    const thumbUrl = page.colorized_url || `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
-    
+    const origUrl = `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
+    const thumbUrl = page.colorized_url || origUrl;
     const dimText = (page.width && page.height) ? `${page.width} × ${page.height}` : "";
 
     // Show a small recolorize button on colorized pages
@@ -712,7 +948,6 @@ function renderGalleryGrid() {
            <i class="ri-refresh-line"></i> Recolorize
          </button>`
       : "";
-
     card.innerHTML = `
       <div class="page-thumb-container">
         <label class="page-select-checkbox ${isSelected ? 'checked' : ''}" onclick="event.stopPropagation()" title="Select/Deselect page for colorization">
@@ -814,7 +1049,9 @@ function updateSelectionUI() {
 
   const btnStart = document.getElementById("btn-start-colorize");
   if (btnStart) {
-    if (count === 0) {
+    if (isBatchColorizing) {
+      btnStart.disabled = true;
+    } else if (count === 0) {
       btnStart.innerHTML = '<i class="ri-checkbox-blank-line"></i> Select Pages to Colorize';
       btnStart.disabled = true;
     } else if (count === total) {
@@ -861,7 +1098,8 @@ async function startColorization() {
   // UI state updates
   document.getElementById("progress-card").classList.remove("hidden");
   document.getElementById("export-card").classList.add("hidden");
-  document.getElementById("btn-start-colorize").disabled = true;
+  const btnStart = document.getElementById("btn-start-colorize");
+  if (btnStart) btnStart.disabled = true;
 
   const providerNames = {
     resnext_generator: "ResNeXt Deep Generator",
@@ -885,11 +1123,13 @@ async function startColorization() {
     } else {
       const err = await resp.json();
       showToast(err.detail || "Failed to start colorization.", "error");
-      document.getElementById("btn-start-colorize").disabled = false;
+      if (btnStart) btnStart.disabled = false;
+      updateSelectionUI();
     }
   } catch (err) {
     showToast(`Error: ${err.message}`, "error");
-    document.getElementById("btn-start-colorize").disabled = false;
+    if (btnStart) btnStart.disabled = false;
+    updateSelectionUI();
   }
 }
 
@@ -937,6 +1177,7 @@ function subscribeToProgressStream(sessionId = null) {
         }
 
         updateColorizedCount();
+        updateSelectionUI();
       }
 
       // Update activeSessions and sidebar badge directly for fast live feedback
@@ -1098,6 +1339,11 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     titleBadge.innerHTML = `<i class="ri-loader-4-line spinner"></i> ${page.display_name} (Updating...)`;
   }
 
+  const rightLabel = document.getElementById("split-label-right");
+  if (rightLabel) {
+    rightLabel.innerHTML = '<i class="ri-loader-4-line spinner"></i> AI Colorizing...';
+  }
+
   const payload = {
     session_id: currentSession.session_id,
     page_index: pageIdx,
@@ -1123,7 +1369,6 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
       page.colorized_url = data.colorized_url;
       const ts = Date.now();
       
-      // Update page card thumbnail in gallery
       const imgElem = document.getElementById(`page-img-${pageIdx}`);
       if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
 
@@ -1132,6 +1377,9 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
         badge.className = "page-status-badge status-colorized";
         badge.innerText = "COLORIZED";
       }
+
+      updateColorizedCount();
+      updateSelectionUI();
 
       // Update split comparator images directly
       const origImg = document.getElementById("split-img-original");
@@ -1150,8 +1398,9 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
         titleBadge.innerText = `${page.display_name} • ${selectedStyleText}`;
       }
 
-      // Open in Before / After Comparator (prevent jarring scroll when auto-triggered by sliders)
+      // Open in Before / After Comparator and switch to split view so color is visible
       openSplitPreview(pageIdx, !showToastFeedback);
+      setComparatorView("split", true);
 
       // Keep counter, badge, and export cards in sync
       updateColorizedCount();
@@ -1165,12 +1414,63 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
   } catch (err) {
     showToast(`Preview error: ${err.message}`, "error");
   } finally {
+    if (rightLabel) {
+      rightLabel.innerHTML = '<i class="ri-palette-line"></i> Colorized AI';
+    }
     const colorImg = document.getElementById("split-img-colorized");
     if (colorImg) colorImg.style.opacity = "1.0";
     if (btnPreview) {
       btnPreview.disabled = false;
       btnPreview.innerHTML = `<i class="ri-sparkles-line"></i> Preview Page ${pageIdx + 1}`;
     }
+  }
+}
+
+let currentViewMode = "split"; // "bw", "split", "color"
+
+function setComparatorView(mode, animate = true) {
+  currentViewMode = mode;
+  const overlay = document.getElementById("split-overlay");
+  const handle = document.getElementById("split-handle");
+  const currentPage = currentSession?.pages?.[currentPreviewPageIndex];
+
+  // If user requests color view but page has not been colorized yet, trigger preview on demand
+  if (mode === "color" && currentPage && !currentPage.colorized_url && currentPage.status !== "processing") {
+    previewSinglePage(currentPreviewPageIndex, true).then(() => {
+      setComparatorView("color", true);
+    });
+    return;
+  }
+
+  // Update toggle button active states
+  ["bw", "split", "color"].forEach(m => {
+    const btn = document.getElementById(`btn-view-${m}`);
+    if (btn) btn.classList.toggle("active", m === mode);
+  });
+
+  const btnLeft = document.querySelector(".split-label.label-left");
+  const btnRight = document.getElementById("split-label-right");
+  if (btnLeft) btnLeft.classList.toggle("active", mode === "bw");
+  if (btnRight) btnRight.classList.toggle("active", mode === "color");
+
+  if (animate) {
+    if (overlay) overlay.style.transition = "width 0.28s cubic-bezier(0.4, 0, 0.2, 1)";
+    if (handle) handle.style.transition = "left 0.28s cubic-bezier(0.4, 0, 0.2, 1)";
+    setTimeout(() => {
+      if (overlay) overlay.style.transition = "";
+      if (handle) handle.style.transition = "";
+    }, 300);
+  } else {
+    if (overlay) overlay.style.transition = "";
+    if (handle) handle.style.transition = "";
+  }
+
+  if (mode === "bw") {
+    setSplitPosition(100);
+  } else if (mode === "color") {
+    setSplitPosition(0);
+  } else {
+    setSplitPosition(50);
   }
 }
 
@@ -1197,6 +1497,7 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   }
 
   if (origImg) {
+    origImg.draggable = false;
     origImg.onload = () => {
       if (origImg.naturalWidth && origImg.naturalHeight) {
         syncContainerRatio(origImg.naturalWidth, origImg.naturalHeight);
@@ -1204,8 +1505,13 @@ function openSplitPreview(pageIdx, preventScroll = false) {
       setSplitPosition(currentSplitPct);
     };
     origImg.src = origUrl;
+    if (origImg.complete && origImg.naturalWidth) {
+      syncContainerRatio(origImg.naturalWidth, origImg.naturalHeight);
+      setSplitPosition(currentSplitPct);
+    }
   }
   if (colorImg) {
+    colorImg.draggable = false;
     colorImg.onload = () => {
       if (colorImg.naturalWidth && colorImg.naturalHeight) {
         syncContainerRatio(colorImg.naturalWidth, colorImg.naturalHeight);
@@ -1214,6 +1520,10 @@ function openSplitPreview(pageIdx, preventScroll = false) {
     };
     colorImg.style.opacity = "1.0";
     colorImg.src = `${colorUrl}?t=${Date.now()}`;
+    if (colorImg.complete && colorImg.naturalWidth) {
+      syncContainerRatio(colorImg.naturalWidth, colorImg.naturalHeight);
+      setSplitPosition(currentSplitPct);
+    }
   }
 
   const styleSelect = document.getElementById("style-select");
@@ -1249,6 +1559,16 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   if (chevronPrev) chevronPrev.style.display = pageIdx <= 0 ? "none" : "flex";
   if (chevronNext) chevronNext.style.display = pageIdx >= totalPages - 1 ? "none" : "flex";
 
+  // Setup slider listeners
+  setupSplitSlider();
+
+  // Set initial view: if page is colorized, show split; if not, show B&W
+  if (page.colorized_url) {
+    setComparatorView("split", false);
+  } else {
+    setComparatorView("bw", false);
+  }
+
   // Reset handle with container dimensions applied
   requestAnimationFrame(() => setSplitPosition(currentSplitPct));
 }
@@ -1258,10 +1578,13 @@ function closeSplitPreview() {
 }
 
 let currentSplitPct = 50;
+let isSplitSliderInitialized = false;
 
 function setupSplitSlider() {
   const container = document.getElementById("split-container");
-  if (!container) return;
+  const handle = document.getElementById("split-handle");
+  if (!container || isSplitSliderInitialized) return;
+  isSplitSliderInitialized = true;
 
   let isDragging = false;
 
@@ -1272,6 +1595,12 @@ function setupSplitSlider() {
     if (x < 0) x = 0;
     if (x > rect.width) x = rect.width;
     const pct = Math.max(0, Math.min(100, (x / rect.width) * 100));
+
+    const btnLeft = document.querySelector(".split-label.label-left");
+    const btnRight = document.getElementById("split-label-right");
+    if (btnLeft) btnLeft.classList.toggle("active", pct >= 98);
+    if (btnRight) btnRight.classList.toggle("active", pct <= 2);
+
     setSplitPosition(pct);
   };
 
@@ -1279,6 +1608,7 @@ function setupSplitSlider() {
   container.addEventListener("pointerdown", (e) => {
     if (e.button !== undefined && e.button !== 0) return;
     isDragging = true;
+    if (handle) handle.classList.add("active");
     try {
       container.setPointerCapture(e.pointerId);
     } catch (err) {}
@@ -1295,6 +1625,7 @@ function setupSplitSlider() {
   const stopDrag = (e) => {
     if (isDragging) {
       isDragging = false;
+      if (handle) handle.classList.remove("active");
       try {
         container.releasePointerCapture(e.pointerId);
       } catch (err) {}
@@ -1303,6 +1634,10 @@ function setupSplitSlider() {
 
   container.addEventListener("pointerup", stopDrag);
   container.addEventListener("pointercancel", stopDrag);
+
+  // Prevent browser native image dragging and selection
+  container.addEventListener("dragstart", (e) => e.preventDefault());
+  container.addEventListener("selectstart", (e) => e.preventDefault());
 
   // Horizontal Trackpad / Wheel Scroll Support (Swipe left/right to slide divider)
   container.addEventListener("wheel", (e) => {
