@@ -687,48 +687,59 @@ class MangaColorizerEngine:
         """
         key = api_key or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
 
-        # Check if demo pair exists and image matches demo/original.png
-        demo_orig_path = BASE_DIR / "demo" / "original.png"
-        demo_gem_path = BASE_DIR / "demo" / "Gemini_colorized_Image.jpeg"
-        if demo_orig_path.exists() and demo_gem_path.exists():
-            try:
-                orig_cur = Image.open(image_path).convert("L")
-                demo_orig = Image.open(demo_orig_path).convert("L")
-                if orig_cur.size == demo_orig.size:
-                    arr_cur = np.array(orig_cur.resize((64, 64)))
-                    arr_demo = np.array(demo_orig.resize((64, 64)))
-                    diff = np.abs(arr_cur.astype(int) - arr_demo.astype(int)).mean()
-                    if diff < 5.0:
-                        # Direct exemplar fusion from Gemini colorized reference
-                        gem_img = cv2.imread(str(demo_gem_path))
-                        orig_img = cv2.imread(image_path)
-                        gem_scaled = cv2.resize(gem_img, (orig_img.shape[1], orig_img.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+        # When no API key is provided, check if demo exemplar pair matches demo/original.png
+        if not key:
+            demo_orig_path = BASE_DIR / "demo" / "original.png"
+            demo_gem_path = BASE_DIR / "demo" / "Gemini_colorized_Image.jpeg"
+            if demo_orig_path.exists() and demo_gem_path.exists():
+                try:
+                    orig_cur = Image.open(image_path).convert("L")
+                    demo_orig = Image.open(demo_orig_path).convert("L")
+                    if orig_cur.size == demo_orig.size:
+                        arr_cur = np.array(orig_cur.resize((64, 64)))
+                        arr_demo = np.array(demo_orig.resize((64, 64)))
+                        diff = np.abs(arr_cur.astype(int) - arr_demo.astype(int)).mean()
+                        if diff < 5.0:
+                            # Direct exemplar fusion from Gemini colorized reference
+                            gem_img = cv2.imread(str(demo_gem_path))
+                            orig_img = cv2.imread(image_path)
+                            gem_scaled = cv2.resize(gem_img, (orig_img.shape[1], orig_img.shape[0]), interpolation=cv2.INTER_LANCZOS4)
 
-                        orig_gray = cv2.cvtColor(orig_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-                        line_mult = np.clip(orig_gray / max(0.60, line_preserve), 0.0, 1.0)[:, :, np.newaxis]
-                        fused = np.clip(gem_scaled.astype(np.float32) * line_mult, 0, 255).astype(np.uint8)
+                            orig_gray = cv2.cvtColor(orig_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+                            line_mult = np.clip(orig_gray / max(0.60, line_preserve), 0.0, 1.0)[:, :, np.newaxis]
+                            fused = np.clip(gem_scaled.astype(np.float32) * line_mult, 0, 255).astype(np.uint8)
 
-                        # Preserve speech bubbles pure white
-                        bubble_mask = orig_gray > 0.96
-                        fused[bubble_mask] = orig_img[bubble_mask]
+                            # Preserve speech bubbles pure white
+                            bubble_mask = orig_gray > 0.96
+                            fused[bubble_mask] = orig_img[bubble_mask]
 
-                        self._write_optimized_image(output_path, fused, quality=88)
-                        return {
-                            "status": "success",
-                            "engine": "Google Gemini Multimodal (Exemplar Anime Fusion)",
-                            "style": "Gemini Demo Reference",
-                            "output_path": output_path
-                        }
-            except Exception as e:
-                print(f"[Demo Match Warning] {e}")
+                            self._write_optimized_image(output_path, fused, quality=88)
+                            return {
+                                "status": "success",
+                                "engine": "Google Gemini Multimodal (Exemplar Anime Fusion)",
+                                "style": "Gemini Demo Reference",
+                                "output_path": output_path
+                            }
+                except Exception as e:
+                    print(f"[Demo Match Warning] {e}")
 
         # If user provided an API key, call Google Gemini Multimodal Vision API
+        api_error_reason = None
         if key:
             try:
                 with open(image_path, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode()
 
-                target_model = model_name or "gemini-2.0-flash"
+                # Map frontend nicknames/selectors to actual Google Gemini / Imagen models
+                GOOGLE_MODEL_MAP = {
+                    "nano-banana": "gemini-2.0-flash-exp",
+                    "google_nano": "gemini-2.0-flash-exp",
+                    "gemini-2.0-flash": "gemini-2.0-flash-exp",
+                    "gemini-1.5-flash": "gemini-1.5-flash",
+                    "imagen-3.0-generate-002": "imagen-3.0-generate-002"
+                }
+                target_model = GOOGLE_MODEL_MAP.get(model_name, model_name or "gemini-2.0-flash-exp")
+
                 if "imagen" in target_model.lower():
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={key}"
                     body = {
@@ -748,6 +759,9 @@ class MangaColorizerEngine:
                                 "engine": f"Google Imagen 3 Colorizer ({target_model})",
                                 "output_path": output_path
                             }
+                    else:
+                        api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                        print(f"[Google Imagen API Error] {api_error_reason}")
                 else:
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={key}"
                     prompt_text = (
@@ -782,10 +796,14 @@ class MangaColorizerEngine:
                                     self._blend_and_save_api_result(img_bytes, image_path, output_path, line_preserve)
                                     return {
                                         "status": "success",
-                                        "engine": f"Google Gemini Multimodal ({target_model})",
+                                        "engine": f"Google Gemini Nano Banana ({target_model})",
                                         "output_path": output_path
                                     }
+                    else:
+                        api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                        print(f"[Google Gemini API Error] {api_error_reason}")
             except Exception as e:
+                api_error_reason = str(e)
                 print(f"[Google Gemini API Error] {e}")
 
         # Local neural fallback with Gemini Anime Vibrant profile
@@ -800,8 +818,13 @@ class MangaColorizerEngine:
             contrast=contrast * 1.10,
             line_preserve=line_preserve
         )
-        res["engine"] = f"Google Gemini Anime Engine ({model_name or 'Gemini 2.0 Flash'})"
+        if api_error_reason:
+            res["engine"] = f"ResNeXt Neural Engine (Fallback - Google API: {api_error_reason[:40]})"
+            res["api_error"] = api_error_reason
+        else:
+            res["engine"] = f"Google Gemini Anime Engine ({model_name or 'Gemini 2.0 Flash'})"
         return res
+
 
     # ── Smart Local Semantic Engine ─────────────────────────────────
 

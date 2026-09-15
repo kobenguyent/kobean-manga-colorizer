@@ -321,6 +321,9 @@
             <button class="btn btn-accent btn-block" id="btn-sidebar-export-epub" onclick="exportDocument('epub')">
               <i class="ri-book-open-line"></i> Download as EPUB
             </button>
+            <button class="btn btn-warning btn-block" id="btn-sidebar-export-mobi" onclick="exportDocument('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+              <i class="ri-amazon-line"></i> Download Kindle (MOBI)
+            </button>
             <button class="btn btn-secondary btn-block" id="btn-sidebar-export-zip" onclick="exportDocument('zip')">
               <i class="ri-file-zip-line"></i> Download Images ZIP
             </button>
@@ -341,6 +344,9 @@
               <button class="btn btn-accent btn-block" id="btn-batch-export-epub" onclick="exportBatch('epub')">
                 <i class="ri-book-open-line"></i> Export All as EPUBs ZIP
               </button>
+              <button class="btn btn-warning btn-block" id="btn-batch-export-mobi" onclick="exportBatch('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+                <i class="ri-amazon-line"></i> Export All as Kindle (.mobi) ZIP
+              </button>
               <button class="btn btn-secondary btn-block" id="btn-batch-export-pdf" onclick="exportBatch('pdf')">
                 <i class="ri-file-pdf-2-line"></i> Export All as PDFs ZIP
               </button>
@@ -360,15 +366,23 @@
                      class="form-input"
                      style="font-size:0.82rem;margin-bottom:0.5rem;"
                      value="Colorized Manga Collection" />
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;">
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.35rem;">
                 <button class="btn btn-block" id="btn-combined-epub"
                         onclick="exportCombined('epub')"
-                        style="background:var(--accent-purple,#a855f7);border-color:var(--accent-purple,#a855f7);color:#fff;font-size:0.8rem;">
+                        style="background:var(--accent-purple,#a855f7);border-color:var(--accent-purple,#a855f7);color:#fff;font-size:0.76rem;padding:6px 2px;"
+                        title="Combined EPUB3 for Send-to-Kindle, Apple Books &amp; Kobo">
                   <i class="ri-book-2-line"></i> Single EPUB
+                </button>
+                <button class="btn btn-block" id="btn-combined-mobi"
+                        onclick="exportCombined('mobi')"
+                        style="background:#eab308;border-color:#ca8a04;color:#000;font-size:0.76rem;padding:6px 2px;font-weight:600;"
+                        title="Combined MOBI for direct Kindle e-reader USB sideloading">
+                  <i class="ri-amazon-line"></i> Kindle MOBI
                 </button>
                 <button class="btn btn-block" id="btn-combined-pdf"
                         onclick="exportCombined('pdf')"
-                        style="background:var(--accent-green,#22c55e);border-color:var(--accent-green,#22c55e);color:#fff;font-size:0.8rem;">
+                        style="background:var(--accent-green,#22c55e);border-color:var(--accent-green,#22c55e);color:#fff;font-size:0.76rem;padding:6px 2px;"
+                        title="Combined PDF with volume bookmarks">
                   <i class="ri-file-pdf-2-line"></i> Single PDF
                 </button>
               </div>
@@ -502,6 +516,9 @@
             <button class="btn btn-accent" id="btn-export-epub" onclick="exportDocument('epub')">
               <i class="ri-book-open-line"></i> Export EPUB
             </button>
+            <button class="btn" id="btn-export-mobi" onclick="exportDocument('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+              <i class="ri-amazon-line"></i> Kindle MOBI
+            </button>
             <button class="btn btn-secondary" id="btn-export-zip" onclick="exportDocument('zip')">
               <i class="ri-file-zip-line"></i> Export ZIP
             </button>
@@ -542,6 +559,9 @@
                 </button>
                 <button class="btn btn-secondary btn-sm" onclick="exportDocument('epub')" title="Export as EPUB">
                   <i class="ri-book-open-line"></i> EPUB
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="exportDocument('mobi')" title="Export as Amazon Kindle (MOBI)">
+                  <i class="ri-amazon-line"></i> MOBI
                 </button>
                 <button class="btn btn-secondary btn-sm" onclick="exportDocument('zip')" title="Export as ZIP">
                   <i class="ri-file-zip-line"></i> ZIP

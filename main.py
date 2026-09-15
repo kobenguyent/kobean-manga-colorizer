@@ -747,7 +747,9 @@ async def export_batch_documents(req: BatchExportRequest):
     format_override = (req.format or "auto").lower().strip()
     batch_token = str(uuid.uuid4())[:8]
 
-    if format_override == "epub":
+    if format_override in ["mobi", "azw3", "kindle"]:
+        out_filename = f"colorized_manga_kindle_{batch_token}.zip"
+    elif format_override == "epub":
         out_filename = f"colorized_manga_epubs_{batch_token}.zip"
     elif format_override == "pdf":
         out_filename = f"colorized_manga_pdfs_{batch_token}.zip"
@@ -806,6 +808,15 @@ async def _async_combined_export_worker(
         if fmt == "pdf":
             await asyncio.to_thread(
                 file_processor.build_combined_pdf,
+                sessions_data,
+                output_filepath,
+                title,
+                progress_callback=on_progress,
+                cancel_check=check_cancelled
+            )
+        elif fmt in ["mobi", "azw3", "kindle"]:
+            await asyncio.to_thread(
+                file_processor.build_combined_mobi,
                 sessions_data,
                 output_filepath,
                 title,
@@ -918,7 +929,13 @@ async def export_combined_volume(req: CombinedExportRequest):
     n     = len(sessions_data)
     total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
 
-    out_ext = ".pdf" if fmt == "pdf" else ".epub"
+    if fmt == "pdf":
+        out_ext = ".pdf"
+    elif fmt in ["mobi", "azw3", "kindle"]:
+        out_ext = ".mobi"
+    else:
+        out_ext = ".epub"
+
     out_filename   = f"{clean_title}_{token}{out_ext}"
     output_filepath = str(OUTPUT_DIR / f"combined_{out_filename}")
 
@@ -927,6 +944,8 @@ async def export_combined_volume(req: CombinedExportRequest):
         try:
             if fmt == "pdf":
                 await asyncio.to_thread(file_processor.build_combined_pdf, sessions_data, output_filepath, title)
+            elif fmt in ["mobi", "azw3", "kindle"]:
+                await asyncio.to_thread(file_processor.build_combined_mobi, sessions_data, output_filepath, title)
             else:
                 await asyncio.to_thread(file_processor.build_combined_epub, sessions_data, output_filepath, title)
             return JSONResponse({
@@ -1063,7 +1082,16 @@ async def download_combined_file(filename: str):
     if not os.path.exists(out_filepath):
         raise HTTPException(status_code=404, detail="Combined export not found or expired")
     ext = Path(filename).suffix.lower()
-    media_type = "application/epub+zip" if ext == ".epub" else "application/pdf"
+    if ext == ".epub":
+        media_type = "application/epub+zip"
+    elif ext == ".pdf":
+        media_type = "application/pdf"
+    elif ext == ".mobi":
+        media_type = "application/x-mobipocket-ebook"
+    elif ext == ".azw3":
+        media_type = "application/vnd.amazon.mobi8-ebook"
+    else:
+        media_type = "application/octet-stream"
     return FileResponse(out_filepath, filename=filename, media_type=media_type)
 
 
@@ -1102,6 +1130,13 @@ async def export_document(session_id: str, format: Optional[str] = None):
             output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
             file_processor.build_colorized_pdf(pages_meta, session_id, output_filepath)
 
+        elif target_format in ["mobi", "azw3", "kindle"]:
+            out_filename = f"colorized_{stem}.mobi"
+            output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
+            file_processor.build_colorized_mobi(
+                pages_meta, session_id, output_filepath, title=f"Colorized - {stem}"
+            )
+
         elif target_format == "epub":
             out_filename = f"colorized_{stem}.epub"
             output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
@@ -1125,7 +1160,7 @@ async def export_document(session_id: str, format: Optional[str] = None):
                 output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
                 file_processor.build_colorized_zip(pages_meta, session_id, output_filepath)
         else:
-            raise HTTPException(status_code=400, detail=f"Unsupported export format: {target_format}. Supported: pdf, epub, zip, image")
+            raise HTTPException(status_code=400, detail=f"Unsupported export format: {target_format}. Supported: pdf, epub, mobi, azw3, zip, image")
 
         download_url = f"/api/download/{session_id}/{out_filename}"
         return JSONResponse({
@@ -1143,10 +1178,23 @@ async def download_file(session_id: str, filename: str):
     if not os.path.exists(out_filepath):
         raise HTTPException(status_code=404, detail="File not found or export expired")
 
+    ext = Path(filename).suffix.lower()
+    media_map = {
+        ".epub": "application/epub+zip",
+        ".pdf": "application/pdf",
+        ".mobi": "application/x-mobipocket-ebook",
+        ".azw3": "application/vnd.amazon.mobi8-ebook",
+        ".zip": "application/zip",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+    }
+    media_type = media_map.get(ext, "application/octet-stream")
+
     return FileResponse(
         out_filepath,
         filename=filename,
-        media_type="application/octet-stream"
+        media_type=media_type
     )
 
 @app.get("/api/sessions")

@@ -1363,6 +1363,8 @@ async function exportDocument(format = "auto") {
   const formatLabels = {
     pdf: "PDF document",
     epub: "EPUB e-book",
+    mobi: "Kindle MOBI e-book",
+    azw3: "Kindle AZW3 e-book",
     zip: "ZIP images archive",
     auto: "colorized document"
   };
@@ -1490,7 +1492,8 @@ async function exportBatch(format = "auto") {
   const formatNames = {
     auto: "collection (preserving original formats)",
     epub: "all documents as EPUBs",
-    pdf: "all documents as PDFs"
+    pdf: "all documents as PDFs",
+    mobi: "all documents as Kindle MOBIs"
   };
   const label = formatNames[format] || format;
 
@@ -1537,8 +1540,10 @@ let combinedExportEventSource = null;
 
 function resetCombinedExportUI() {
   const epubBtn = document.getElementById("btn-combined-epub");
+  const mobiBtn = document.getElementById("btn-combined-mobi");
   const pdfBtn  = document.getElementById("btn-combined-pdf");
   if (epubBtn) epubBtn.disabled = false;
+  if (mobiBtn) mobiBtn.disabled = false;
   if (pdfBtn)  pdfBtn.disabled  = false;
 
   const progressBox = document.getElementById("combined-export-progress-box");
@@ -1581,9 +1586,9 @@ async function cancelCombinedExport() {
 }
 
 /**
- * Merges all active sessions into a single EPUB or PDF file with live progress.
+ * Merges all active sessions into a single EPUB, MOBI, or PDF file with live progress.
  *
- * @param {"epub"|"pdf"} format
+ * @param {"epub"|"mobi"|"pdf"} format
  */
 async function exportCombined(format = "epub") {
   let sessionList = (activeSessions && activeSessions.length > 0)
@@ -1598,11 +1603,13 @@ async function exportCombined(format = "epub") {
   const title = document.getElementById("combined-title-input")?.value?.trim()
     || "Colorized Manga Collection";
 
-  const fmtLabel = format === "pdf" ? "Single PDF" : "Single EPUB";
+  const fmtLabel = format === "pdf" ? "Single PDF" : (format === "mobi" ? "Single Kindle MOBI" : "Single EPUB");
 
   const epubBtn = document.getElementById("btn-combined-epub");
+  const mobiBtn = document.getElementById("btn-combined-mobi");
   const pdfBtn  = document.getElementById("btn-combined-pdf");
   if (epubBtn) epubBtn.disabled = true;
+  if (mobiBtn) mobiBtn.disabled = true;
   if (pdfBtn)  pdfBtn.disabled  = true;
 
   // Sidebar progress box
