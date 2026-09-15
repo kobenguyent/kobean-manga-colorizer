@@ -1,0 +1,82 @@
+name: CI Test Suite
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install System Libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0
+
+      - name: Cache HuggingFace Models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-hf-
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install CPU-optimized PyTorch build for fast, lightweight CI on Linux
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Code Syntax & Compilation Verification
+        run: |
+          python -m py_compile main.py file_processor.py colorizer_engine.py
+          python -c "import ast; [ast.parse(open(f).read()) for f in ['main.py', 'file_processor.py', 'colorizer_engine.py']]; print('AST parse OK')"
+
+      - name: Run Direct Engine Unit Tests
+        run: |
+          pytest tests/test_aspect_ratio.py tests/test_compression_optimization.py tests/test_multi_color.py -v
+
+      - name: Start Background FastAPI Server
+        run: |
+          python -m uvicorn main:app --host 127.0.0.1 --port 8000 &
+          # Wait up to 30 seconds for server healthcheck
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:8000/api/colorize/batch/status > /dev/null; then
+              echo "FastAPI test server is ready and responding on port 8000!"
+              break
+            fi
+            echo "Waiting for server to start ($i/30)..."
+            sleep 1
+          done
+
+      - name: Run Full Test Suite (25 Tests)
+        run: |
+          pytest -v
+
+      - name: Cleanup Background Server
+        if: always()
+        run: |
+          pkill -f "uvicorn main:app" || true

@@ -76,5 +76,9 @@ def run_test():
 
     print("CANCEL & NEW MODEL SELECTION TEST PASSED PERFECTLY!")
 
+def test_model_switch_after_cancel():
+    run_test()
+
 if __name__ == "__main__":
     run_test()
+

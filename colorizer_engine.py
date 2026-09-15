@@ -2,8 +2,10 @@ import os
 import io
 import base64
 import requests
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 
 import numpy as np
 import cv2
@@ -28,6 +30,129 @@ except ImportError:
 BASE_DIR = Path(__file__).parent.resolve()
 NETWORKS_DIR = BASE_DIR / "networks"
 DENOISING_DIR = BASE_DIR / "denoising" / "models"
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Color Detection Utility
+# ─────────────────────────────────────────────────────────────────────
+
+def is_colored_page(image_path: str,
+                    sat_threshold: float = 15.0,
+                    colored_pixel_ratio: float = 0.04) -> bool:
+    """
+    Returns True when the image already contains meaningful color information
+    and does not need to be re-colorized.
+
+    Method:
+      - Convert to HSV.
+      - Count pixels with Saturation > sat_threshold (0-255 scale).
+      - If the fraction of such pixels exceeds `colored_pixel_ratio` (default 4%)
+        the page is considered already colored.
+
+    Thresholds are conservative so that:
+      - Pure B&W pages with mild JPEG compression artifacts are still processed.
+      - Pages with even a modest splash of color (colored covers, partial-color
+        chapters) are correctly detected and skipped.
+    """
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return False
+        # Downscale to a small proxy image for fast analysis
+        small = cv2.resize(img, (256, 256), interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+        sat = hsv[:, :, 1].astype(np.float32)
+        colored_pixels = np.sum(sat > sat_threshold)
+        ratio = float(colored_pixels) / float(sat.size)
+        return ratio > colored_pixel_ratio
+    except Exception as e:
+        print(f"[ColorDetect WARNING] Could not analyse {image_path}: {e}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Character Palette — per-session color memory
+# ─────────────────────────────────────────────────────────────────────
+
+@dataclass
+class CharacterEntry:
+    """Canonical color hints for a single named character."""
+    name: str           # e.g. "Arale"
+    hair_hex: str = ""  # e.g. "#8B2BE2"  (violet)
+    skin_hex: str = ""  # e.g. "#F4C5A0"  (peach)
+    costume_hex: str = ""  # e.g. "#3A7BFF"
+    extra_hex: str = ""    # optional catch-all / accessory color
+
+
+@dataclass
+class CharacterPalette:
+    """
+    Stores a list of named characters with their canonical colors.
+    Used to inject spatial color hints into the neural colorizer hint tensor
+    so that hair and costume colors remain consistent across panels.
+    """
+    characters: List[CharacterEntry] = field(default_factory=list)
+
+    # ── Serialization ────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        return {"characters": [vars(c) for c in self.characters]}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CharacterPalette":
+        entries = [CharacterEntry(**c) for c in d.get("characters", [])]
+        return cls(characters=entries)
+
+    # ── Hint tensor for neural colorizer ────────────────────────────
+
+    def build_hint_tensor(self, h: int, w: int, device: str) -> torch.Tensor:
+        """
+        Builds a (1, 4, H, W) hint tensor for the neural model.
+
+        Channel layout expected by the Colorizer hint input:
+          ch 0-2 : R, G, B  (0–1 float)
+          ch 3   : confidence mask  (0 = no hint, 1 = strong hint)
+
+        Applies a global tint derived by averaging all provided character colors.
+        This gives the model a "preferred palette" nudge without pixel-precise
+        segmentation.  The low confidence (0.30) allows the model to override
+        the hint wherever the local context provides stronger evidence.
+        """
+        hint = torch.zeros(1, 4, h, w, dtype=torch.float32, device=device)
+
+        hex_colors: List[str] = []
+        for ch in self.characters:
+            for hex_val in [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]:
+                if hex_val and len(hex_val) >= 6:
+                    hex_colors.append(hex_val.strip().lstrip("#"))
+
+        if not hex_colors:
+            return hint  # all-zero → model runs unguided
+
+        rgb_vals = []
+        for hx in hex_colors:
+            try:
+                r = int(hx[0:2], 16) / 255.0
+                g = int(hx[2:4], 16) / 255.0
+                b = int(hx[4:6], 16) / 255.0
+                rgb_vals.append((r, g, b))
+            except ValueError:
+                continue
+
+        if not rgb_vals:
+            return hint
+
+        avg_r = sum(c[0] for c in rgb_vals) / len(rgb_vals)
+        avg_g = sum(c[1] for c in rgb_vals) / len(rgb_vals)
+        avg_b = sum(c[2] for c in rgb_vals) / len(rgb_vals)
+
+        confidence = 0.30  # low enough for model to override locally
+        hint[0, 0, :, :] = avg_r
+        hint[0, 1, :, :] = avg_g
+        hint[0, 2, :, :] = avg_b
+        hint[0, 3, :, :] = confidence
+
+        return hint
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -248,10 +373,32 @@ class MangaColorizerEngine:
         saturation: float  = 1.4,
         contrast: float    = 1.1,
         line_preserve: float = 0.85,
+        skip_if_colored: bool = False,
+        character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
+
+        Args:
+            skip_if_colored:    When True, pages that already contain color are
+                                copied to output_path unchanged and returned with
+                                status "skipped_colored".
+            character_palette:  Optional CharacterPalette whose color hints are
+                                injected into the neural hint tensor to keep hair /
+                                costume colors consistent across panels.
         """
+        # ── Early exit: page already has colors ─────────────────────
+        if skip_if_colored and is_colored_page(image_path):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            shutil.copy2(image_path, output_path)
+            print(f"[MangaColorizer] Skipped (already colored): {Path(image_path).name}")
+            return {
+                "status": "skipped_colored",
+                "engine": "color_detection",
+                "style": style,
+                "output_path": output_path,
+            }
+
         provider = (model_provider or "resnext_generator").lower()
 
         if provider in ("local_smart", "smart_local"):
@@ -295,7 +442,8 @@ class MangaColorizerEngine:
                 style=style,
                 saturation=saturation,
                 contrast=contrast,
-                line_preserve=line_preserve
+                line_preserve=line_preserve,
+                character_palette=character_palette,
             )
 
     # ── Neural ResNeXt Colorizer Engine ─────────────────────────────
@@ -310,6 +458,7 @@ class MangaColorizerEngine:
         saturation: float  = 1.4,
         contrast: float    = 1.1,
         line_preserve: float = 0.85,
+        character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
         """
         High-Vibrancy Deep Neural Manga Colorization:
@@ -318,6 +467,7 @@ class MangaColorizerEngine:
         3. Smart Anime Vibrance & Color Enhancer: rich skin radiance & punchy anime colors.
         4. Native Line Art Multiply Blending (zero gamut clipping distortion).
         5. Clean white paper & speech bubble protection.
+        6. Optional CharacterPalette hint injection for cross-panel color consistency.
         """
         if self.colorizer_model is None:
             print("[MangaColorizer] Neural model not loaded, running local fallback.")
@@ -336,12 +486,20 @@ class MangaColorizerEngine:
 
         img_pad, pad = resize_pad_manga(orig_np, size=inference_size)
         tens_in = ToTensor()(img_pad).unsqueeze(0).to(self.device)
-        hint_clean = torch.zeros(1, 4, tens_in.shape[2], tens_in.shape[3], dtype=torch.float32, device=self.device)
 
-        # 3. Authentic Neural Inference (Automatic Manga Colorization)
+        # 3. Build hint tensor — inject character palette when provided
+        _, _, pad_h, pad_w = tens_in.shape
+        if character_palette is not None:
+            hint = character_palette.build_hint_tensor(pad_h, pad_w, self.device)
+            print(f"[MangaColorizer] Palette hint injected ({len(character_palette.characters)} characters)")
+        else:
+            hint = torch.zeros(1, 4, pad_h, pad_w, dtype=torch.float32, device=self.device)
+
+        # 4. Authentic Neural Inference (Automatic Manga Colorization)
         with torch.no_grad():
-            fake_color, _ = self.colorizer_model(torch.cat([tens_in, hint_clean], 1))
+            fake_color, _ = self.colorizer_model(torch.cat([tens_in, hint], 1))
             fake_color = fake_color.detach()
+
 
         # Unpad and convert back to RGB [0, 1]
         result_rn = fake_color[0].detach().cpu().permute(1, 2, 0) * 0.5 + 0.5

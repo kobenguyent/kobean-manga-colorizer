@@ -47,5 +47,8 @@ def run_test():
     assert dl.status_code == 200
     print("IMAGE FILE UPLOAD & COLORIZATION TEST PASSED PERFECTLY!")
 
+def test_image_upload():
+    run_test()
+
 if __name__ == "__main__":
     run_test()

@@ -79,5 +79,8 @@ def run_export_formats_test():
 
     print("ALL FORMAT EXPORT TESTS PASSED PERFECTLY!")
 
+def test_export_formats():
+    run_export_formats_test()
+
 if __name__ == "__main__":
     run_export_formats_test()

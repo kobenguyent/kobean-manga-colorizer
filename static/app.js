@@ -632,6 +632,11 @@ function renderDashboard() {
   document.getElementById("gallery-total-count").innerText = currentSession.total_pages;
   renderGalleryGrid();
   renderDocumentQueue();
+
+  // Show palette card and load existing characters for this session
+  const paletteCard = document.getElementById("palette-card");
+  if (paletteCard) paletteCard.style.display = "";
+  paletteLoadFromServer();
 }
 
 function updateColorizedCount() {
@@ -656,6 +661,16 @@ function updateColorizedCount() {
   } else {
     if (exportCard) exportCard.classList.add("hidden");
     if (sidebarExportCard) sidebarExportCard.classList.add("hidden");
+  }
+
+  // Show "Recolorize Selected" button when at least one page is already colorized
+  const btnRecolorizeSelected = document.getElementById("btn-recolorize-selected");
+  if (btnRecolorizeSelected) {
+    if (colorizedCount > 0) {
+      btnRecolorizeSelected.classList.remove("hidden");
+    } else {
+      btnRecolorizeSelected.classList.add("hidden");
+    }
   }
 
   // Synchronize with activeSessions sidebar queue
@@ -685,6 +700,19 @@ function renderGalleryGrid() {
     const thumbUrl = page.colorized_url || `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
     
     const dimText = (page.width && page.height) ? `${page.width} × ${page.height}` : "";
+
+    // Show a small recolorize button on colorized pages
+    const recolorizeBtn = page.status === "colorized"
+      ? `<button class="page-recolorize-btn" title="Force re-colorize this page"
+               onclick="event.stopPropagation(); recolorizePage(${idx})"
+               style="position:absolute;bottom:28px;right:6px;z-index:4;
+                      background:rgba(249,115,22,0.92);border:none;border-radius:4px;
+                      padding:3px 7px;cursor:pointer;color:#fff;font-size:0.7rem;
+                      display:flex;align-items:center;gap:3px;">
+           <i class="ri-refresh-line"></i> Recolorize
+         </button>`
+      : "";
+
     card.innerHTML = `
       <div class="page-thumb-container">
         <label class="page-select-checkbox ${isSelected ? 'checked' : ''}" onclick="event.stopPropagation()" title="Select/Deselect page for colorization">
@@ -697,6 +725,7 @@ function renderGalleryGrid() {
         <span class="page-status-badge status-${page.status}" id="page-badge-${idx}">
           ${page.status.toUpperCase()}
         </span>
+        ${recolorizeBtn}
         <img class="page-thumb-img" id="page-img-${idx}" src="${thumbUrl}" alt="${page.display_name}" loading="lazy" />
       </div>
       <div class="page-card-footer">
@@ -825,7 +854,8 @@ async function startColorization() {
     saturation: saturation,
     contrast: 1.1,
     line_preserve: linePreserve,
-    selected_pages: pagesToColorize
+    selected_pages: pagesToColorize,
+    skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
   };
 
   // UI state updates
@@ -1003,9 +1033,15 @@ window.subscribeToProgressStream = subscribeToProgressStream;
 window.connectProgressStream = subscribeToProgressStream;
 
 async function cancelColorization() {
+  if (currentCombinedExportJobId) {
+    await cancelCombinedExport();
+    return;
+  }
+
   if (!currentSession) return;
 
   const btnCancel = document.getElementById("btn-cancel-colorize");
+
   if (btnCancel) {
     btnCancel.disabled = true;
     btnCancel.innerHTML = '<i class="ri-loader-4-line"></i> Cancelling...';
@@ -1491,6 +1527,245 @@ async function exportBatch(format = "auto") {
     batchBtns.forEach(btn => btn.disabled = false);
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+//  Combined Single-Volume Export with Real-time Progress & Cancel
+// ─────────────────────────────────────────────────────────────────────
+
+let currentCombinedExportJobId = null;
+let combinedExportEventSource = null;
+
+function resetCombinedExportUI() {
+  const epubBtn = document.getElementById("btn-combined-epub");
+  const pdfBtn  = document.getElementById("btn-combined-pdf");
+  if (epubBtn) epubBtn.disabled = false;
+  if (pdfBtn)  pdfBtn.disabled  = false;
+
+  const progressBox = document.getElementById("combined-export-progress-box");
+  if (progressBox) progressBox.classList.add("hidden");
+
+  const progCard = document.getElementById("progress-card");
+  if (progCard && progCard.dataset.combinedExport === "true") {
+    progCard.classList.add("hidden");
+    progCard.dataset.combinedExport = "false";
+  }
+
+  if (combinedExportEventSource) {
+    try { combinedExportEventSource.close(); } catch (_) {}
+    combinedExportEventSource = null;
+  }
+  currentCombinedExportJobId = null;
+}
+
+async function cancelCombinedExport() {
+  if (!currentCombinedExportJobId) {
+    showToast("No active combined export to cancel.", "warning");
+    return;
+  }
+
+  const btnCancel = document.getElementById("btn-cancel-combined-export");
+  if (btnCancel) {
+    btnCancel.disabled = true;
+    btnCancel.innerHTML = '<i class="ri-loader-4-line spin"></i> Cancelling...';
+  }
+
+  showToast("Cancelling combined export...", "info");
+
+  try {
+    await fetch(`/api/export/combined/cancel/${currentCombinedExportJobId}`, {
+      method: "POST"
+    });
+  } catch (err) {
+    console.error("Cancel combined export request error:", err);
+  }
+}
+
+/**
+ * Merges all active sessions into a single EPUB or PDF file with live progress.
+ *
+ * @param {"epub"|"pdf"} format
+ */
+async function exportCombined(format = "epub") {
+  let sessionList = (activeSessions && activeSessions.length > 0)
+    ? activeSessions
+    : (currentSession ? [currentSession] : []);
+
+  if (sessionList.length === 0 && Array.isArray(historyData) && historyData.length > 0) {
+    sessionList = historyData;
+  }
+
+  const sessionIds = sessionList.map(s => s.session_id).filter(Boolean);
+  const title = document.getElementById("combined-title-input")?.value?.trim()
+    || "Colorized Manga Collection";
+
+  const fmtLabel = format === "pdf" ? "Single PDF" : "Single EPUB";
+
+  const epubBtn = document.getElementById("btn-combined-epub");
+  const pdfBtn  = document.getElementById("btn-combined-pdf");
+  if (epubBtn) epubBtn.disabled = true;
+  if (pdfBtn)  pdfBtn.disabled  = true;
+
+  // Sidebar progress box
+  const progressBox = document.getElementById("combined-export-progress-box");
+  const progressTitle = document.getElementById("combined-progress-title-text");
+  const progressPct = document.getElementById("combined-progress-pct");
+  const progressBarFill = document.getElementById("combined-progress-bar-fill");
+  const progressSubtext = document.getElementById("combined-progress-subtext");
+  const btnCancel = document.getElementById("btn-cancel-combined-export");
+
+  if (progressBox) progressBox.classList.remove("hidden");
+  if (progressTitle) progressTitle.innerText = `Exporting ${fmtLabel}...`;
+  if (progressPct) progressPct.innerText = "0%";
+  if (progressBarFill) progressBarFill.style.width = "0%";
+  if (progressSubtext) progressSubtext.innerText = "Starting packager...";
+  if (btnCancel) {
+    btnCancel.disabled = false;
+    btnCancel.innerHTML = '<i class="ri-close-circle-line"></i> Cancel';
+  }
+
+  // Main banner progress card
+  const progCard = document.getElementById("progress-card");
+  const progStatus = document.getElementById("progress-status-text");
+  const progSub = document.getElementById("progress-subtext");
+  const progCounter = document.getElementById("progress-counter-text");
+  const progFill = document.getElementById("progress-bar-fill");
+  if (progCard) {
+    progCard.classList.remove("hidden");
+    progCard.dataset.combinedExport = "true";
+  }
+  if (progStatus) progStatus.innerText = `Assembling ${fmtLabel}...`;
+  if (progSub) progSub.innerText = `Preparing ${sessionIds.length || 'all'} volumes: "${title}"`;
+  if (progCounter) progCounter.innerText = "0%";
+  if (progFill) progFill.style.width = "0%";
+
+  showToast(`Preparing ${fmtLabel} (${sessionIds.length || 'all'} volumes)...`, "info");
+
+  try {
+    const resp = await fetch("/api/export/combined", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_ids: sessionIds, format, title })
+    });
+
+    const data = await resp.json();
+    if (!resp.ok || !data.job_id) {
+      throw new Error(data.detail || `${fmtLabel} export failed to start.`);
+    }
+
+    currentCombinedExportJobId = data.job_id;
+
+    if (combinedExportEventSource) {
+      try { combinedExportEventSource.close(); } catch (_) {}
+    }
+
+    const sseUrl = data.stream_url || `/api/export/combined/stream/${data.job_id}`;
+    combinedExportEventSource = new EventSource(sseUrl);
+
+    combinedExportEventSource.onmessage = (event) => {
+      try {
+        const ev = JSON.parse(event.data);
+
+        if (ev.type === "progress") {
+          const pct = Math.min(100, Math.max(0, ev.percent || 0));
+          if (progressPct) progressPct.innerText = `${pct}%`;
+          if (progressBarFill) progressBarFill.style.width = `${pct}%`;
+          if (progressSubtext) {
+            progressSubtext.innerText = ev.status || `Page ${ev.processed_pages}/${ev.total_pages}`;
+          }
+
+          if (progCounter) progCounter.innerText = `${ev.processed_pages || 0} / ${ev.total_pages || 0} (${pct}%)`;
+          if (progFill) progFill.style.width = `${pct}%`;
+          if (progSub && ev.status) progSub.innerText = ev.status;
+
+        } else if (ev.type === "completed") {
+          resetCombinedExportUI();
+          showToast(`${fmtLabel} ready — ${ev.total_volumes || 'All'} volume(s) merged! Downloading…`, "success");
+
+          const a = document.createElement("a");
+          a.href = ev.download_url;
+          a.download = ev.filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+
+        } else if (ev.type === "cancelled") {
+          resetCombinedExportUI();
+          showToast(`Combined ${fmtLabel} export cancelled.`, "warning");
+
+        } else if (ev.type === "error") {
+          resetCombinedExportUI();
+          showToast(`Combined export error: ${ev.error || 'Failed'}`, "error");
+        }
+      } catch (e) {
+        console.error("Error parsing combined export SSE message:", e);
+      }
+    };
+
+    combinedExportEventSource.onerror = () => {
+      if (currentCombinedExportJobId) {
+        pollCombinedExportFallback(currentCombinedExportJobId, fmtLabel);
+      }
+    };
+
+  } catch (err) {
+    resetCombinedExportUI();
+    showToast(`Combined export error: ${err.message}`, "error");
+  }
+}
+
+async function pollCombinedExportFallback(jobId, fmtLabel) {
+  const pollInterval = setInterval(async () => {
+    if (!currentCombinedExportJobId || currentCombinedExportJobId !== jobId) {
+      clearInterval(pollInterval);
+      return;
+    }
+
+    try {
+      const resp = await fetch(`/api/export/combined/status/${jobId}`);
+      if (!resp.ok) {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        return;
+      }
+      const data = await resp.json();
+      if (data.status === "completed") {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        const dlUrl = `/api/download/combined/${data.out_filename || ('collection.' + (data.format || 'epub'))}`;
+        const a = document.createElement("a");
+        a.href = dlUrl;
+        a.download = data.out_filename || "combined_manga";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        showToast(`${fmtLabel} download started!`, "success");
+      } else if (data.status === "cancelled") {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        showToast(`Combined export cancelled.`, "warning");
+      } else if (data.status === "error") {
+        clearInterval(pollInterval);
+        resetCombinedExportUI();
+        showToast(`Export error: ${data.error || 'Failed'}`, "error");
+      } else if (data.progress) {
+        const pct = data.progress.percent || 0;
+        const progressPct = document.getElementById("combined-progress-pct");
+        const progressBarFill = document.getElementById("combined-progress-bar-fill");
+        const progressSubtext = document.getElementById("combined-progress-subtext");
+        if (progressPct) progressPct.innerText = `${pct}%`;
+        if (progressBarFill) progressBarFill.style.width = `${pct}%`;
+        if (progressSubtext && data.progress.status) progressSubtext.innerText = data.progress.status;
+      }
+    } catch (_) {
+      clearInterval(pollInterval);
+      resetCombinedExportUI();
+    }
+  }, 1000);
+}
+
+window.exportCombined = exportCombined;
+window.cancelCombinedExport = cancelCombinedExport;
+
 
 // ─── File & Page Deletion Handlers ──────────────────────────────────
 
@@ -1991,3 +2266,291 @@ window.switchFromHistory = switchFromHistory;
 window.exportDocumentFromHistory = exportDocumentFromHistory;
 window.deleteFromHistory = deleteFromHistory;
 
+
+// ─────────────────────────────────────────────────────────────────────
+//  Character Palette Manager
+// ─────────────────────────────────────────────────────────────────────
+
+/** In-memory palette state for the active session. */
+let paletteCharacters = [];
+
+/**
+ * Fetches the current session's palette from the server and re-renders the list.
+ */
+async function paletteLoadFromServer() {
+  if (!currentSession) return;
+  try {
+    const resp = await fetch(`/api/palette/${currentSession.session_id}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    paletteRender();
+  } catch (_) {
+    // Silent — palette is optional
+  }
+}
+
+/**
+ * Renders the character list inside #palette-character-list.
+ * Each row shows the name + color swatches + a delete button.
+ */
+function paletteRender() {
+  const list = document.getElementById("palette-character-list");
+  const badge = document.getElementById("palette-badge-count");
+  if (!list) return;
+
+  if (badge) badge.innerText = `${paletteCharacters.length} Character${paletteCharacters.length !== 1 ? "s" : ""}`;
+
+  if (paletteCharacters.length === 0) {
+    list.innerHTML = `<p style="font-size:0.78rem;color:var(--text-secondary);text-align:center;padding:0.5rem 0;">
+      No characters yet. Add one below.
+    </p>`;
+    return;
+  }
+
+  list.innerHTML = paletteCharacters.map((ch, i) => {
+    const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+      .filter(Boolean)
+      .map(hx => `<span title="${hx}" style="
+        display:inline-block;width:14px;height:14px;border-radius:3px;
+        background:${hx};border:1px solid rgba(255,255,255,0.2);vertical-align:middle;"></span>`)
+      .join(" ");
+
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;
+                  background:var(--card-bg,#1e1e2e);border:1px solid var(--border-color);
+                  border-radius:6px;padding:6px 10px;gap:6px;">
+        <span style="font-size:0.82rem;font-weight:500;flex:1;min-width:0;
+                     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+              title="${ch.name}">${ch.name}</span>
+        <span style="display:flex;gap:3px;align-items:center;">${swatches}</span>
+        <button class="btn-icon" title="Remove ${ch.name}"
+                onclick="paletteDeleteCharacter(${i})"
+                style="padding:2px 5px;opacity:0.6;flex-shrink:0;">
+          <i class="ri-delete-bin-line" style="font-size:0.85rem;"></i>
+        </button>
+      </div>`;
+  }).join("");
+}
+
+/**
+ * Reads the add-character form, calls POST /api/palette/upsert, and refreshes.
+ */
+async function paletteAddCharacter() {
+  if (!currentSession) { showToast("No active session.", "warning"); return; }
+
+  const name = (document.getElementById("pal-char-name")?.value || "").trim();
+  if (!name) { showToast("Please enter a character name.", "warning"); return; }
+
+  const hairHex    = document.getElementById("pal-hair")?.value    || "";
+  const skinHex    = document.getElementById("pal-skin")?.value    || "";
+  const costumeHex = document.getElementById("pal-costume")?.value || "";
+  const extraHex   = document.getElementById("pal-extra")?.value   || "";
+
+  try {
+    const resp = await fetch("/api/palette/upsert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: currentSession.session_id,
+        character: { name, hair_hex: hairHex, skin_hex: skinHex, costume_hex: costumeHex, extra_hex: extraHex }
+      })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    paletteRender();
+    const nameInput = document.getElementById("pal-char-name");
+    if (nameInput) nameInput.value = "";
+    showToast(`Character "${name}" saved to palette.`, "success");
+  } catch (err) {
+    showToast(`Palette error: ${err.message}`, "error");
+  }
+}
+
+/**
+ * Removes a character by index from the local list and calls DELETE on the server.
+ */
+async function paletteDeleteCharacter(index) {
+  if (!currentSession) return;
+  const ch = paletteCharacters[index];
+  if (!ch) return;
+
+  try {
+    const resp = await fetch(
+      `/api/palette/${currentSession.session_id}/${encodeURIComponent(ch.name)}`,
+      { method: "DELETE" }
+    );
+    if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    paletteRender();
+    showToast(`"${ch.name}" removed from palette.`, "info");
+  } catch (err) {
+    showToast(`Could not remove character: ${err.message}`, "error");
+  }
+}
+
+window.paletteAddCharacter    = paletteAddCharacter;
+window.paletteDeleteCharacter = paletteDeleteCharacter;
+window.paletteLoadFromServer  = paletteLoadFromServer;
+
+
+// ─────────────────────────────────────────────────────────────────────
+//  Recolorize — force re-run colorization on already-done pages
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Force-recolorizes a single page using the preview endpoint.
+ * Works from both the split preview header and the per-card button.
+ *
+ * @param {number} pageIdx  - 0-based page index
+ */
+async function recolorizePage(pageIdx) {
+  if (!currentSession) return;
+  const page = currentSession.pages[pageIdx];
+  if (!page) return;
+
+  const modelVariant  = document.getElementById("model-variant-select")?.value || "";
+  const apiKey        = document.getElementById("api-key-input")?.value || "";
+  const style         = document.getElementById("style-select")?.value || "gemini_anime";
+  const linePreserve  = parseFloat(document.getElementById("slider-line")?.value || "85") / 100.0;
+  const saturation    = parseFloat(document.getElementById("slider-saturation")?.value || "14") / 10.0;
+
+  // Show loading state in split preview header
+  const recolorBtn = document.getElementById("btn-recolorize-page");
+  if (recolorBtn) {
+    recolorBtn.disabled = true;
+    recolorBtn.innerHTML = '<i class="ri-loader-4-line spinner"></i> Recolorizing…';
+  }
+
+  // Mark card badge as processing
+  const badge = document.getElementById(`page-badge-${pageIdx}`);
+  if (badge) { badge.className = "page-status-badge status-processing"; badge.innerText = "PROCESSING"; }
+
+  showToast(`Recolorizing ${page.display_name}…`, "info");
+
+  try {
+    const resp = await fetch("/api/colorize/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id:      currentSession.session_id,
+        page_index:      pageIdx,
+        model_provider:  activeProvider,
+        model_name:      modelVariant,
+        api_key:         apiKey,
+        style:           style,
+        saturation:      saturation,
+        contrast:        1.1,
+        line_preserve:   linePreserve,
+        force_recolorize: true,
+      })
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.status === "success") {
+      page.status = "colorized";
+      page.colorized_url = data.colorized_url;
+      const ts = Date.now();
+
+      // Update gallery thumbnail
+      const imgElem = document.getElementById(`page-img-${pageIdx}`);
+      if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
+
+      if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
+
+      // Refresh split preview images
+      const colorImg = document.getElementById("split-img-colorized");
+      if (colorImg && currentPreviewPageIndex === pageIdx) {
+        colorImg.src = `${data.colorized_url}?t=${ts}`;
+      }
+
+      showToast(`${page.display_name} recolorized!`, "success");
+      updateColorizedCount();
+      // Re-render gallery so card recolorize button refreshes
+      renderGalleryGrid();
+    } else {
+      if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
+      showToast(data.detail || "Recolorize failed.", "error");
+    }
+  } catch (err) {
+    if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
+    showToast(`Error: ${err.message}`, "error");
+  } finally {
+    if (recolorBtn) {
+      recolorBtn.disabled = false;
+      recolorBtn.innerHTML = '<i class="ri-magic-line"></i> Recolorize';
+    }
+  }
+}
+
+/**
+ * Force-recolorizes all currently selected pages.
+ * Mirrors startColorization() but always passes force_recolorize=true.
+ */
+async function recolorizeSelected() {
+  if (!currentSession) return;
+
+  const pagesToRecolorize = selectedPages.size > 0
+    ? Array.from(selectedPages).sort((a, b) => a - b)
+    : null;
+
+  if (!pagesToRecolorize || pagesToRecolorize.length === 0) {
+    showToast("No pages selected.", "warning");
+    return;
+  }
+
+  const modelVariant = document.getElementById("model-variant-select")?.value || "";
+  const apiKey       = document.getElementById("api-key-input")?.value || "";
+  const style        = document.getElementById("style-select")?.value || "gemini_anime";
+  const linePreserve = parseFloat(document.getElementById("slider-line")?.value || "85") / 100.0;
+  const saturation   = parseFloat(document.getElementById("slider-saturation")?.value || "14") / 10.0;
+
+  const payload = {
+    session_id:       currentSession.session_id,
+    model_provider:   activeProvider,
+    model_name:       modelVariant,
+    api_key:          apiKey,
+    style:            style,
+    saturation:       saturation,
+    contrast:         1.1,
+    line_preserve:    linePreserve,
+    selected_pages:   pagesToRecolorize,
+    force_recolorize: true,
+    skip_if_colored:  false,
+  };
+
+  // UI feedback
+  document.getElementById("progress-card")?.classList.remove("hidden");
+  document.getElementById("export-card")?.classList.add("hidden");
+  document.getElementById("btn-start-colorize").disabled = true;
+
+  const pageCountText = `${pagesToRecolorize.length} Page${pagesToRecolorize.length !== 1 ? "s" : ""}`;
+  const progSub = document.getElementById("progress-subtext");
+  if (progSub) progSub.innerText = `Force recolorizing ${pageCountText}…`;
+
+  showToast(`Recolorizing ${pagesToRecolorize.length} page(s)…`, "info");
+
+  try {
+    const resp = await fetch("/api/colorize/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (resp.ok) {
+      subscribeToProgressStream();
+    } else {
+      const err = await resp.json();
+      showToast(err.detail || "Failed to start recolorization.", "error");
+      document.getElementById("btn-start-colorize").disabled = false;
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+    document.getElementById("btn-start-colorize").disabled = false;
+  }
+}
+
+window.recolorizePage     = recolorizePage;
+window.recolorizeSelected = recolorizeSelected;

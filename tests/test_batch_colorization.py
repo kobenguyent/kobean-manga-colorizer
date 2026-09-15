@@ -16,12 +16,25 @@ class TestBatchColorization(unittest.TestCase):
         res = requests.get(f"{BASE_URL}/api/sessions")
         self.assertEqual(res.status_code, 200)
         sessions = res.json().get("sessions", [])
+        if not sessions:
+            import fitz
+            doc = fitz.open()
+            doc.new_page(width=400, height=600)
+            tmp = "/tmp/batch_test_init.pdf"
+            doc.save(tmp)
+            doc.close()
+            with open(tmp, "rb") as f:
+                requests.post(f"{BASE_URL}/api/upload", files={"file": ("batch_test_init.pdf", f, "application/pdf")})
+            res = requests.get(f"{BASE_URL}/api/sessions")
+            sessions = res.json().get("sessions", [])
+
         self.assertTrue(len(sessions) > 0)
         
         # Check that no session has processed_count > total_pages
         for s in sessions:
             if s.get("total_pages", 0) > 0:
                 self.assertLessEqual(s.get("processed_count", 0), s.get("total_pages"))
+
 
         # Check natural sorting of Dr. Slump volumes
         slump_volumes = [s for s in sessions if "Dr. Slump" in s.get("filename", "")]

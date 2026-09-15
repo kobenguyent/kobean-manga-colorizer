@@ -422,3 +422,295 @@ class MangaFileProcessor:
                     zout.write(file_path, arcname=arcname)
 
         return output_filepath
+
+    # ── Combined single-file export (all volumes → one EPUB / PDF) ───
+
+    def build_combined_epub(
+        self,
+        sessions_data: list,
+        output_filepath: str,
+        title: str = "Colorized Manga Collection",
+        progress_callback: Optional[Any] = None,
+        cancel_check: Optional[Any] = None,
+    ) -> str:
+        """
+        Merges all queued volumes into one continuous EPUB3 file optimised for e-readers.
+
+        Structure:
+          OEBPS/
+            images/vol_{v:02d}_page_{p:04d}.jpg   — all page images, namespaced per volume
+            vol_{v:02d}_page_{p:04d}.xhtml        — one XHTML wrapper per page
+            nav.xhtml                              — table of contents with volume chapter headings
+            content.opf                            — manifest + spine
+
+        Supports real-time progress callbacks and cancellation checks.
+        """
+        import tempfile, uuid as _uuid
+
+        temp_epub = output_filepath + ".tmp"
+        if os.path.exists(temp_epub):
+            os.remove(temp_epub)
+
+        manifest_items: List[str] = [
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+        ]
+        spine_items: List[str] = []
+        toc_volumes: List[dict] = []
+
+        total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
+        processed_pages = 0
+        global_page_idx = 0
+
+        try:
+            with zipfile.ZipFile(temp_epub, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
+                zout.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+
+                container_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>'''
+                zout.writestr('META-INF/container.xml', container_xml)
+
+                for vol_idx, sess in enumerate(sessions_data):
+                    if cancel_check and cancel_check():
+                        raise InterruptedError("Combined EPUB export cancelled")
+
+                    session_id = sess["session_id"]
+                    vol_stem   = Path(sess.get("filename", f"Volume {vol_idx+1}")).stem
+                    pages_meta = sess.get("pages", [])
+                    colorized_dir = self.storage_dir / session_id / "colorized"
+
+                    vol_toc = {"label": f"Vol. {vol_idx+1} — {vol_stem}", "pages": []}
+
+                    for page_info in pages_meta:
+                        if cancel_check and cancel_check():
+                            raise InterruptedError("Combined EPUB export cancelled")
+
+                        color_filename = page_info["filename"]
+                        color_path = colorized_dir / color_filename
+                        if not color_path.exists():
+                            color_path = Path(page_info["original_path"])
+                        if not color_path.exists():
+                            continue
+
+                        gidx = global_page_idx
+                        global_page_idx += 1
+
+                        # Image
+                        ext = color_path.suffix.lower()
+                        img_arc_name = f"images/vol_{vol_idx+1:02d}_page_{gidx+1:04d}.jpg"
+                        if ext in ('.jpg', '.jpeg'):
+                            with open(color_path, 'rb') as f:
+                                img_bytes = f.read()
+                        else:
+                            with Image.open(str(color_path)) as pil_img:
+                                rgb = pil_img.convert("RGB")
+                                buf = io.BytesIO()
+                                rgb.save(buf, format="JPEG", quality=90, optimize=True)
+                                img_bytes = buf.getvalue()
+
+                        zout.writestr(f"OEBPS/{img_arc_name}", img_bytes)
+
+                        # XHTML page wrapper
+                        xhtml_name = f"vol_{vol_idx+1:02d}_page_{gidx+1:04d}.xhtml"
+                        img_id  = f"img_v{vol_idx+1}p{gidx+1}"
+                        page_id = f"page_v{vol_idx+1}p{gidx+1}"
+                        w = page_info.get("width", 1200)
+                        h = page_info.get("height", 1600)
+                        page_label = page_info.get("display_name", f"Page {gidx+1}")
+
+                        page_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8"/>
+  <title>{page_label}</title>
+  <meta name="viewport" content="width={w}, height={h}"/>
+  <style>
+    @page {{ margin: 0; }}
+    body {{ margin: 0; padding: 0; background-color: #000; text-align: center; }}
+    img {{ max-width: 100%; max-height: 100vh; width: auto; height: auto; display: block; margin: auto; }}
+  </style>
+</head>
+<body>
+  <img src="{img_arc_name}" alt="{page_label}"/>
+</body>
+</html>'''
+                        zout.writestr(f"OEBPS/{xhtml_name}", page_xhtml)
+
+                        manifest_items.append(
+                            f'<item id="{img_id}" href="{img_arc_name}" media-type="image/jpeg"/>'
+                        )
+                        manifest_items.append(
+                            f'<item id="{page_id}" href="{xhtml_name}" media-type="application/xhtml+xml"/>'
+                        )
+                        spine_items.append(f'<itemref idref="{page_id}"/>')
+                        vol_toc["pages"].append({"xhtml": xhtml_name, "title": page_label})
+
+                        processed_pages += 1
+                        if progress_callback:
+                            progress_callback({
+                                "vol_num": vol_idx + 1,
+                                "total_vols": len(sessions_data),
+                                "vol_title": vol_stem,
+                                "processed_pages": processed_pages,
+                                "total_pages": total_pages,
+                                "percent": int((processed_pages / max(total_pages, 1)) * 100),
+                                "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_label}"
+                            })
+
+                    if vol_toc["pages"]:
+                        toc_volumes.append(vol_toc)
+
+                # Navigation TOC — volume-level chapter headers
+                nav_ol_parts: List[str] = []
+                for vol in toc_volumes:
+                    first_xhtml = vol["pages"][0]["xhtml"] if vol["pages"] else "#"
+                    clean_vol_label = vol["label"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    page_lis = "".join(
+                        f'<li><a href="{p["xhtml"]}">{p["title"].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}</a></li>'
+                        for p in vol["pages"]
+                    )
+                    nav_ol_parts.append(
+                        f'<li><a href="{first_xhtml}">{clean_vol_label}</a>'
+                        f'<ol>{page_lis}</ol></li>'
+                    )
+
+                nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><meta charset="utf-8"/><title>Table of Contents</title></head>
+<body>
+  <nav epub:type="toc">
+    <h2>Table of Contents</h2>
+    <ol>{"".join(nav_ol_parts)}</ol>
+  </nav>
+</body>
+</html>'''
+                zout.writestr('OEBPS/nav.xhtml', nav_xhtml)
+
+                # content.opf
+                safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                book_uuid  = str(_uuid.uuid4())
+                opf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="pub-id">urn:uuid:{book_uuid}</dc:identifier>
+    <dc:title>{safe_title}</dc:title>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">2026-09-15T00:00:00Z</meta>
+  </metadata>
+  <manifest>
+    {"".join(manifest_items)}
+  </manifest>
+  <spine page-progression-direction="rtl">
+    {"".join(spine_items)}
+  </spine>
+</package>'''
+                zout.writestr('OEBPS/content.opf', opf)
+
+            if cancel_check and cancel_check():
+                raise InterruptedError("Combined EPUB export cancelled")
+
+            if os.path.exists(output_filepath):
+                os.remove(output_filepath)
+            os.rename(temp_epub, output_filepath)
+            return output_filepath
+        except Exception:
+            if os.path.exists(temp_epub):
+                try:
+                    os.remove(temp_epub)
+                except Exception:
+                    pass
+            raise
+
+    def build_combined_pdf(
+        self,
+        sessions_data: list,
+        output_filepath: str,
+        title: str = "Colorized Manga Collection",
+        progress_callback: Optional[Any] = None,
+        cancel_check: Optional[Any] = None,
+    ) -> str:
+        """
+        Concatenates all volumes into a single PDF with PDF bookmarks (outlines)
+        at the volume level for easy navigation on e-readers and PDF viewers.
+
+        Supports real-time progress callbacks and cancellation checks.
+        """
+        pdf_doc = fitz.open()
+        total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
+        processed_pages = 0
+
+        try:
+            for vol_idx, sess in enumerate(sessions_data):
+                if cancel_check and cancel_check():
+                    raise InterruptedError("Combined PDF export cancelled")
+
+                session_id   = sess["session_id"]
+                vol_stem     = Path(sess.get("filename", f"Volume {vol_idx+1}")).stem
+                pages_meta   = sess.get("pages", [])
+                colorized_dir = self.storage_dir / session_id / "colorized"
+
+                vol_start_page = len(pdf_doc)  # page index before adding this volume
+
+                for page_info in pages_meta:
+                    if cancel_check and cancel_check():
+                        raise InterruptedError("Combined PDF export cancelled")
+
+                    color_filename = page_info["filename"]
+                    color_path = colorized_dir / color_filename
+                    if not color_path.exists():
+                        color_path = Path(page_info["original_path"])
+                    if not color_path.exists():
+                        continue
+
+                    ext = color_path.suffix.lower()
+                    with Image.open(str(color_path)) as pil_img:
+                        width, height = pil_img.size
+                        pdf_page = pdf_doc.new_page(width=width, height=height)
+                        rect = fitz.Rect(0, 0, width, height)
+                        if ext in ('.jpg', '.jpeg'):
+                            pdf_page.insert_image(rect, filename=str(color_path))
+                        else:
+                            rgb_img = pil_img.convert("RGB")
+                            buf = io.BytesIO()
+                            rgb_img.save(buf, format="JPEG", quality=90, optimize=True)
+                            pdf_page.insert_image(rect, stream=buf.getvalue())
+
+                    processed_pages += 1
+                    if progress_callback:
+                        progress_callback({
+                            "vol_num": vol_idx + 1,
+                            "total_vols": len(sessions_data),
+                            "vol_title": vol_stem,
+                            "processed_pages": processed_pages,
+                            "total_pages": total_pages,
+                            "percent": int((processed_pages / max(total_pages, 1)) * 100),
+                            "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_info.get('display_name', f'Page {processed_pages}')}"
+                        })
+
+                # Add a bookmark (outline entry) pointing to the first page of this volume
+                if len(pdf_doc) > vol_start_page:
+                    pdf_doc.set_toc(
+                        pdf_doc.get_toc() + [[1, f"Vol. {vol_idx+1} — {vol_stem}", vol_start_page + 1]]
+                    )
+
+            if cancel_check and cancel_check():
+                raise InterruptedError("Combined PDF export cancelled")
+
+            pdf_doc.set_metadata({"title": title, "creator": "Kobean Manga Colorizer"})
+            pdf_doc.save(output_filepath, garbage=4, deflate=True, clean=True)
+            pdf_doc.close()
+            return output_filepath
+        except Exception:
+            pdf_doc.close()
+            if os.path.exists(output_filepath):
+                try:
+                    os.remove(output_filepath)
+                except Exception:
+                    pass
+            raise
+

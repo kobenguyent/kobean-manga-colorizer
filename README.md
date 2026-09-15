@@ -218,7 +218,7 @@ The test suite includes end-to-end regression tests, aspect ratio preservation t
 - [x] 90% disk space compression optimization
 - [ ] Automated Speech Bubble OCR & Text Translation pipeline
 - [ ] Vertical Webtoon continuous scroll reading mode
-- [ ] Custom character palette memory (consistent hair/costume colors across panels)
+- [x] Custom character palette memory (consistent hair/costume colors across panels)
 
 ---
 

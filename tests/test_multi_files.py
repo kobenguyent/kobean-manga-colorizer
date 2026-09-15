@@ -175,5 +175,8 @@ def run_tests():
     print("ALL MULTI-FILE AND BATCH EXPORT TESTS PASSED!")
     print("==============================================")
 
+def test_multi_files():
+    run_tests()
+
 if __name__ == "__main__":
     run_tests()
