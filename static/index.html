@@ -451,9 +451,6 @@
               <button class="btn-icon btn-nav-preview" id="btn-next-page" title="Next Page (Right Arrow)" onclick="navigatePreviewPage(1)">
                 <i class="ri-arrow-right-s-line"></i>
               </button>
-              <button class="btn btn-secondary btn-sm" onclick="previewCurrentPage()">
-                <i class="ri-refresh-line"></i> Re-Preview
-              </button>
               <button class="btn btn-sm" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
                       style="background:var(--accent-orange,#f97316);border-color:var(--accent-orange,#f97316);color:#fff;"
                       title="Force re-colorize this page from scratch">
@@ -492,9 +489,13 @@
                 </div>
               </div>
 
-              <!-- Page Labels -->
-              <span class="split-label label-left">Black & White</span>
-              <span class="split-label label-right">Colorized AI</span>
+              <!-- Page Labels / Quick Click Switchers -->
+              <button type="button" class="split-label label-left clickable" onclick="setComparatorView('bw')" title="Click to view full Black & White">
+                <i class="ri-contrast-line"></i> Black & White
+              </button>
+              <button type="button" class="split-label label-right clickable" id="split-label-right" onclick="setComparatorView('color')" title="Click to view full Colorized AI">
+                <i class="ri-palette-line"></i> Colorized AI
+              </button>
             </div>
           </div>
         </div>
@@ -546,8 +547,12 @@
                 </label>
               </div>
             </div>
+
             <div class="header-right">
-              <span class="gallery-counter"><strong id="colorized-count">0</strong> of <span id="gallery-total-count">0</span> Colorized</span>
+              <!-- Count of Colorized Pages -->
+              <span class="gallery-counter"><strong id="colorized-count">0</strong>&nbsp;of&nbsp;<span id="gallery-total-count">0</span>&nbsp;Colorized</span>
+              
+              <!-- 3 Quick Export Buttons -->
               <div class="gallery-quick-exports">
                 <button class="btn btn-warning btn-sm hidden" id="btn-recolorize-selected"
                         title="Force re-colorize selected pages even if already colorized"
