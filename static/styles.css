@@ -1317,36 +1317,6 @@ body {
   color: var(--accent-cyan);
 }
 
-/* Primary Gallery Colorize Action Button */
-#btn-gallery-colorize {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  font-weight: 700;
-  font-size: 0.85rem;
-  padding: 0.45rem 1.1rem;
-  background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);
-  color: #0b1120;
-  border: none;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  box-shadow: 0 0 16px rgba(6, 182, 212, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.3);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-#btn-gallery-colorize:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 0 24px rgba(6, 182, 212, 0.8), 0 4px 12px rgba(0, 0, 0, 0.3);
-  filter: brightness(1.1);
-}
-
-#btn-gallery-colorize:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  box-shadow: none;
-  filter: grayscale(0.6);
-}
-
 /* Gallery Grid & Cards */
 .pages-grid {
   display: grid;

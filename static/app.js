@@ -1047,26 +1047,6 @@ function updateSelectionUI() {
     }
   }
 
-  const pendingCount = currentSession.pages.filter((p, i) => selectedPages.has(i) && p.status !== "colorized").length;
-
-  // Single button in gallery header to change pending to colorized
-  const btnGallery = document.getElementById("btn-gallery-colorize");
-  if (btnGallery) {
-    if (isBatchColorizing) {
-      btnGallery.innerHTML = '<i class="ri-loader-4-line spin"></i> Colorizing Pages...';
-      btnGallery.disabled = true;
-    } else if (count === 0) {
-      btnGallery.innerHTML = '<i class="ri-checkbox-blank-line"></i> Select Pages to Colorize';
-      btnGallery.disabled = true;
-    } else if (pendingCount > 0) {
-      btnGallery.innerHTML = `<i class="ri-magic-line"></i> Colorize (${pendingCount}) Pending Page${pendingCount > 1 ? 's' : ''}`;
-      btnGallery.disabled = false;
-    } else {
-      btnGallery.innerHTML = `<i class="ri-refresh-line"></i> Re-Colorize (${count}) Selected`;
-      btnGallery.disabled = false;
-    }
-  }
-
   const btnStart = document.getElementById("btn-start-colorize");
   if (btnStart) {
     if (isBatchColorizing) {
@@ -1102,9 +1082,6 @@ async function startColorization() {
     return;
   }
 
-  const pendingCount = currentSession.pages.filter((p, i) => selectedPages.has(i) && p.status !== "colorized").length;
-  const isForceReprocess = pendingCount === 0;
-
   const payload = {
     session_id: currentSession.session_id,
     model_provider: activeProvider,
@@ -1115,7 +1092,6 @@ async function startColorization() {
     contrast: 1.1,
     line_preserve: linePreserve,
     selected_pages: pagesToColorize,
-    force_reprocess: isForceReprocess,
     skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
   };
 
@@ -1124,11 +1100,6 @@ async function startColorization() {
   document.getElementById("export-card").classList.add("hidden");
   const btnStart = document.getElementById("btn-start-colorize");
   if (btnStart) btnStart.disabled = true;
-  const btnGallery = document.getElementById("btn-gallery-colorize");
-  if (btnGallery) {
-    btnGallery.innerHTML = '<i class="ri-loader-4-line spin"></i> Colorizing Pages...';
-    btnGallery.disabled = true;
-  }
 
   const providerNames = {
     resnext_generator: "ResNeXt Deep Generator",

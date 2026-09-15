@@ -148,7 +148,6 @@ class ColorizeRequest(BaseModel):
     contrast: float = 1.1
     line_preserve: float = 0.85
     selected_pages: Optional[List[int]] = None
-    force_reprocess: bool = False
     skip_if_colored: bool = False
     force_recolorize: bool = False   # when True, re-run even if page already has a colorized file
 
@@ -444,10 +443,9 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
         color_filename = page_info["filename"]
         output_path = str(colorized_dir / color_filename)
 
-        is_force = bool(req.force_recolorize or getattr(req, "force_reprocess", False))
         # Skip if page is already colorized and output file exists on disk,
         # UNLESS the caller explicitly requested a force recolorize.
-        if (not is_force
+        if (not req.force_recolorize
                 and page_info.get("status") == "colorized"
                 and Path(output_path).exists()
                 and Path(output_path).stat().st_size > 0):
@@ -456,7 +454,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             continue
 
         # When forcing recolorize, reset page status so the UI shows it as in-flight
-        if is_force:
+        if req.force_recolorize:
             page_info["status"] = "pending"
             page_info.pop("skipped_colored", None)
 
@@ -1479,4 +1477,3 @@ async def get_favicon():
 
 # Serve Frontend static assets
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
-
