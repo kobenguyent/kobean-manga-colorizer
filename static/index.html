@@ -372,32 +372,32 @@
                      value="Colorized Manga Collection" />
 
               <!-- E-Reader Optimization & Omnibus Controls -->
-              <div style="display:flex;flex-direction:column;gap:0.4rem;margin-bottom:0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:6px;padding:0.5rem;">
-                <div>
-                  <label for="combined-chunk-select" style="font-size:0.72rem;color:var(--text-secondary);display:block;margin-bottom:0.2rem;">
+              <div class="omnibus-controls-box">
+                <div class="omnibus-field">
+                  <label for="combined-chunk-select" class="omnibus-field-label">
                     <i class="ri-split-cells-vertical"></i> Series Splitting (Kindle Indexing Safe):
                   </label>
-                  <select id="combined-chunk-select" class="form-input" style="font-size:0.75rem;padding:3px 6px;width:100%;">
-                    <option value="none" selected>Single Continuous File (All volumes merged)</option>
-                    <option value="volumes_3">3-in-1 Omnibus Edition (ZIP bundle of 3-vol parts)</option>
-                    <option value="volumes_5">5-in-1 Omnibus Edition (ZIP bundle of 5-vol parts)</option>
-                    <option value="size_500">Auto-split at ~500 MB limit (ZIP bundle)</option>
+                  <select id="combined-chunk-select" class="form-select form-select-sm">
+                    <option value="none" selected>📜 Single Continuous File (All volumes merged)</option>
+                    <option value="volumes_3">📚 3-in-1 Omnibus Edition (ZIP bundle of 3-vol parts)</option>
+                    <option value="volumes_5">📦 5-in-1 Omnibus Edition (ZIP bundle of 5-vol parts)</option>
+                    <option value="size_500">⚡ Auto-split at ~500 MB limit (ZIP bundle)</option>
                   </select>
                 </div>
-                <div>
-                  <label for="combined-preset-select" style="font-size:0.72rem;color:var(--text-secondary);display:block;margin-bottom:0.2rem;">
+                <div class="omnibus-field">
+                  <label for="combined-preset-select" class="omnibus-field-label">
                     <i class="ri-aspect-ratio-line"></i> Resolution &amp; Compression:
                   </label>
-                  <select id="combined-preset-select" class="form-input" style="font-size:0.75rem;padding:3px 6px;width:100%;">
-                    <option value="colorsoft" selected>Kindle Colorsoft / Color E-Ink (1600px, Vibrancy Boost)</option>
-                    <option value="kindle">Kindle B&amp;W Paperwhite/Oasis (1600px, 80%)</option>
-                    <option value="tablet">Tablet / iPad HD (1920px, 85% quality)</option>
-                    <option value="original">Original Scan Resolution (90% quality)</option>
+                  <select id="combined-preset-select" class="form-select form-select-sm">
+                    <option value="colorsoft" selected>🌈 Kindle Colorsoft / Color E-Ink (1600px, Vibrancy Boost)</option>
+                    <option value="kindle">📖 Kindle B&amp;W Paperwhite/Oasis (1600px, 80%)</option>
+                    <option value="tablet">📱 Tablet / iPad HD (1920px, 85% quality)</option>
+                    <option value="original">🔍 Original Scan Resolution (90% quality)</option>
                   </select>
                 </div>
-                <div style="display:flex;align-items:center;gap:0.35rem;margin-top:0.15rem;">
-                  <input type="checkbox" id="combined-grayscale-check" style="cursor:pointer;accent-color:var(--accent-purple,#a855f7);" />
-                  <label for="combined-grayscale-check" style="font-size:0.72rem;color:var(--text-secondary);cursor:pointer;user-select:none;">
+                <div class="omnibus-check-row">
+                  <input type="checkbox" id="combined-grayscale-check" class="omnibus-checkbox" />
+                  <label for="combined-grayscale-check" class="omnibus-check-label">
                     16-level Grayscale (Kindle Paperwhite/Oasis)
                   </label>
                 </div>

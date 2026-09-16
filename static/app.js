@@ -52,6 +52,9 @@ function initCustomSelect(selectElement) {
   // Create container
   const container = document.createElement("div");
   container.className = "custom-select-container";
+  if (selectElement.classList.contains("form-select-sm") || selectElement.classList.contains("custom-select-sm")) {
+    container.classList.add("custom-select-sm");
+  }
   container.id = `custom-select-${selectElement.id}`;
 
   // Create trigger button
@@ -151,10 +154,12 @@ function initCustomSelect(selectElement) {
       dropdown.style.top = "auto";
       dropdown.style.bottom = "calc(100% + 6px)";
       dropdown.style.transformOrigin = "bottom center";
+      container.classList.add("open-upwards");
     } else {
       dropdown.style.top = "calc(100% + 6px)";
       dropdown.style.bottom = "auto";
       dropdown.style.transformOrigin = "top center";
+      container.classList.remove("open-upwards");
     }
 
     container.classList.add("open");
@@ -168,6 +173,7 @@ function initCustomSelect(selectElement) {
 
   function closeDropdown() {
     container.classList.remove("open");
+    container.classList.remove("open-upwards");
     trigger.setAttribute("aria-expanded", "false");
   }
 
@@ -242,7 +248,7 @@ function initCustomSelect(selectElement) {
 }
 
 function initAllCustomSelects() {
-  document.querySelectorAll("select.form-select").forEach(initCustomSelect);
+  document.querySelectorAll("select.form-select, select:not(.no-custom)").forEach(initCustomSelect);
 }
 
 // Global click-outside listener to close dropdowns smoothly
@@ -552,6 +558,7 @@ function setupEventListeners() {
     combinedGray.addEventListener("change", () => {
       if (combinedGray.checked && combinedPreset.value === "colorsoft") {
         combinedPreset.value = "kindle";
+        combinedPreset.dispatchEvent(new Event("change", { bubbles: true }));
       }
     });
   }
