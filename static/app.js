@@ -9,6 +9,7 @@ let currentPreviewPageIndex = 0;
 let isBatchColorizing = false;
 let batchQueuePoller = null;
 let selectedPages = new Set();
+let exportBannerDismissed = false;
 let historyData = [];
 let currentHistoryFilter = "all";
 let currentHistorySearch = "";
@@ -341,6 +342,7 @@ function startBatchQueuePoller() {
             if (btnStart) btnStart.disabled = false;
             const btnBatch = document.getElementById("btn-start-batch-colorize");
             if (btnBatch) btnBatch.disabled = false;
+            exportBannerDismissed = false;
             const expCard = document.getElementById("export-card");
             if (expCard) expCard.classList.remove("hidden");
             const sidebarExportCard = document.getElementById("sidebar-export-card");
@@ -910,6 +912,7 @@ function renderDashboard() {
 
   // Default to none selected as requested
   selectedPages = new Set();
+  exportBannerDismissed = false;
 
   const iconBox = document.getElementById("file-type-icon");
   const fn = currentSession.filename.toLowerCase();
@@ -950,7 +953,7 @@ function updateColorizedCount() {
   const exportCard = document.getElementById("export-card");
   const sidebarExportCard = document.getElementById("sidebar-export-card");
   if (colorizedCount > 0 || (currentSession && currentSession.status === "completed")) {
-    if (exportCard) exportCard.classList.remove("hidden");
+    if (exportCard && !exportBannerDismissed) exportCard.classList.remove("hidden");
     if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
   } else {
     if (exportCard) exportCard.classList.add("hidden");
@@ -977,6 +980,14 @@ function updateColorizedCount() {
       }
       renderDocumentQueue();
     }
+  }
+}
+
+function closeExportBanner() {
+  exportBannerDismissed = true;
+  const exportCard = document.getElementById("export-card");
+  if (exportCard) {
+    exportCard.classList.add("hidden");
   }
 }
 

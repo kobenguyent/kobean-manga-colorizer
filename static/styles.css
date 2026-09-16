@@ -1123,6 +1123,7 @@ body {
 
 /* Export Banner */
 .export-card {
+  position: relative;
   background: rgba(16, 185, 129, 0.08);
   border-color: rgba(16, 185, 129, 0.3);
   display: flex;
@@ -1130,6 +1131,37 @@ body {
   align-items: center;
   flex-wrap: wrap;
   gap: 1.25rem;
+  padding-right: 3.25rem;
+}
+
+.export-close-btn {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 1.2rem;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: 10;
+}
+
+.export-close-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: rotate(90deg);
+}
+
+.export-close-btn:active {
+  transform: scale(0.95);
 }
 
 .export-content {
