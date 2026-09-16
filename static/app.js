@@ -908,12 +908,8 @@ function renderDashboard() {
   document.getElementById("doc-filename").innerText = currentSession.filename;
   document.getElementById("doc-total-pages").innerText = currentSession.total_pages;
 
-  // Initialize all pages as selected when opening or switching documents
-  if (currentSession.pages) {
-    selectedPages = new Set(currentSession.pages.map((_, i) => i));
-  } else {
-    selectedPages = new Set();
-  }
+  // Default to none selected as requested
+  selectedPages = new Set();
 
   const iconBox = document.getElementById("file-type-icon");
   const fn = currentSession.filename.toLowerCase();
@@ -1104,9 +1100,25 @@ function updateSelectionUI() {
     if (count === total && total > 0) {
       selectedTextElem.innerText = `All (${total}) Selected`;
     } else if (count === 0) {
-      selectedTextElem.innerText = `0 Selected`;
+      selectedTextElem.innerText = `Select All`;
     } else {
       selectedTextElem.innerText = `${count} of ${total} Selected`;
+    }
+  }
+
+  // Update Recolorize Selected button state dynamically
+  const btnRecolorizeSelected = document.getElementById("btn-recolorize-selected");
+  if (btnRecolorizeSelected) {
+    if (count === 0) {
+      btnRecolorizeSelected.disabled = true;
+      btnRecolorizeSelected.title = "Select one or more pages to recolorize";
+      btnRecolorizeSelected.style.opacity = "0.55";
+      btnRecolorizeSelected.style.cursor = "not-allowed";
+    } else {
+      btnRecolorizeSelected.disabled = false;
+      btnRecolorizeSelected.title = `Recolorize ${count} selected page(s)`;
+      btnRecolorizeSelected.style.opacity = "1";
+      btnRecolorizeSelected.style.cursor = "pointer";
     }
   }
 
