@@ -1,22 +1,23 @@
-import os
-import io
 import base64
-import requests
+import io
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Optional
 
-import numpy as np
 import cv2
-from PIL import Image, ImageEnhance, ImageOps
+import numpy as np
+import requests
 import torch
+from PIL import Image
 from torchvision.transforms import ToTensor
 
 # Import neural network modules from Manga Comic Colorization v2 architecture
 try:
-    from networks.models import Colorizer
     from denoising.denoiser import FFDNetDenoiser
+    from networks.models import Colorizer
+
     HAS_NEURAL_MODELS = True
 except ImportError as e:
     print(f"[Colorizer Engine WARNING] Could not import neural modules: {e}")
@@ -36,9 +37,10 @@ DENOISING_DIR = BASE_DIR / "denoising" / "models"
 #  Color Detection Utility
 # ─────────────────────────────────────────────────────────────────────
 
-def is_colored_page(image_path: str,
-                    sat_threshold: float = 14.0,
-                    colored_pixel_ratio: float = 0.02) -> bool:
+
+def is_colored_page(
+    image_path: str, sat_threshold: float = 14.0, colored_pixel_ratio: float = 0.02
+) -> bool:
     """
     Returns True when the image already contains meaningful color information
     and does not need to be re-colorized.
@@ -52,12 +54,17 @@ def is_colored_page(image_path: str,
     """
     try:
         from PIL import Image
+
         with Image.open(image_path) as im:
             # Fast JPEG draft mode: decodes proxy directly from DCT coefficients in ~20ms
-            im.draft('RGB', (256, 256))
-            resample_box = getattr(Image, 'Resampling', Image).BOX if hasattr(getattr(Image, 'Resampling', None), 'BOX') else Image.NEAREST
+            im.draft("RGB", (256, 256))
+            resample_box = (
+                getattr(Image, "Resampling", Image).BOX
+                if hasattr(getattr(Image, "Resampling", None), "BOX")
+                else Image.NEAREST
+            )
             small = im.resize((256, 256), resample_box)
-            hsv = small.convert('HSV')
+            hsv = small.convert("HSV")
             _, s, _ = hsv.split()
             sat = np.array(s, dtype=np.float32)
             colored_pixels = np.sum(sat > sat_threshold)
@@ -86,14 +93,16 @@ def is_colored_page(image_path: str,
 #  Character Palette — per-session color memory
 # ─────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class CharacterEntry:
     """Canonical color hints for a single named character."""
-    name: str           # e.g. "Arale"
+
+    name: str  # e.g. "Arale"
     hair_hex: str = ""  # e.g. "#8B2BE2"  (violet)
     skin_hex: str = ""  # e.g. "#F4C5A0"  (peach)
     costume_hex: str = ""  # e.g. "#3A7BFF"
-    extra_hex: str = ""    # optional catch-all / accessory color
+    extra_hex: str = ""  # optional catch-all / accessory color
 
 
 @dataclass
@@ -103,7 +112,8 @@ class CharacterPalette:
     Used to inject spatial color hints into the neural colorizer hint tensor
     so that hair and costume colors remain consistent across panels.
     """
-    characters: List[CharacterEntry] = field(default_factory=list)
+
+    characters: list[CharacterEntry] = field(default_factory=list)
 
     # ── Serialization ────────────────────────────────────────────────
 
@@ -132,7 +142,7 @@ class CharacterPalette:
         """
         hint = torch.zeros(1, 4, h, w, dtype=torch.float32, device=device)
 
-        hex_colors: List[str] = []
+        hex_colors: list[str] = []
         for ch in self.characters:
             for hex_val in [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]:
                 if hex_val and len(hex_val) >= 6:
@@ -177,47 +187,47 @@ STYLE_PROFILES = {
         "sat_multiplier": 1.75,
         "contrast_multiplier": 1.25,
         "warmth": 1.12,
-        "description": "Authentic Toriyama / Dr. Slump anime aesthetic matching Gemini demo: purple hair, peach skin, gradient blue sky, terracotta roof, and glowing lab tones."
+        "description": "Authentic Toriyama / Dr. Slump anime aesthetic matching Gemini demo: purple hair, peach skin, gradient blue sky, terracotta roof, and glowing lab tones.",
     },
     "shonen_vivid": {
         "name": "Shonen Vivid",
         "sat_multiplier": 1.45,
         "contrast_multiplier": 1.15,
-        "warmth": 1.08,             # warm radiant anime skin tones
-        "description": "High-vibrancy, punchy anime colors with radiant warm skin tones and crisp ink outlines."
+        "warmth": 1.08,  # warm radiant anime skin tones
+        "description": "High-vibrancy, punchy anime colors with radiant warm skin tones and crisp ink outlines.",
     },
     "anime_pastel": {
         "name": "Soft Pastel Anime",
         "sat_multiplier": 0.85,
         "contrast_multiplier": 0.96,
         "warmth": 1.02,
-        "description": "Soft gentle lighting and delicate pastel tones with airy atmospheric shading."
+        "description": "Soft gentle lighting and delicate pastel tones with airy atmospheric shading.",
     },
     "retro_90s": {
         "name": "Retro 90s Anime",
         "sat_multiplier": 1.25,
         "contrast_multiplier": 1.12,
-        "warmth": 1.15,             # classic 90s cel-shading warm amber tone
-        "description": "Nostalgic 1990s cel-shading aesthetic with rich warm golden/amber tones."
+        "warmth": 1.15,  # classic 90s cel-shading warm amber tone
+        "description": "Nostalgic 1990s cel-shading aesthetic with rich warm golden/amber tones.",
     },
     "dark_fantasy": {
         "name": "Dark Fantasy",
         "sat_multiplier": 0.95,
         "contrast_multiplier": 1.30,
-        "warmth": 0.88,             # cool desaturated shadows with dark contrast
-        "description": "Moody, dramatic atmospheric shadows and intense contrast for gritty fantasy manga."
+        "warmth": 0.88,  # cool desaturated shadows with dark contrast
+        "description": "Moody, dramatic atmospheric shadows and intense contrast for gritty fantasy manga.",
     },
     "cyberpunk": {
         "name": "Cyberpunk Neon",
         "sat_multiplier": 1.60,
         "contrast_multiplier": 1.25,
         "warmth": 0.92,
-        "description": "Electrifying high-voltage cyan and magenta neon vibrance with deep contrasting blacks."
-    }
+        "description": "Electrifying high-voltage cyan and magenta neon vibrance with deep contrasting blacks.",
+    },
 }
 
 
-def resize_pad_manga(img: np.ndarray, size: int = 768) -> Tuple[np.ndarray, Tuple[int, int]]:
+def resize_pad_manga(img: np.ndarray, size: int = 768) -> tuple[np.ndarray, tuple[int, int]]:
     """
     Prepares input manga image for neural network inference:
     1. Preserves aspect ratio.
@@ -240,7 +250,7 @@ def resize_pad_manga(img: np.ndarray, size: int = 768) -> Tuple[np.ndarray, Tupl
         pad_w = (32 - (width % 32)) % 32
         pad = (0, pad_w)
         if pad_w > 0:
-            img = np.pad(img, ((0, 0), (0, pad[1]), (0, 0)), 'maximum')
+            img = np.pad(img, ((0, 0), (0, pad[1]), (0, 0)), "maximum")
     else:
         width = img.shape[1]
         ratio = width / size
@@ -249,9 +259,9 @@ def resize_pad_manga(img: np.ndarray, size: int = 768) -> Tuple[np.ndarray, Tupl
         pad_h = (32 - (height % 32)) % 32
         pad = (pad_h, 0)
         if pad_h > 0:
-            img = np.pad(img, ((0, pad[0]), (0, 0), (0, 0)), 'maximum')
+            img = np.pad(img, ((0, pad[0]), (0, 0), (0, 0)), "maximum")
 
-    if img.dtype == 'float32':
+    if img.dtype == "float32":
         np.clip(img, 0.0, 1.0, out=img)
 
     return img[:, :, :1], pad
@@ -261,10 +271,11 @@ def resize_pad_manga(img: np.ndarray, size: int = 768) -> Tuple[np.ndarray, Tupl
 #  Manga Colorizer Engine
 # ─────────────────────────────────────────────────────────────────────
 
+
 class MangaColorizerEngine:
     """
     Unified High-Performance Manga Colorization Engine.
-    
+
     Highlights:
     - 🧬 Authentic ResNeXt Deep Generator Network for accurate semantic colorization
       (trained on thousands of manga panels: natural skin tones, hair colors, clothes, eyes).
@@ -276,9 +287,13 @@ class MangaColorizerEngine:
     """
 
     @staticmethod
-    def is_colored_page(image_path: str, sat_threshold: float = 14.0, colored_pixel_ratio: float = 0.02) -> bool:
+    def is_colored_page(
+        image_path: str, sat_threshold: float = 14.0, colored_pixel_ratio: float = 0.02
+    ) -> bool:
         """Determines if an image already contains color (e.g. color cover/spread)."""
-        return is_colored_page(image_path, sat_threshold=sat_threshold, colored_pixel_ratio=colored_pixel_ratio)
+        return is_colored_page(
+            image_path, sat_threshold=sat_threshold, colored_pixel_ratio=colored_pixel_ratio
+        )
 
     @staticmethod
     def _write_optimized_image(output_path: str, img: np.ndarray, quality: int = 88) -> None:
@@ -288,19 +303,14 @@ class MangaColorizerEngine:
         """
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         ext = Path(output_path).suffix.lower()
-        if ext in ('.jpg', '.jpeg'):
-            cv2.imwrite(output_path, img, [
-                cv2.IMWRITE_JPEG_QUALITY, quality,
-                cv2.IMWRITE_JPEG_OPTIMIZE, 1
-            ])
-        elif ext == '.webp':
-            cv2.imwrite(output_path, img, [
-                cv2.IMWRITE_WEBP_QUALITY, quality
-            ])
-        elif ext == '.png':
-            cv2.imwrite(output_path, img, [
-                cv2.IMWRITE_PNG_COMPRESSION, 6
-            ])
+        if ext in (".jpg", ".jpeg"):
+            cv2.imwrite(
+                output_path, img, [cv2.IMWRITE_JPEG_QUALITY, quality, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
+            )
+        elif ext == ".webp":
+            cv2.imwrite(output_path, img, [cv2.IMWRITE_WEBP_QUALITY, quality])
+        elif ext == ".png":
+            cv2.imwrite(output_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 6])
         else:
             cv2.imwrite(output_path, img)
 
@@ -335,24 +345,35 @@ class MangaColorizerEngine:
                 DENOISING_DIR.mkdir(parents=True, exist_ok=True)
 
                 if not gen_path.exists():
-                    p = hf_hub_download(repo_id="vergil1000/manga-colorization-v2", filename="generator.zip")
+                    p = hf_hub_download(
+                        repo_id="vergil1000/manga-colorization-v2", filename="generator.zip"
+                    )
                     import shutil
+
                     shutil.copy(p, str(gen_path))
 
                 if not ext_path.exists():
-                    p = hf_hub_download(repo_id="vergil1000/manga-colorization-v2", filename="extractor.pth")
+                    p = hf_hub_download(
+                        repo_id="vergil1000/manga-colorization-v2", filename="extractor.pth"
+                    )
                     import shutil
+
                     shutil.copy(p, str(ext_path))
 
                 if not net_path.exists():
-                    p = hf_hub_download(repo_id="vergil1000/manga-colorization-v2", filename="net_rgb.pth")
+                    p = hf_hub_download(
+                        repo_id="vergil1000/manga-colorization-v2", filename="net_rgb.pth"
+                    )
                     import shutil
+
                     shutil.copy(p, str(net_path))
 
                 print("[MangaColorizer] Successfully downloaded pre-trained weights!")
             except Exception as e:
                 print(f"[MangaColorizer WARNING] Automated weight download failed: {e}")
-                print("[MangaColorizer TIP] Download generator.zip from Google Drive: https://drive.google.com/file/d/1aIXUL1YHytRfkucujtfCPKpKyDwD_cpk/view?usp=sharing and place it at networks/generator.zip")
+                print(
+                    "[MangaColorizer TIP] Download generator.zip from Google Drive: https://drive.google.com/file/d/1aIXUL1YHytRfkucujtfCPKpKyDwD_cpk/view?usp=sharing and place it at networks/generator.zip"
+                )
 
         return str(gen_path), str(ext_path), str(net_path)
 
@@ -384,11 +405,11 @@ class MangaColorizerEngine:
         image_path: str,
         output_path: str,
         model_provider: str = "resnext_generator",
-        model_name: str    = "resnext-v2-manga",
-        api_key: str       = "",
-        style: str         = "shonen_vivid",
-        saturation: float  = 1.4,
-        contrast: float    = 1.1,
+        model_name: str = "resnext-v2-manga",
+        api_key: str = "",
+        style: str = "shonen_vivid",
+        saturation: float = 1.4,
+        contrast: float = 1.1,
         line_preserve: float = 0.85,
         skip_if_colored: bool = False,
         character_palette: Optional["CharacterPalette"] = None,
@@ -426,7 +447,7 @@ class MangaColorizerEngine:
                 style=style,
                 saturation=saturation,
                 contrast=contrast,
-                line_preserve=line_preserve
+                line_preserve=line_preserve,
             )
         elif provider in ("apple_foundation", "apple"):
             return self._colorize_apple(
@@ -437,7 +458,7 @@ class MangaColorizerEngine:
                 style=style,
                 saturation=saturation,
                 contrast=contrast,
-                line_preserve=line_preserve
+                line_preserve=line_preserve,
             )
         elif provider in ("google_nano", "google"):
             return self._colorize_google(
@@ -448,7 +469,7 @@ class MangaColorizerEngine:
                 style=style,
                 saturation=saturation,
                 contrast=contrast,
-                line_preserve=line_preserve
+                line_preserve=line_preserve,
             )
         else:
             return self._colorize_neural(
@@ -470,10 +491,10 @@ class MangaColorizerEngine:
         image_path: str,
         output_path: str,
         model_provider: str = "resnext_generator",
-        model_name: str    = "resnext-v2-manga",
-        style: str         = "shonen_vivid",
-        saturation: float  = 1.4,
-        contrast: float    = 1.1,
+        model_name: str = "resnext-v2-manga",
+        style: str = "shonen_vivid",
+        saturation: float = 1.4,
+        contrast: float = 1.1,
         line_preserve: float = 0.85,
         character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
@@ -488,7 +509,9 @@ class MangaColorizerEngine:
         """
         if self.colorizer_model is None:
             print("[MangaColorizer] Neural model not loaded, running local fallback.")
-            return self._colorize_local_semantic(image_path, output_path, model_name, style, saturation, contrast, line_preserve)
+            return self._colorize_local_semantic(
+                image_path, output_path, model_name, style, saturation, contrast, line_preserve
+            )
 
         # 1. Load original high-resolution image
         orig_pil = Image.open(image_path).convert("RGB")
@@ -508,7 +531,9 @@ class MangaColorizerEngine:
         _, _, pad_h, pad_w = tens_in.shape
         if character_palette is not None:
             hint = character_palette.build_hint_tensor(pad_h, pad_w, self.device)
-            print(f"[MangaColorizer] Palette hint injected ({len(character_palette.characters)} characters)")
+            print(
+                f"[MangaColorizer] Palette hint injected ({len(character_palette.characters)} characters)"
+            )
         else:
             hint = torch.zeros(1, 4, pad_h, pad_w, dtype=torch.float32, device=self.device)
 
@@ -517,13 +542,12 @@ class MangaColorizerEngine:
             fake_color, _ = self.colorizer_model(torch.cat([tens_in, hint], 1))
             fake_color = fake_color.detach()
 
-
         # Unpad and convert back to RGB [0, 1]
         result_rn = fake_color[0].detach().cpu().permute(1, 2, 0) * 0.5 + 0.5
         if pad[0] != 0:
-            result_rn = result_rn[:-pad[0]]
+            result_rn = result_rn[: -pad[0]]
         if pad[1] != 0:
-            result_rn = result_rn[:, :-pad[1]]
+            result_rn = result_rn[:, : -pad[1]]
 
         rn_np = np.clip(result_rn.numpy(), 0.0, 1.0)
         rn_rgb = (rn_np * 255.0).astype(np.uint8)
@@ -551,7 +575,9 @@ class MangaColorizerEngine:
         v_norm = v / 255.0
         v_contrast = np.clip(0.5 + (v_norm - 0.5) * effective_cont, 0.0, 1.0) * 255.0
 
-        color_vivid_rgb = cv2.cvtColor(cv2.merge([h, s_new, v_contrast]).astype(np.uint8), cv2.COLOR_HSV2RGB)
+        color_vivid_rgb = cv2.cvtColor(
+            cv2.merge([h, s_new, v_contrast]).astype(np.uint8), cv2.COLOR_HSV2RGB
+        )
 
         # 6. Style-Specific Color Grading in RGB space
         color_vivid_f = color_vivid_rgb.astype(np.float32)
@@ -600,15 +626,17 @@ class MangaColorizerEngine:
         # 7. Native Line Art Multiply Blending (100% crisp ink, no gamut clipping)
         gray_orig = cv2.cvtColor(orig_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
         line_multiplier = np.clip(gray_orig / max(0.60, line_preserve), 0.0, 1.0)
-        final_rgb = np.clip(color_vivid_rgb.astype(np.float32) * line_multiplier[:, :, np.newaxis], 0, 255).astype(np.uint8)
+        final_rgb = np.clip(
+            color_vivid_rgb.astype(np.float32) * line_multiplier[:, :, np.newaxis], 0, 255
+        ).astype(np.uint8)
 
         # 8. Clean White Margin & Speech Bubble Protection
         # Protect page borders, gutters, and speech bubbles from any color wash (near white paper >= 242)
         paper_fade = np.clip((gray_orig * 255.0 - 240.0) / 14.0, 0.0, 1.0)
         for c in range(3):
             final_rgb[:, :, c] = (
-                final_rgb[:, :, c].astype(np.float32) * (1.0 - paper_fade) +
-                orig_rgb[:, :, c].astype(np.float32) * paper_fade
+                final_rgb[:, :, c].astype(np.float32) * (1.0 - paper_fade)
+                + orig_rgb[:, :, c].astype(np.float32) * paper_fade
             ).astype(np.uint8)
 
         # 9. Convert RGB to BGR for cv2.imwrite output
@@ -621,7 +649,7 @@ class MangaColorizerEngine:
             "status": "success",
             "engine": f"ResNeXt-50/101 Generator + Vibrant Chroma ({self.device.upper()})",
             "style": profile["name"],
-            "output_path": output_path
+            "output_path": output_path,
         }
 
     # ── Apple Silicon Neural Engine ─────────────────────────────────
@@ -635,7 +663,7 @@ class MangaColorizerEngine:
         style: str,
         saturation: float,
         contrast: float,
-        line_preserve: float
+        line_preserve: float,
     ) -> dict:
         """
         Apple Silicon Foundation Engine with P3 Wide Color Gamut & Neural Engine vibrance.
@@ -659,19 +687,23 @@ class MangaColorizerEngine:
             style=style,
             saturation=saturation * sat_boost,
             contrast=contrast * cont_boost,
-            line_preserve=line_preserve
+            line_preserve=line_preserve,
         )
         res["engine"] = f"Apple Foundation Model (MPS Neural Engine - {model_name or 'CoreML'})"
         return res
 
     # ── Google Nano / Gemini API Engine ─────────────────────────────
 
-    def _blend_and_save_api_result(self, img_bytes: bytes, original_path: str, output_path: str, line_preserve: float = 0.85):
+    def _blend_and_save_api_result(
+        self, img_bytes: bytes, original_path: str, output_path: str, line_preserve: float = 0.85
+    ):
         """Blends API generated color image with native ultra-high resolution line art."""
         orig_img = cv2.imread(original_path)
         gen_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         gen_np = cv2.cvtColor(np.array(gen_img), cv2.COLOR_RGB2BGR)
-        gen_scaled = cv2.resize(gen_np, (orig_img.shape[1], orig_img.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+        gen_scaled = cv2.resize(
+            gen_np, (orig_img.shape[1], orig_img.shape[0]), interpolation=cv2.INTER_LANCZOS4
+        )
 
         orig_gray = cv2.cvtColor(orig_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
         line_mult = np.clip(orig_gray / max(0.60, line_preserve), 0.0, 1.0)[:, :, np.newaxis]
@@ -692,7 +724,7 @@ class MangaColorizerEngine:
         style: str,
         saturation: float,
         contrast: float,
-        line_preserve: float
+        line_preserve: float,
     ) -> dict:
         """
         Google Multimodal AI Engine (Nano Banana / Gemini 2.0 / Imagen 3).
@@ -702,7 +734,9 @@ class MangaColorizerEngine:
         - Outdoor blue sky gradients and lush green foliage
         - Sound effects styled with comic yellow & purple accents
         """
-        key = api_key or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
+        key = (
+            api_key or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
+        )
 
         # When no API key is provided, check if demo exemplar pair matches demo/original.png
         if not key:
@@ -720,11 +754,22 @@ class MangaColorizerEngine:
                             # Direct exemplar fusion from Gemini colorized reference
                             gem_img = cv2.imread(str(demo_gem_path))
                             orig_img = cv2.imread(image_path)
-                            gem_scaled = cv2.resize(gem_img, (orig_img.shape[1], orig_img.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+                            gem_scaled = cv2.resize(
+                                gem_img,
+                                (orig_img.shape[1], orig_img.shape[0]),
+                                interpolation=cv2.INTER_LANCZOS4,
+                            )
 
-                            orig_gray = cv2.cvtColor(orig_img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-                            line_mult = np.clip(orig_gray / max(0.60, line_preserve), 0.0, 1.0)[:, :, np.newaxis]
-                            fused = np.clip(gem_scaled.astype(np.float32) * line_mult, 0, 255).astype(np.uint8)
+                            orig_gray = (
+                                cv2.cvtColor(orig_img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                                / 255.0
+                            )
+                            line_mult = np.clip(orig_gray / max(0.60, line_preserve), 0.0, 1.0)[
+                                :, :, np.newaxis
+                            ]
+                            fused = np.clip(
+                                gem_scaled.astype(np.float32) * line_mult, 0, 255
+                            ).astype(np.uint8)
 
                             # Preserve speech bubbles pure white
                             bubble_mask = orig_gray > 0.96
@@ -735,7 +780,7 @@ class MangaColorizerEngine:
                                 "status": "success",
                                 "engine": "Google Gemini Multimodal (Exemplar Anime Fusion)",
                                 "style": "Gemini Demo Reference",
-                                "output_path": output_path
+                                "output_path": output_path,
                             }
                 except Exception as e:
                     print(f"[Demo Match Warning] {e}")
@@ -753,28 +798,36 @@ class MangaColorizerEngine:
                     "google_nano": "gemini-2.0-flash-exp",
                     "gemini-2.0-flash": "gemini-2.0-flash-exp",
                     "gemini-1.5-flash": "gemini-1.5-flash",
-                    "imagen-3.0-generate-002": "imagen-3.0-generate-002"
+                    "imagen-3.0-generate-002": "imagen-3.0-generate-002",
                 }
-                target_model = GOOGLE_MODEL_MAP.get(model_name, model_name or "gemini-2.0-flash-exp")
+                target_model = GOOGLE_MODEL_MAP.get(
+                    model_name, model_name or "gemini-2.0-flash-exp"
+                )
 
                 if "imagen" in target_model.lower():
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={key}"
                     body = {
-                        "instances": [{
-                            "prompt": "Full vibrant anime colorization of black and white manga page, Arale purple hair, peach skin, blue sky, white speech bubbles."
-                        }],
-                        "parameters": {"sampleCount": 1, "aspectRatio": "3:4"}
+                        "instances": [
+                            {
+                                "prompt": "Full vibrant anime colorization of black and white manga page, Arale purple hair, peach skin, blue sky, white speech bubbles."
+                            }
+                        ],
+                        "parameters": {"sampleCount": 1, "aspectRatio": "3:4"},
                     }
-                    resp = requests.post(url, json=body, headers={"Content-Type": "application/json"}, timeout=45)
+                    resp = requests.post(
+                        url, json=body, headers={"Content-Type": "application/json"}, timeout=45
+                    )
                     if resp.status_code == 200:
                         preds = resp.json().get("predictions", [])
                         if preds and "bytesBase64Encoded" in preds[0]:
                             img_bytes = base64.b64decode(preds[0]["bytesBase64Encoded"])
-                            self._blend_and_save_api_result(img_bytes, image_path, output_path, line_preserve)
+                            self._blend_and_save_api_result(
+                                img_bytes, image_path, output_path, line_preserve
+                            )
                             return {
                                 "status": "success",
                                 "engine": f"Google Imagen 3 Colorizer ({target_model})",
-                                "output_path": output_path
+                                "output_path": output_path,
                             }
                     else:
                         api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
@@ -791,17 +844,19 @@ class MangaColorizerEngine:
                         "5. Preserve original line art, panel borders, and text cleanly."
                     )
                     body = {
-                        "contents": [{
-                            "parts": [
-                                {"text": prompt_text},
-                                {"inline_data": {"mime_type": "image/png", "data": b64}}
-                            ]
-                        }],
-                        "generationConfig": {
-                            "responseModalities": ["IMAGE"]
-                        }
+                        "contents": [
+                            {
+                                "parts": [
+                                    {"text": prompt_text},
+                                    {"inline_data": {"mime_type": "image/png", "data": b64}},
+                                ]
+                            }
+                        ],
+                        "generationConfig": {"responseModalities": ["IMAGE"]},
                     }
-                    resp = requests.post(url, json=body, headers={"Content-Type": "application/json"}, timeout=45)
+                    resp = requests.post(
+                        url, json=body, headers={"Content-Type": "application/json"}, timeout=45
+                    )
                     if resp.status_code == 200:
                         data = resp.json()
                         candidates = data.get("candidates", [])
@@ -810,11 +865,13 @@ class MangaColorizerEngine:
                             for part in parts:
                                 if "inlineData" in part and "data" in part["inlineData"]:
                                     img_bytes = base64.b64decode(part["inlineData"]["data"])
-                                    self._blend_and_save_api_result(img_bytes, image_path, output_path, line_preserve)
+                                    self._blend_and_save_api_result(
+                                        img_bytes, image_path, output_path, line_preserve
+                                    )
                                     return {
                                         "status": "success",
                                         "engine": f"Google Gemini Nano Banana ({target_model})",
-                                        "output_path": output_path
+                                        "output_path": output_path,
                                     }
                     else:
                         api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
@@ -833,15 +890,16 @@ class MangaColorizerEngine:
             style=effective_style,
             saturation=saturation * 1.35,
             contrast=contrast * 1.10,
-            line_preserve=line_preserve
+            line_preserve=line_preserve,
         )
         if api_error_reason:
-            res["engine"] = f"ResNeXt Neural Engine (Fallback - Google API: {api_error_reason[:40]})"
+            res["engine"] = (
+                f"ResNeXt Neural Engine (Fallback - Google API: {api_error_reason[:40]})"
+            )
             res["api_error"] = api_error_reason
         else:
             res["engine"] = f"Google Gemini Anime Engine ({model_name or 'Gemini 2.0 Flash'})"
         return res
-
 
     # ── Smart Local Semantic Engine ─────────────────────────────────
 
@@ -853,7 +911,7 @@ class MangaColorizerEngine:
         style: str,
         saturation: float,
         contrast: float,
-        line_preserve: float
+        line_preserve: float,
     ) -> dict:
         """
         Authentic Offline Multi-Region Semantic Engine:
@@ -902,8 +960,12 @@ class MangaColorizerEngine:
 
         # Protect pure white margins & paper (>= 242)
         paper_mask = (gray >= 242).astype(np.float32)
-        lab[:, :, 1] = (lab[:, :, 1].astype(np.float32) * (1.0 - paper_mask) + 128.0 * paper_mask).astype(np.uint8)
-        lab[:, :, 2] = (lab[:, :, 2].astype(np.float32) * (1.0 - paper_mask) + 128.0 * paper_mask).astype(np.uint8)
+        lab[:, :, 1] = (
+            lab[:, :, 1].astype(np.float32) * (1.0 - paper_mask) + 128.0 * paper_mask
+        ).astype(np.uint8)
+        lab[:, :, 2] = (
+            lab[:, :, 2].astype(np.float32) * (1.0 - paper_mask) + 128.0 * paper_mask
+        ).astype(np.uint8)
 
         bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
@@ -917,5 +979,5 @@ class MangaColorizerEngine:
         return {
             "status": "success",
             "engine": f"Smart Local Colorizer ({model_name or style})",
-            "output_path": output_path
+            "output_path": output_path,
         }

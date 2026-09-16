@@ -1,23 +1,27 @@
-import os
-import zipfile
-import shutil
 import io
+import os
+import re
+import shutil
 import struct
-import time
 import subprocess
+import tempfile
+import time
+import zipfile
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-from PIL import Image, ImageOps, ImageEnhance
+from typing import Any, Optional
+
+from PIL import Image, ImageEnhance, ImageOps
+
 try:
     import pymupdf as fitz
 except ImportError:
     import fitz  # Fallback for older PyMuPDF versions
-from bs4 import BeautifulSoup
-import re
+
 
 def natural_sort_key(s: str):
     """Sorts strings with embedded numbers naturally (e.g., page 2 before page 10)."""
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)]
+
 
 class MangaFileProcessor:
     def __init__(self, storage_dir: str):
@@ -32,11 +36,11 @@ class MangaFileProcessor:
         session_dir = self.storage_dir / session_id
         orig_dir = session_dir / "original"
         colorized_dir = session_dir / "colorized"
-        
+
         orig_dir.mkdir(parents=True, exist_ok=True)
         colorized_dir.mkdir(parents=True, exist_ok=True)
 
-        IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tiff')
+        IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff")
         ext = Path(file_path).suffix.lower()
 
         if ext == ".pdf":
@@ -60,15 +64,17 @@ class MangaFileProcessor:
             transposed.save(out_path)
             w, h = transposed.size
 
-        return [{
-            "page_index": 0,
-            "display_name": f"Image 1 ({Path(file_path).name})",
-            "filename": img_filename,
-            "original_path": str(out_path),
-            "width": w,
-            "height": h,
-            "type": "single_image"
-        }]
+        return [
+            {
+                "page_index": 0,
+                "display_name": f"Image 1 ({Path(file_path).name})",
+                "filename": img_filename,
+                "original_path": str(out_path),
+                "width": w,
+                "height": h,
+                "type": "single_image",
+            }
+        ]
 
     def _extract_pdf_pages(self, pdf_path: str, output_dir: Path):
         """Renders each page of PDF to high-res optimized JPEG image strictly maintaining physical aspect ratio."""
@@ -81,7 +87,7 @@ class MangaFileProcessor:
             zoom = 2.0
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
-            
+
             output_dir.mkdir(parents=True, exist_ok=True)
             img_filename = f"page_{page_num + 1:04d}.jpg"
             img_path = output_dir / img_filename
@@ -90,15 +96,17 @@ class MangaFileProcessor:
             except Exception:
                 pix.save(str(img_path), jpg_quality=90)
 
-            pages_meta.append({
-                "page_index": page_num,
-                "display_name": f"Page {page_num + 1}",
-                "filename": img_filename,
-                "original_path": str(img_path),
-                "width": pix.width,
-                "height": pix.height,
-                "type": "pdf_page"
-            })
+            pages_meta.append(
+                {
+                    "page_index": page_num,
+                    "display_name": f"Page {page_num + 1}",
+                    "filename": img_filename,
+                    "original_path": str(img_path),
+                    "width": pix.width,
+                    "height": pix.height,
+                    "type": "pdf_page",
+                }
+            )
 
         doc.close()
         return pages_meta
@@ -106,13 +114,17 @@ class MangaFileProcessor:
     def _extract_epub_images(self, epub_path: str, output_dir: Path):
         """Extracts images from EPUB archive in reading order with exact aspect ratio preservation."""
         pages_meta = []
-        
-        with zipfile.ZipFile(epub_path, 'r') as zf:
+
+        with zipfile.ZipFile(epub_path, "r") as zf:
             namelist = zf.namelist()
-            img_extensions = ('.png', '.jpg', '.jpeg', '.webp')
-            
+            img_extensions = (".png", ".jpg", ".jpeg", ".webp")
+
             # Natural sort all images
-            all_imgs = [f for f in namelist if f.lower().endswith(img_extensions) and not f.startswith('__MACOSX')]
+            all_imgs = [
+                f
+                for f in namelist
+                if f.lower().endswith(img_extensions) and not f.startswith("__MACOSX")
+            ]
             all_imgs.sort(key=natural_sort_key)
 
             for idx, zip_img_path in enumerate(all_imgs):
@@ -123,7 +135,7 @@ class MangaFileProcessor:
                     out_path = output_dir / img_filename
 
                     # Write raw image bytes directly to preserve 100% pixel fidelity without recompression
-                    with open(out_path, 'wb') as f:
+                    with open(out_path, "wb") as f:
                         f.write(img_data)
 
                     # Accurately detect dimensions & handle any EXIF orientation
@@ -135,16 +147,18 @@ class MangaFileProcessor:
                         else:
                             width, height = im.size
 
-                    pages_meta.append({
-                        "page_index": idx,
-                        "display_name": f"Image {idx + 1} ({Path(zip_img_path).name})",
-                        "filename": img_filename,
-                        "zip_internal_path": zip_img_path,
-                        "original_path": str(out_path),
-                        "width": width,
-                        "height": height,
-                        "type": "epub_image"
-                    })
+                    pages_meta.append(
+                        {
+                            "page_index": idx,
+                            "display_name": f"Image {idx + 1} ({Path(zip_img_path).name})",
+                            "filename": img_filename,
+                            "zip_internal_path": zip_img_path,
+                            "original_path": str(out_path),
+                            "width": width,
+                            "height": height,
+                            "type": "epub_image",
+                        }
+                    )
                 except Exception as e:
                     print(f"Skipping non-image zip entry {zip_img_path}: {e}")
 
@@ -154,13 +168,13 @@ class MangaFileProcessor:
         """Assembles colorized images into a new, compact, optimized PDF document."""
         session_dir = self.storage_dir / session_id
         colorized_dir = session_dir / "colorized"
-        
+
         pdf_doc = fitz.open()
 
         for page_info in pages_meta:
             color_filename = page_info["filename"]
             color_path = colorized_dir / color_filename
-            
+
             # Fallback to original image if colorized version is missing
             if not color_path.exists():
                 color_path = Path(page_info["original_path"])
@@ -172,7 +186,7 @@ class MangaFileProcessor:
                 rect = fitz.Rect(0, 0, width, height)
 
                 # If already JPEG, insert directly; if PNG or uncompressed, convert to high-quality JPEG stream
-                if ext in ('.jpg', '.jpeg'):
+                if ext in (".jpg", ".jpeg"):
                     pdf_page.insert_image(rect, filename=str(color_path))
                 else:
                     rgb_img = pil_img.convert("RGB")
@@ -184,19 +198,33 @@ class MangaFileProcessor:
         pdf_doc.close()
         return output_filepath
 
-    def build_colorized_epub(self, original_epub_path: str, pages_meta: list, session_id: str, output_filepath: str, title: str = "Colorized Manga"):
+    def build_colorized_epub(
+        self,
+        original_epub_path: str,
+        pages_meta: list,
+        session_id: str,
+        output_filepath: str,
+        title: str = "Colorized Manga",
+    ):
         """
         Clones original EPUB zip archive and replaces images with colorized versions.
         If original file is not an EPUB (e.g. was PDF or image), generates a standalone EPUB.
         """
-        if original_epub_path and os.path.exists(original_epub_path) and original_epub_path.lower().endswith(".epub") and zipfile.is_zipfile(original_epub_path):
+        if (
+            original_epub_path
+            and os.path.exists(original_epub_path)
+            and original_epub_path.lower().endswith(".epub")
+            and zipfile.is_zipfile(original_epub_path)
+        ):
             session_dir = self.storage_dir / session_id
             colorized_dir = session_dir / "colorized"
 
             temp_epub = output_filepath + ".tmp"
 
-            with zipfile.ZipFile(original_epub_path, 'r') as zin:
-                with zipfile.ZipFile(temp_epub, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
+            with zipfile.ZipFile(original_epub_path, "r") as zin:
+                with zipfile.ZipFile(
+                    temp_epub, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+                ) as zout:
                     # Map zip_internal_path -> colorized file path
                     color_map = {}
                     for p in pages_meta:
@@ -209,7 +237,7 @@ class MangaFileProcessor:
                     for item in zin.infolist():
                         if item.filename in color_map:
                             # Write the colorized replacement image
-                            with open(color_map[item.filename], 'rb') as f:
+                            with open(color_map[item.filename], "rb") as f:
                                 zout.writestr(item.filename, f.read())
                         else:
                             # Copy original file unchanged
@@ -222,7 +250,13 @@ class MangaFileProcessor:
         else:
             return self.build_standalone_epub(pages_meta, session_id, output_filepath, title=title)
 
-    def build_standalone_epub(self, pages_meta: list, session_id: str, output_filepath: str, title: str = "Colorized Manga"):
+    def build_standalone_epub(
+        self,
+        pages_meta: list,
+        session_id: str,
+        output_filepath: str,
+        title: str = "Colorized Manga",
+    ):
         """
         Builds a compliant EPUB3 comic/manga e-book from colorized page images.
         Compatible with Apple Books, Kindle, Kobo, and all EPUB3 readers.
@@ -234,18 +268,22 @@ class MangaFileProcessor:
         if os.path.exists(temp_epub):
             os.remove(temp_epub)
 
-        with zipfile.ZipFile(temp_epub, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
+        with zipfile.ZipFile(
+            temp_epub, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as zout:
             # 1. mimetype (MUST be uncompressed and the first entry in zip)
-            zout.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+            zout.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
 
             # 2. META-INF/container.xml
-            container_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+            container_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
-</container>'''
-            zout.writestr('META-INF/container.xml', container_xml, compress_type=zipfile.ZIP_DEFLATED)
+</container>"""
+            zout.writestr(
+                "META-INF/container.xml", container_xml, compress_type=zipfile.ZIP_DEFLATED
+            )
 
             manifest_items = [
                 '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
@@ -262,10 +300,10 @@ class MangaFileProcessor:
 
                 ext = color_path.suffix.lower()
                 # Optimize page image to JPEG to drastically reduce EPUB package size while retaining high visual quality
-                if ext in ('.jpg', '.jpeg'):
-                    with open(color_path, 'rb') as f:
+                if ext in (".jpg", ".jpeg"):
+                    with open(color_path, "rb") as f:
                         img_bytes = f.read()
-                    safe_img_name = f"page_{idx+1:04d}.jpg"
+                    safe_img_name = f"page_{idx + 1:04d}.jpg"
                     media_type = "image/jpeg"
                 else:
                     with Image.open(str(color_path)) as pil_img:
@@ -273,29 +311,39 @@ class MangaFileProcessor:
                         buf = io.BytesIO()
                         rgb_img.save(buf, format="JPEG", quality=90, optimize=True)
                         img_bytes = buf.getvalue()
-                    safe_img_name = f"page_{idx+1:04d}.jpg"
+                    safe_img_name = f"page_{idx + 1:04d}.jpg"
                     media_type = "image/jpeg"
 
-                zout.writestr(f"OEBPS/images/{safe_img_name}", img_bytes, compress_type=zipfile.ZIP_DEFLATED)
+                zout.writestr(
+                    f"OEBPS/images/{safe_img_name}", img_bytes, compress_type=zipfile.ZIP_DEFLATED
+                )
 
-                page_id = f"page_{idx+1}"
-                img_id = f"img_{idx+1}"
-                xhtml_name = f"page_{idx+1:04d}.xhtml"
+                page_id = f"page_{idx + 1}"
+                img_id = f"img_{idx + 1}"
+                xhtml_name = f"page_{idx + 1:04d}.xhtml"
 
                 cover_attr = ' properties="cover-image"' if idx == 0 else ""
-                manifest_items.append(f'<item id="{img_id}" href="images/{safe_img_name}" media-type="{media_type}"{cover_attr}/>')
-                manifest_items.append(f'<item id="{page_id}" href="{xhtml_name}" media-type="application/xhtml+xml"/>')
-                spine_items.append(f'<itemref idref="{page_id}" properties="rendition:layout-pre-paginated"/>')
-                nav_items.append(f'<li><a href="{xhtml_name}">{page_info.get("display_name", f"Page {idx+1}")}</a></li>')
+                manifest_items.append(
+                    f'<item id="{img_id}" href="images/{safe_img_name}" media-type="{media_type}"{cover_attr}/>'
+                )
+                manifest_items.append(
+                    f'<item id="{page_id}" href="{xhtml_name}" media-type="application/xhtml+xml"/>'
+                )
+                spine_items.append(
+                    f'<itemref idref="{page_id}" properties="rendition:layout-pre-paginated"/>'
+                )
+                nav_items.append(
+                    f'<li><a href="{xhtml_name}">{page_info.get("display_name", f"Page {idx + 1}")}</a></li>'
+                )
 
                 w = page_info.get("width", 1200)
                 h = page_info.get("height", 1600)
-                page_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+                page_xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="utf-8"/>
-  <title>Page {idx+1}</title>
+  <title>Page {idx + 1}</title>
   <meta name="viewport" content="width={w}, height={h}"/>
   <style>
     @page {{ margin: 0; }}
@@ -304,13 +352,13 @@ class MangaFileProcessor:
   </style>
 </head>
 <body>
-  <img src="images/{safe_img_name}" alt="Page {idx+1}"/>
+  <img src="images/{safe_img_name}" alt="Page {idx + 1}"/>
 </body>
-</html>'''
+</html>"""
                 zout.writestr(f"OEBPS/{xhtml_name}", page_xhtml, compress_type=zipfile.ZIP_DEFLATED)
 
             # 4. Navigation TOC
-            nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+            nav_xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
 <head><meta charset="utf-8"/><title>Table of Contents</title></head>
@@ -322,12 +370,17 @@ class MangaFileProcessor:
     </ol>
   </nav>
 </body>
-</html>'''
-            zout.writestr('OEBPS/nav.xhtml', nav_xhtml, compress_type=zipfile.ZIP_DEFLATED)
+</html>"""
+            zout.writestr("OEBPS/nav.xhtml", nav_xhtml, compress_type=zipfile.ZIP_DEFLATED)
 
             # 5. content.opf
-            clean_title = (title or "Colorized Manga").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            opf = f'''<?xml version="1.0" encoding="UTF-8"?>
+            clean_title = (
+                (title or "Colorized Manga")
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            opf = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="pub-id">urn:uuid:{session_id}</dc:identifier>
@@ -354,8 +407,8 @@ class MangaFileProcessor:
   <spine page-progression-direction="rtl">
     {"".join(spine_items)}
   </spine>
-</package>'''
-            zout.writestr('OEBPS/content.opf', opf, compress_type=zipfile.ZIP_DEFLATED)
+</package>"""
+            zout.writestr("OEBPS/content.opf", opf, compress_type=zipfile.ZIP_DEFLATED)
 
         if os.path.exists(output_filepath):
             os.remove(output_filepath)
@@ -366,13 +419,13 @@ class MangaFileProcessor:
         """Exports colorized single image file."""
         session_dir = self.storage_dir / session_id
         colorized_dir = session_dir / "colorized"
-        
+
         if len(pages_meta) > 0:
             color_filename = pages_meta[0]["filename"]
             color_path = colorized_dir / color_filename
             if not color_path.exists():
                 color_path = Path(pages_meta[0]["original_path"])
-            
+
             shutil.copyfile(str(color_path), output_filepath)
             return output_filepath
         raise ValueError("No page metadata found for single image export")
@@ -382,7 +435,9 @@ class MangaFileProcessor:
         session_dir = self.storage_dir / session_id
         colorized_dir = session_dir / "colorized"
 
-        with zipfile.ZipFile(output_filepath, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
+        with zipfile.ZipFile(
+            output_filepath, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as zout:
             for p in pages_meta:
                 c_path = colorized_dir / p["filename"]
                 if not c_path.exists():
@@ -397,12 +452,24 @@ class MangaFileProcessor:
         ebook_convert = shutil.which("ebook-convert")
         if ebook_convert:
             try:
-                res = subprocess.run([
-                    ebook_convert, epub_path, mobi_path,
-                    "--output-profile", "kindle",
-                    "--mobi-file-type", "both"
-                ], capture_output=True, timeout=180)
-                if res.returncode == 0 and os.path.exists(mobi_path) and os.path.getsize(mobi_path) > 0:
+                res = subprocess.run(
+                    [
+                        ebook_convert,
+                        epub_path,
+                        mobi_path,
+                        "--output-profile",
+                        "kindle",
+                        "--mobi-file-type",
+                        "both",
+                    ],
+                    capture_output=True,
+                    timeout=180,
+                )
+                if (
+                    res.returncode == 0
+                    and os.path.exists(mobi_path)
+                    and os.path.getsize(mobi_path) > 0
+                ):
                     return True
             except Exception:
                 pass
@@ -412,10 +479,17 @@ class MangaFileProcessor:
             try:
                 out_name = Path(mobi_path).name
                 out_dir = str(Path(mobi_path).parent)
-                res = subprocess.run([
-                    kindlegen, epub_path, "-c2", "-o", out_name
-                ], cwd=out_dir, capture_output=True, timeout=180)
-                if res.returncode in (0, 1) and os.path.exists(mobi_path) and os.path.getsize(mobi_path) > 0:
+                res = subprocess.run(
+                    [kindlegen, epub_path, "-c2", "-o", out_name],
+                    cwd=out_dir,
+                    capture_output=True,
+                    timeout=180,
+                )
+                if (
+                    res.returncode in (0, 1)
+                    and os.path.exists(mobi_path)
+                    and os.path.getsize(mobi_path) > 0
+                ):
                     return True
             except Exception:
                 pass
@@ -487,7 +561,7 @@ class MangaFileProcessor:
         images_data: list,
         output_filepath: str,
         title: str = "Colorized Manga",
-        author: str = "Kobean Manga Colorizer"
+        author: str = "Kobean Manga Colorizer",
     ) -> str:
         """
         Builds a compliant PalmDOC / MOBI 6 e-book container in pure Python.
@@ -533,11 +607,15 @@ class MangaFileProcessor:
             image_bytes_list.append(raw_bytes)
 
             if vol_header:
-                clean_vol = str(vol_header).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                clean_vol = (
+                    str(vol_header).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                )
                 html_lines.append(f'<div class="vol-heading"><h2>{clean_vol}</h2></div>')
 
             clean_lbl = str(label).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            html_lines.append(f'<div class="page"><img recindex="{i:04d}" alt="{clean_lbl}"/></div>')
+            html_lines.append(
+                f'<div class="page"><img recindex="{i:04d}" alt="{clean_lbl}"/></div>'
+            )
 
         html_lines.append("</body></html>")
         text_content = "\n".join(html_lines).encode("utf-8")
@@ -557,31 +635,35 @@ class MangaFileProcessor:
         author_bytes = (author or "Kobean Manga Colorizer").encode("utf-8")
 
         exth_records = [
-            exth_record(100, author_bytes),                      # Author
-            exth_record(503, title_bytes),                       # Title
-            exth_record(121, b"comic"),                           # Book type: comic
-            exth_record(122, b"true"),                            # Fixed-layout: true
-            exth_record(125, struct.pack(">I", num_images)),     # Image count
-            exth_record(126, b"none"),                            # Orientation lock: none
-            exth_record(127, b"horizontal-rl"),                   # Primary writing mode: RTL
-            exth_record(128, b"pre-paginated"),                   # Rendition layout
-            exth_record(201, struct.pack(">I", 0)),               # Cover offset (1st image)
+            exth_record(100, author_bytes),  # Author
+            exth_record(503, title_bytes),  # Title
+            exth_record(121, b"comic"),  # Book type: comic
+            exth_record(122, b"true"),  # Fixed-layout: true
+            exth_record(125, struct.pack(">I", num_images)),  # Image count
+            exth_record(126, b"none"),  # Orientation lock: none
+            exth_record(127, b"horizontal-rl"),  # Primary writing mode: RTL
+            exth_record(128, b"pre-paginated"),  # Rendition layout
+            exth_record(201, struct.pack(">I", 0)),  # Cover offset (1st image)
         ]
         exth_data = b"".join(exth_records)
         exth_header_len = 12 + len(exth_data)
         pad_len = (4 - (exth_header_len % 4)) % 4
         exth_header_len += pad_len
-        exth_block = struct.pack(">4sII", b"EXTH", exth_header_len, len(exth_records)) + exth_data + (b"\x00" * pad_len)
+        exth_block = (
+            struct.pack(">4sII", b"EXTH", exth_header_len, len(exth_records))
+            + exth_data
+            + (b"\x00" * pad_len)
+        )
 
         # PalmDOC Header (16 bytes)
         palmdoc_header = struct.pack(
             ">HHIHHI",
-            1,          # compression: 1 (none)
-            0,          # unused
-            text_len,   # text length
-            1,          # record count (1 text record)
-            4096,       # record size
-            0           # current position
+            1,  # compression: 1 (none)
+            0,  # unused
+            text_len,  # text length
+            1,  # record count (1 text record)
+            4096,  # record size
+            0,  # current position
         )
 
         title_offset = 248 + len(exth_block)
@@ -591,8 +673,8 @@ class MangaFileProcessor:
         mobi_fields = [
             ("identifier", "4s", b"MOBI"),
             ("header_length", "I", 232),
-            ("mobi_type", "I", 2),                  # Mobipocket book
-            ("text_encoding", "I", 65001),          # UTF-8
+            ("mobi_type", "I", 2),  # Mobipocket book
+            ("text_encoding", "I", 65001),  # UTF-8
             ("unique_id", "I", int(time.time()) & 0xFFFFFFFF),
             ("file_version", "I", 6),
             ("orthographic_index", "I", 0xFFFFFFFF),
@@ -617,7 +699,7 @@ class MangaFileProcessor:
             ("huffman_record_count", "I", 0),
             ("huffman_table_offset", "I", 0),
             ("huffman_table_length", "I", 0),
-            ("exth_flags", "I", 0x50),               # Bit 6 set for EXTH
+            ("exth_flags", "I", 0x50),  # Bit 6 set for EXTH
             ("reserved", "32s", b"\x00" * 32),
             ("drm_offset", "I", 0xFFFFFFFF),
             ("drm_count", "I", 0),
@@ -634,10 +716,16 @@ class MangaFileProcessor:
             record_0 += b"\x00" * (4 - (len(record_0) % 4))
 
         flis_record = b"FLIS\x00\x00\x00\x08\x00\x41\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\x00\x01\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00"
-        fcis_record = b"FCIS\x00\x00\x00\x14\x00\x00\x00\x10\x00\x00\x00\x01\x00\x00\x00\x00" + struct.pack(">I", text_len) + b"\x00\x00\x00\x00\x00\x00\x00\x20\x00\x00\x00\x08\x00\x01\x00\x01\x00\x00\x00\x00"
+        fcis_record = (
+            b"FCIS\x00\x00\x00\x14\x00\x00\x00\x10\x00\x00\x00\x01\x00\x00\x00\x00"
+            + struct.pack(">I", text_len)
+            + b"\x00\x00\x00\x00\x00\x00\x00\x20\x00\x00\x00\x08\x00\x01\x00\x01\x00\x00\x00\x00"
+        )
         eof_record = b"\xe9\x8e\r\n"
 
-        records = [record_0, text_content] + image_bytes_list + [flis_record, fcis_record, eof_record]
+        records = (
+            [record_0, text_content] + image_bytes_list + [flis_record, fcis_record, eof_record]
+        )
 
         header_size = 78 + (8 * total_records) + 2
         record_offsets = []
@@ -651,12 +739,19 @@ class MangaFileProcessor:
         pdb_header = struct.pack(
             ">32sHHIIIIII4s4sIIH",
             name_field,
-            0, 0,
-            now, now, 0, 0, 0, 0,
-            b"BOOK", b"MOBI",
+            0,
+            0,
+            now,
+            now,
+            0,
+            0,
+            0,
+            0,
+            b"BOOK",
+            b"MOBI",
             2 * total_records + 1,
             0,
-            total_records
+            total_records,
         )
 
         rec_headers = []
@@ -681,11 +776,16 @@ class MangaFileProcessor:
         os.rename(temp_mobi, output_filepath)
         return output_filepath
 
-    def build_colorized_mobi(self, pages_meta: list, session_id: str, output_filepath: str, title: str = "Colorized Manga"):
+    def build_colorized_mobi(
+        self,
+        pages_meta: list,
+        session_id: str,
+        output_filepath: str,
+        title: str = "Colorized Manga",
+    ):
         """
         Builds an Amazon Kindle-compatible MOBI comic/manga e-book from colorized page images.
         """
-        import tempfile
 
         if shutil.which("ebook-convert") or shutil.which("kindlegen"):
             with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp_epub:
@@ -714,8 +814,8 @@ class MangaFileProcessor:
                 continue
 
             ext = color_path.suffix.lower()
-            if ext in ('.jpg', '.jpeg'):
-                with open(color_path, 'rb') as f:
+            if ext in (".jpg", ".jpeg"):
+                with open(color_path, "rb") as f:
                     img_bytes = f.read()
             else:
                 with Image.open(str(color_path)) as pil_img:
@@ -724,17 +824,19 @@ class MangaFileProcessor:
                     rgb.save(buf, format="JPEG", quality=90, optimize=True)
                     img_bytes = buf.getvalue()
 
-            page_label = page_info.get("display_name", f"Page {idx+1}")
+            page_label = page_info.get("display_name", f"Page {idx + 1}")
             images_data.append((img_bytes, page_label))
 
         return self.build_mobi_from_images(images_data, output_filepath, title=title)
 
-    def build_batch_export(self, sessions_data: list, output_filepath: str, format_override: Optional[str] = None) -> str:
+    def build_batch_export(
+        self, sessions_data: list, output_filepath: str, format_override: Optional[str] = None
+    ) -> str:
         """
         Builds and packages multiple colorized documents into a single archive.
         Preserves original document formats (e.g. EPUBs as EPUB, PDFs as PDF) or applies format_override.
         """
-        import tempfile
+
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             created_files = []
@@ -758,12 +860,16 @@ class MangaFileProcessor:
                 if target_fmt in ["mobi", "azw3", "kindle"]:
                     doc_filename = f"colorized_{stem}.mobi"
                     doc_path = str(temp_path / doc_filename)
-                    self.build_colorized_mobi(pages_meta, session_id, doc_path, title=f"Colorized - {stem}")
+                    self.build_colorized_mobi(
+                        pages_meta, session_id, doc_path, title=f"Colorized - {stem}"
+                    )
                     created_files.append((doc_path, doc_filename))
                 elif target_fmt == "epub":
                     doc_filename = f"colorized_{stem}.epub"
                     doc_path = str(temp_path / doc_filename)
-                    self.build_colorized_epub(original_path, pages_meta, session_id, doc_path, title=f"Colorized - {stem}")
+                    self.build_colorized_epub(
+                        original_path, pages_meta, session_id, doc_path, title=f"Colorized - {stem}"
+                    )
                     created_files.append((doc_path, doc_filename))
                 elif target_fmt == "pdf":
                     doc_filename = f"colorized_{stem}.pdf"
@@ -777,7 +883,9 @@ class MangaFileProcessor:
                     created_files.append((doc_path, doc_filename))
 
             # Package all generated colorized books/files into output zip
-            with zipfile.ZipFile(output_filepath, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as zout:
+            with zipfile.ZipFile(
+                output_filepath, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+            ) as zout:
                 for file_path, arcname in created_files:
                     zinfo = zipfile.ZipInfo.from_file(file_path, arcname=arcname)
                     zinfo.compress_type = zipfile.ZIP_STORED
@@ -814,44 +922,46 @@ class MangaFileProcessor:
 
         Supports real-time progress callbacks and cancellation checks.
         """
-        import tempfile, uuid as _uuid
+        import uuid as _uuid
 
         temp_epub = output_filepath + ".tmp"
         if os.path.exists(temp_epub):
             os.remove(temp_epub)
 
-        manifest_items: List[str] = [
+        manifest_items: list[str] = [
             '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
         ]
-        spine_items: List[str] = []
-        toc_volumes: List[dict] = []
+        spine_items: list[str] = []
+        toc_volumes: list[dict] = []
 
         total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
         processed_pages = 0
         global_page_idx = 0
 
         try:
-            with zipfile.ZipFile(temp_epub, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
-                zout.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+            with zipfile.ZipFile(
+                temp_epub, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+            ) as zout:
+                zout.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
 
-                container_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+                container_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
-</container>'''
-                zout.writestr('META-INF/container.xml', container_xml)
+</container>"""
+                zout.writestr("META-INF/container.xml", container_xml)
 
                 for vol_idx, sess in enumerate(sessions_data):
                     if cancel_check and cancel_check():
                         raise InterruptedError("Combined EPUB export cancelled")
 
                     session_id = sess["session_id"]
-                    vol_stem   = Path(sess.get("filename", f"Volume {vol_idx+1}")).stem
+                    vol_stem = Path(sess.get("filename", f"Volume {vol_idx + 1}")).stem
                     pages_meta = sess.get("pages", [])
                     colorized_dir = self.storage_dir / session_id / "colorized"
 
-                    vol_toc = {"label": f"Vol. {vol_idx+1} — {vol_stem}", "pages": []}
+                    vol_toc = {"label": f"Vol. {vol_idx + 1} — {vol_stem}", "pages": []}
 
                     for page_info in pages_meta:
                         if cancel_check and cancel_check():
@@ -868,17 +978,21 @@ class MangaFileProcessor:
                         global_page_idx += 1
 
                         # Image - e-reader optimized
-                        img_arc_name = f"images/vol_{vol_idx+1:02d}_page_{gidx+1:04d}.jpg"
+                        img_arc_name = f"images/vol_{vol_idx + 1:02d}_page_{gidx + 1:04d}.jpg"
                         img_bytes, w, h = self.optimize_image_data(
-                            color_path, max_dimension=max_dimension, quality=jpeg_quality, grayscale=grayscale, colorsoft_tune=colorsoft_tune
+                            color_path,
+                            max_dimension=max_dimension,
+                            quality=jpeg_quality,
+                            grayscale=grayscale,
+                            colorsoft_tune=colorsoft_tune,
                         )
                         zout.writestr(f"OEBPS/{img_arc_name}", img_bytes)
 
                         # XHTML page wrapper
-                        xhtml_name = f"vol_{vol_idx+1:02d}_page_{gidx+1:04d}.xhtml"
-                        img_id  = f"img_v{vol_idx+1}p{gidx+1}"
-                        page_id = f"page_v{vol_idx+1}p{gidx+1}"
-                        page_label = page_info.get("display_name", f"Page {gidx+1}")
+                        xhtml_name = f"vol_{vol_idx + 1:02d}_page_{gidx + 1:04d}.xhtml"
+                        img_id = f"img_v{vol_idx + 1}p{gidx + 1}"
+                        page_id = f"page_v{vol_idx + 1}p{gidx + 1}"
+                        page_label = page_info.get("display_name", f"Page {gidx + 1}")
 
                         page_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -906,39 +1020,44 @@ class MangaFileProcessor:
                         manifest_items.append(
                             f'<item id="{page_id}" href="{xhtml_name}" media-type="application/xhtml+xml"/>'
                         )
-                        spine_items.append(f'<itemref idref="{page_id}" properties="rendition:layout-pre-paginated"/>')
+                        spine_items.append(
+                            f'<itemref idref="{page_id}" properties="rendition:layout-pre-paginated"/>'
+                        )
                         vol_toc["pages"].append({"xhtml": xhtml_name, "title": page_label})
 
                         processed_pages += 1
                         if progress_callback:
-                            progress_callback({
-                                "vol_num": vol_idx + 1,
-                                "total_vols": len(sessions_data),
-                                "vol_title": vol_stem,
-                                "processed_pages": processed_pages,
-                                "total_pages": total_pages,
-                                "percent": int((processed_pages / max(total_pages, 1)) * 100),
-                                "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_label}"
-                            })
+                            progress_callback(
+                                {
+                                    "vol_num": vol_idx + 1,
+                                    "total_vols": len(sessions_data),
+                                    "vol_title": vol_stem,
+                                    "processed_pages": processed_pages,
+                                    "total_pages": total_pages,
+                                    "percent": int((processed_pages / max(total_pages, 1)) * 100),
+                                    "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_label}",
+                                }
+                            )
 
                     if vol_toc["pages"]:
                         toc_volumes.append(vol_toc)
 
                 # Navigation TOC — volume-level chapter headers
-                nav_ol_parts: List[str] = []
+                nav_ol_parts: list[str] = []
                 for vol in toc_volumes:
                     first_xhtml = vol["pages"][0]["xhtml"] if vol["pages"] else "#"
-                    clean_vol_label = vol["label"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    clean_vol_label = (
+                        vol["label"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    )
                     page_lis = "".join(
-                        f'<li><a href="{p["xhtml"]}">{p["title"].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")}</a></li>'
+                        f'<li><a href="{p["xhtml"]}">{p["title"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")}</a></li>'
                         for p in vol["pages"]
                     )
                     nav_ol_parts.append(
-                        f'<li><a href="{first_xhtml}">{clean_vol_label}</a>'
-                        f'<ol>{page_lis}</ol></li>'
+                        f'<li><a href="{first_xhtml}">{clean_vol_label}</a><ol>{page_lis}</ol></li>'
                     )
 
-                nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+                nav_xhtml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
 <head><meta charset="utf-8"/><title>Table of Contents</title></head>
@@ -948,13 +1067,13 @@ class MangaFileProcessor:
     <ol>{"".join(nav_ol_parts)}</ol>
   </nav>
 </body>
-</html>'''
-                zout.writestr('OEBPS/nav.xhtml', nav_xhtml)
+</html>"""
+                zout.writestr("OEBPS/nav.xhtml", nav_xhtml)
 
                 # content.opf
                 safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                book_uuid  = str(_uuid.uuid4())
-                opf = f'''<?xml version="1.0" encoding="UTF-8"?>
+                book_uuid = str(_uuid.uuid4())
+                opf = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="pub-id">urn:uuid:{book_uuid}</dc:identifier>
@@ -981,8 +1100,8 @@ class MangaFileProcessor:
   <spine page-progression-direction="rtl">
     {"".join(spine_items)}
   </spine>
-</package>'''
-                zout.writestr('OEBPS/content.opf', opf)
+</package>"""
+                zout.writestr("OEBPS/content.opf", opf)
 
             if cancel_check and cancel_check():
                 raise InterruptedError("Combined EPUB export cancelled")
@@ -1026,9 +1145,9 @@ class MangaFileProcessor:
                 if cancel_check and cancel_check():
                     raise InterruptedError("Combined PDF export cancelled")
 
-                session_id   = sess["session_id"]
-                vol_stem     = Path(sess.get("filename", f"Volume {vol_idx+1}")).stem
-                pages_meta   = sess.get("pages", [])
+                session_id = sess["session_id"]
+                vol_stem = Path(sess.get("filename", f"Volume {vol_idx + 1}")).stem
+                pages_meta = sess.get("pages", [])
                 colorized_dir = self.storage_dir / session_id / "colorized"
 
                 vol_start_page = len(pdf_doc)  # page index before adding this volume
@@ -1045,7 +1164,11 @@ class MangaFileProcessor:
                         continue
 
                     img_bytes, width, height = self.optimize_image_data(
-                        color_path, max_dimension=max_dimension, quality=jpeg_quality, grayscale=grayscale, colorsoft_tune=colorsoft_tune
+                        color_path,
+                        max_dimension=max_dimension,
+                        quality=jpeg_quality,
+                        grayscale=grayscale,
+                        colorsoft_tune=colorsoft_tune,
                     )
                     pdf_page = pdf_doc.new_page(width=width, height=height)
                     rect = fitz.Rect(0, 0, width, height)
@@ -1053,20 +1176,23 @@ class MangaFileProcessor:
 
                     processed_pages += 1
                     if progress_callback:
-                        progress_callback({
-                            "vol_num": vol_idx + 1,
-                            "total_vols": len(sessions_data),
-                            "vol_title": vol_stem,
-                            "processed_pages": processed_pages,
-                            "total_pages": total_pages,
-                            "percent": int((processed_pages / max(total_pages, 1)) * 100),
-                            "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_info.get('display_name', f'Page {processed_pages}')}"
-                        })
+                        progress_callback(
+                            {
+                                "vol_num": vol_idx + 1,
+                                "total_vols": len(sessions_data),
+                                "vol_title": vol_stem,
+                                "processed_pages": processed_pages,
+                                "total_pages": total_pages,
+                                "percent": int((processed_pages / max(total_pages, 1)) * 100),
+                                "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_info.get('display_name', f'Page {processed_pages}')}",
+                            }
+                        )
 
                 # Add a bookmark (outline entry) pointing to the first page of this volume
                 if len(pdf_doc) > vol_start_page:
                     pdf_doc.set_toc(
-                        pdf_doc.get_toc() + [[1, f"Vol. {vol_idx+1} — {vol_stem}", vol_start_page + 1]]
+                        pdf_doc.get_toc()
+                        + [[1, f"Vol. {vol_idx + 1} — {vol_stem}", vol_start_page + 1]]
                     )
 
             if cancel_check and cancel_check():
@@ -1101,7 +1227,6 @@ class MangaFileProcessor:
         Merges all queued volumes into a single Amazon Kindle MOBI file.
         Supports real-time progress callbacks and cancellation checks.
         """
-        import tempfile
 
         if cancel_check and cancel_check():
             raise InterruptedError("Combined MOBI export cancelled")
@@ -1116,13 +1241,15 @@ class MangaFileProcessor:
                 tmp_epub_path = tmp_epub.name
             try:
                 self.build_combined_epub(
-                    sessions_data, tmp_epub_path, title=title,
+                    sessions_data,
+                    tmp_epub_path,
+                    title=title,
                     progress_callback=progress_callback,
                     cancel_check=cancel_check,
                     max_dimension=max_dimension,
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
-                    colorsoft_tune=colorsoft_tune
+                    colorsoft_tune=colorsoft_tune,
                 )
                 if cancel_check and cancel_check():
                     raise InterruptedError("Combined MOBI export cancelled")
@@ -1142,8 +1269,8 @@ class MangaFileProcessor:
                 raise InterruptedError("Combined MOBI export cancelled")
 
             session_id = sess["session_id"]
-            vol_stem = Path(sess.get("filename", f"Volume {vol_idx+1}")).stem
-            vol_label = f"Vol. {vol_idx+1} — {vol_stem}"
+            vol_stem = Path(sess.get("filename", f"Volume {vol_idx + 1}")).stem
+            vol_label = f"Vol. {vol_idx + 1} — {vol_stem}"
             pages_meta = sess.get("pages", [])
             colorized_dir = self.storage_dir / session_id / "colorized"
 
@@ -1162,24 +1289,30 @@ class MangaFileProcessor:
                 global_page_idx += 1
 
                 img_bytes, w, h = self.optimize_image_data(
-                    color_path, max_dimension=max_dimension, quality=jpeg_quality, grayscale=grayscale, colorsoft_tune=colorsoft_tune
+                    color_path,
+                    max_dimension=max_dimension,
+                    quality=jpeg_quality,
+                    grayscale=grayscale,
+                    colorsoft_tune=colorsoft_tune,
                 )
 
-                page_label = page_info.get("display_name", f"Page {gidx+1}")
+                page_label = page_info.get("display_name", f"Page {gidx + 1}")
                 vol_header = vol_label if p_idx == 0 else None
                 images_data.append((img_bytes, page_label, vol_header))
 
                 processed_pages += 1
                 if progress_callback:
-                    progress_callback({
-                        "vol_num": vol_idx + 1,
-                        "total_vols": len(sessions_data),
-                        "vol_title": vol_stem,
-                        "processed_pages": processed_pages,
-                        "total_pages": total_pages,
-                        "percent": int((processed_pages / max(total_pages, 1)) * 100),
-                        "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_label}"
-                    })
+                    progress_callback(
+                        {
+                            "vol_num": vol_idx + 1,
+                            "total_vols": len(sessions_data),
+                            "vol_title": vol_stem,
+                            "processed_pages": processed_pages,
+                            "total_pages": total_pages,
+                            "percent": int((processed_pages / max(total_pages, 1)) * 100),
+                            "status": f"Volume {vol_idx + 1}/{len(sessions_data)}: {page_label}",
+                        }
+                    )
 
         if cancel_check and cancel_check():
             raise InterruptedError("Combined MOBI export cancelled")
@@ -1207,9 +1340,9 @@ class MangaFileProcessor:
         If chunking produces multiple chunks, packages them into a clean ZIP archive
         containing the individual omnibus files (e.g. Part_01_Vol_01-03.mobi).
         """
-        import tempfile
+
         clean_title = (title or "Colorized Manga Collection").strip()
-        safe_title = re.sub(r'[^a-zA-Z0-9_\- ]', '', clean_title).strip().replace(' ', '_')
+        safe_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", clean_title).strip().replace(" ", "_")
         if not safe_title:
             safe_title = "manga_collection"
 
@@ -1220,7 +1353,7 @@ class MangaFileProcessor:
         chunks = []
         if chunk_by == "volumes" and chunk_size and chunk_size > 0 and n > chunk_size:
             c_size = max(1, int(chunk_size))
-            chunks = [sessions_data[i:i + c_size] for i in range(0, n, c_size)]
+            chunks = [sessions_data[i : i + c_size] for i in range(0, n, c_size)]
         elif chunk_by in ["size_mb", "size"] and chunk_size and chunk_size > 0:
             budget_kb = max(50, int(chunk_size)) * 1024
             avg_page_kb = 85 if grayscale else 135
@@ -1245,24 +1378,39 @@ class MangaFileProcessor:
         if len(chunks) <= 1:
             if export_format in ["mobi", "azw3", "kindle"]:
                 return self.build_combined_mobi(
-                    sessions_data, output_filepath, title=clean_title,
-                    progress_callback=progress_callback, cancel_check=cancel_check,
-                    max_dimension=max_dimension, jpeg_quality=jpeg_quality, grayscale=grayscale,
-                    colorsoft_tune=colorsoft_tune
+                    sessions_data,
+                    output_filepath,
+                    title=clean_title,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    max_dimension=max_dimension,
+                    jpeg_quality=jpeg_quality,
+                    grayscale=grayscale,
+                    colorsoft_tune=colorsoft_tune,
                 )
             elif export_format == "pdf":
                 return self.build_combined_pdf(
-                    sessions_data, output_filepath, title=clean_title,
-                    progress_callback=progress_callback, cancel_check=cancel_check,
-                    max_dimension=max_dimension, jpeg_quality=jpeg_quality, grayscale=grayscale,
-                    colorsoft_tune=colorsoft_tune
+                    sessions_data,
+                    output_filepath,
+                    title=clean_title,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    max_dimension=max_dimension,
+                    jpeg_quality=jpeg_quality,
+                    grayscale=grayscale,
+                    colorsoft_tune=colorsoft_tune,
                 )
             else:
                 return self.build_combined_epub(
-                    sessions_data, output_filepath, title=clean_title,
-                    progress_callback=progress_callback, cancel_check=cancel_check,
-                    max_dimension=max_dimension, jpeg_quality=jpeg_quality, grayscale=grayscale,
-                    colorsoft_tune=colorsoft_tune
+                    sessions_data,
+                    output_filepath,
+                    title=clean_title,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    max_dimension=max_dimension,
+                    jpeg_quality=jpeg_quality,
+                    grayscale=grayscale,
+                    colorsoft_tune=colorsoft_tune,
                 )
 
         # Multiple chunks: build each omnibus volume and bundle into ZIP
@@ -1279,46 +1427,71 @@ class MangaFileProcessor:
 
                 end_vol = start_vol + len(chunk_sess) - 1
                 part_title = f"{clean_title} — Part {part_idx} (Vol. {start_vol}–{end_vol})"
-                ext = ".mobi" if export_format in ["mobi", "azw3", "kindle"] else (".pdf" if export_format == "pdf" else ".epub")
-                part_filename = f"{safe_title}_Part_{part_idx:02d}_Vol_{start_vol:02d}-{end_vol:02d}{ext}"
+                ext = (
+                    ".mobi"
+                    if export_format in ["mobi", "azw3", "kindle"]
+                    else (".pdf" if export_format == "pdf" else ".epub")
+                )
+                part_filename = (
+                    f"{safe_title}_Part_{part_idx:02d}_Vol_{start_vol:02d}-{end_vol:02d}{ext}"
+                )
                 part_file_path = str(temp_path / part_filename)
 
                 base_pages = global_processed_pages
+
                 def make_sub_progress(p_idx=part_idx, total_parts=len(chunks), base=base_pages):
                     def sub_prog(p_data):
                         cur_pages = base + p_data.get("processed_pages", 0)
                         pct = int((cur_pages / max(total_pages, 1)) * 100)
                         if progress_callback:
-                            progress_callback({
-                                "part_num": p_idx,
-                                "total_parts": total_parts,
-                                "processed_pages": cur_pages,
-                                "total_pages": total_pages,
-                                "percent": pct,
-                                "status": f"Part {p_idx}/{total_parts}: {p_data.get('status', '')}"
-                            })
+                            progress_callback(
+                                {
+                                    "part_num": p_idx,
+                                    "total_parts": total_parts,
+                                    "processed_pages": cur_pages,
+                                    "total_pages": total_pages,
+                                    "percent": pct,
+                                    "status": f"Part {p_idx}/{total_parts}: {p_data.get('status', '')}",
+                                }
+                            )
+
                     return sub_prog
 
                 if export_format in ["mobi", "azw3", "kindle"]:
                     self.build_combined_mobi(
-                        chunk_sess, part_file_path, title=part_title,
-                        progress_callback=make_sub_progress(), cancel_check=cancel_check,
-                        max_dimension=max_dimension, jpeg_quality=jpeg_quality, grayscale=grayscale,
-                        colorsoft_tune=colorsoft_tune
+                        chunk_sess,
+                        part_file_path,
+                        title=part_title,
+                        progress_callback=make_sub_progress(),
+                        cancel_check=cancel_check,
+                        max_dimension=max_dimension,
+                        jpeg_quality=jpeg_quality,
+                        grayscale=grayscale,
+                        colorsoft_tune=colorsoft_tune,
                     )
                 elif export_format == "pdf":
                     self.build_combined_pdf(
-                        chunk_sess, part_file_path, title=part_title,
-                        progress_callback=make_sub_progress(), cancel_check=cancel_check,
-                        max_dimension=max_dimension, jpeg_quality=jpeg_quality, grayscale=grayscale,
-                        colorsoft_tune=colorsoft_tune
+                        chunk_sess,
+                        part_file_path,
+                        title=part_title,
+                        progress_callback=make_sub_progress(),
+                        cancel_check=cancel_check,
+                        max_dimension=max_dimension,
+                        jpeg_quality=jpeg_quality,
+                        grayscale=grayscale,
+                        colorsoft_tune=colorsoft_tune,
                     )
                 else:
                     self.build_combined_epub(
-                        chunk_sess, part_file_path, title=part_title,
-                        progress_callback=make_sub_progress(), cancel_check=cancel_check,
-                        max_dimension=max_dimension, jpeg_quality=jpeg_quality, grayscale=grayscale,
-                        colorsoft_tune=colorsoft_tune
+                        chunk_sess,
+                        part_file_path,
+                        title=part_title,
+                        progress_callback=make_sub_progress(),
+                        cancel_check=cancel_check,
+                        max_dimension=max_dimension,
+                        jpeg_quality=jpeg_quality,
+                        grayscale=grayscale,
+                        colorsoft_tune=colorsoft_tune,
                     )
 
                 created_files.append((part_file_path, part_filename))
@@ -1336,7 +1509,9 @@ class MangaFileProcessor:
             # Package into ZIP using ZIP_STORED (ebook files are already compressed internally)
             # and proper external_attr (Unix 0644 + DOS archive bit 0x20) for 100% compatibility
             # with macOS Archive Utility, Windows Explorer, and Linux unzip.
-            with zipfile.ZipFile(temp_zip, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as zout:
+            with zipfile.ZipFile(
+                temp_zip, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+            ) as zout:
                 for fpath, arcname in created_files:
                     zinfo = zipfile.ZipInfo.from_file(fpath, arcname=arcname)
                     zinfo.compress_type = zipfile.ZIP_STORED
@@ -1349,5 +1524,3 @@ class MangaFileProcessor:
                 os.remove(zip_output)
             os.rename(temp_zip, zip_output)
             return zip_output
-
-

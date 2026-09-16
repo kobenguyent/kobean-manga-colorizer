@@ -1,12 +1,12 @@
-import os
-import sys
 import io
-import requests
+import sys
 from pathlib import Path
+
+import requests
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from main import BASE_DIR, STORAGE_DIR, UPLOAD_DIR, OUTPUT_DIR
+from main import OUTPUT_DIR, STORAGE_DIR
 
 BASE_URL = "http://127.0.0.1:8000"
 
@@ -21,7 +21,7 @@ def test_test_data_cleanup_endpoint():
 
     upload_resp = requests.post(
         f"{BASE_URL}/api/upload",
-        files={"file": ("sample_cleanup_test_page.jpg", buf, "image/jpeg")}
+        files={"file": ("sample_cleanup_test_page.jpg", buf, "image/jpeg")},
     )
     assert upload_resp.status_code == 200
     session_id = upload_resp.json()["session_id"]
@@ -33,7 +33,7 @@ def test_test_data_cleanup_endpoint():
     export_resp = requests.post(f"{BASE_URL}/api/export/{session_id}?format=epub")
     assert export_resp.status_code == 200
     export_data = export_resp.json()
-    dl_url = export_data["download_url"]
+    assert export_data["download_url"]
 
     # Verify download file exists on disk
     out_filename = export_data["filename"]
@@ -47,8 +47,7 @@ def test_test_data_cleanup_endpoint():
 
     # 3. Call the cleanup endpoint targeting this test session
     clean_resp = requests.post(
-        f"{BASE_URL}/api/test/cleanup",
-        json={"session_ids": [session_id], "clean_orphans": True}
+        f"{BASE_URL}/api/test/cleanup", json={"session_ids": [session_id], "clean_orphans": True}
     )
     assert clean_resp.status_code == 200
     clean_data = clean_resp.json()

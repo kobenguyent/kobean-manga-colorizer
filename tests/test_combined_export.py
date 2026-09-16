@@ -1,16 +1,17 @@
-import requests
 import json
 import time
 
 import fitz
+import requests
 
 BASE_URL = "http://127.0.0.1:8000"
+
 
 def ensure_test_sessions():
     resp = requests.get(f"{BASE_URL}/api/sessions")
     sessions = resp.json().get("sessions", []) if resp.status_code == 200 else []
     needed = 2 - len(sessions)
-    for i in range(max(0, needed)):
+    for _i in range(max(0, needed)):
         idx = len(sessions) + 1
         pdf_path = f"/tmp/sample_combined_vol_{idx}.pdf"
         doc = fitz.open()
@@ -19,25 +20,27 @@ def ensure_test_sessions():
         doc.save(pdf_path)
         doc.close()
         with open(pdf_path, "rb") as f:
-            up_resp = requests.post(f"{BASE_URL}/api/upload", files={"file": (f"sample_combined_vol_{idx}.pdf", f, "application/pdf")})
+            up_resp = requests.post(
+                f"{BASE_URL}/api/upload",
+                files={"file": (f"sample_combined_vol_{idx}.pdf", f, "application/pdf")},
+            )
         assert up_resp.status_code == 200
         resp = requests.get(f"{BASE_URL}/api/sessions")
         sessions = resp.json().get("sessions", [])
     return [sessions[0]["session_id"], sessions[1]["session_id"]]
+
 
 def test_combined_export_progress_and_cancel():
     # 1. Get or create existing sessions
     session_ids = ensure_test_sessions()
     print(f"Testing with sessions: {session_ids}")
 
-
     # 2. Test start and progress stream
     print("\n--- Testing Progress Stream ---")
-    start_resp = requests.post(f"{BASE_URL}/api/export/combined", json={
-        "session_ids": session_ids,
-        "format": "epub",
-        "title": "Progress Test Manga"
-    })
+    start_resp = requests.post(
+        f"{BASE_URL}/api/export/combined",
+        json={"session_ids": session_ids, "format": "epub", "title": "Progress Test Manga"},
+    )
     assert start_resp.status_code == 200, f"Failed to start: {start_resp.text}"
     job_info = start_resp.json()
     assert job_info["status"] == "started"
@@ -79,11 +82,10 @@ def test_combined_export_progress_and_cancel():
 
     # 3. Test cancellation
     print("\n--- Testing Cancellation ---")
-    start_resp2 = requests.post(f"{BASE_URL}/api/export/combined", json={
-        "session_ids": session_ids,
-        "format": "pdf",
-        "title": "Cancel Test Manga"
-    })
+    start_resp2 = requests.post(
+        f"{BASE_URL}/api/export/combined",
+        json={"session_ids": session_ids, "format": "pdf", "title": "Cancel Test Manga"},
+    )
     assert start_resp2.status_code == 200
     job_id2 = start_resp2.json()["job_id"]
     print(f"Started export for cancellation test with job_id: {job_id2}")
@@ -103,6 +105,7 @@ def test_combined_export_progress_and_cancel():
     assert status_data["status"] == "cancelled"
 
     print("\n✅ All progress & cancellation tests PASSED successfully!")
+
 
 if __name__ == "__main__":
     test_combined_export_progress_and_cancel()

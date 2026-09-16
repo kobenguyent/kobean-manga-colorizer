@@ -1,16 +1,38 @@
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
+
 import requests
 
 BASE_URL = "http://127.0.0.1:8000"
 
+try:
+    requests.get(f"{BASE_URL}/api/sessions", timeout=0.2)
+    USE_LIVE_SERVER = True
+except Exception:
+    USE_LIVE_SERVER = False
+
+if not USE_LIVE_SERVER:
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    test_client = TestClient(app)
+
+
+def api_get(path: str):
+    if USE_LIVE_SERVER:
+        return requests.get(f"{BASE_URL}{path}")
+    return test_client.get(path)
+
+
 class TestHistoryUI(unittest.TestCase):
     def test_sessions_api_for_history(self):
         """Test GET /api/sessions returns active sessions with all required history fields."""
-        resp = requests.get(f"{BASE_URL}/api/sessions")
+        resp = api_get("/api/sessions")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertIn("sessions", data)
@@ -27,14 +49,14 @@ class TestHistoryUI(unittest.TestCase):
 
     def test_index_html_history_elements(self):
         """Test that index.html contains all History UI triggers and modal markup."""
-        resp = requests.get(f"{BASE_URL}/")
+        resp = api_get("/")
         self.assertEqual(resp.status_code, 200)
         html = resp.text
 
         # Header history trigger
         self.assertIn('id="btn-open-history"', html)
         self.assertIn('id="history-badge-count"', html)
-        self.assertIn('openHistoryModal()', html)
+        self.assertIn("openHistoryModal()", html)
 
         # Modal elements
         self.assertIn('id="history-modal-overlay"', html)
@@ -55,7 +77,7 @@ class TestHistoryUI(unittest.TestCase):
     def test_static_assets_contain_history_handlers(self):
         """Test that static JavaScript and CSS contain History styling and logic."""
         # Check app.js
-        js_resp = requests.get(f"{BASE_URL}/app.js")
+        js_resp = api_get("/app.js")
         self.assertEqual(js_resp.status_code, 200)
         js = js_resp.text
         self.assertIn("openHistoryModal", js)
@@ -70,7 +92,7 @@ class TestHistoryUI(unittest.TestCase):
         self.assertIn("toggleQueueSelection", js)
 
         # Check styles.css
-        css_resp = requests.get(f"{BASE_URL}/styles.css")
+        css_resp = api_get("/styles.css")
         self.assertEqual(css_resp.status_code, 200)
         css = css_resp.text
         self.assertIn(".history-modal-dialog", css)
@@ -78,6 +100,7 @@ class TestHistoryUI(unittest.TestCase):
         self.assertIn(".history-item", css)
         self.assertIn(".history-selection-bar", css)
         self.assertIn(".history-item.is-selected", css)
+
 
 if __name__ == "__main__":
     unittest.main()

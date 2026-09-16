@@ -1,18 +1,51 @@
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import uuid
-import unittest
-import os
 import shutil
+import unittest
+import uuid
+
 import cv2
 import numpy as np
 import requests
 
-from main import SESSIONS, STORAGE_DIR, UPLOAD_DIR, OUTPUT_DIR, save_session_meta
+from main import OUTPUT_DIR, SESSIONS, STORAGE_DIR, UPLOAD_DIR, save_session_meta
 
 BASE_URL = "http://127.0.0.1:8000"
+
+try:
+    requests.get(f"{BASE_URL}/api/sessions", timeout=0.2)
+    USE_LIVE_SERVER = True
+except Exception:
+    USE_LIVE_SERVER = False
+
+if not USE_LIVE_SERVER:
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    test_client = TestClient(app)
+
+
+def api_delete(path: str):
+    if USE_LIVE_SERVER:
+        return requests.delete(f"{BASE_URL}{path}")
+    return test_client.delete(path)
+
+
+def api_get(path: str):
+    if USE_LIVE_SERVER:
+        return requests.get(f"{BASE_URL}{path}")
+    return test_client.get(path)
+
+
+def api_post(path: str, json: dict = None):
+    if USE_LIVE_SERVER:
+        return requests.post(f"{BASE_URL}{path}", json=json)
+    return test_client.post(path, json=json)
+
 
 class TestDeleteFeatures(unittest.TestCase):
     def test_delete_page_endpoint(self):
@@ -24,19 +57,21 @@ class TestDeleteFeatures(unittest.TestCase):
 
         pages = []
         for i in range(3):
-            fn = f"page_{i+1:04d}.png"
+            fn = f"page_{i + 1:04d}.png"
             p_path = orig_dir / fn
             cv2.imwrite(str(p_path), np.zeros((100, 100, 3), dtype=np.uint8))
-            pages.append({
-                "page_index": i,
-                "display_name": f"Page {i+1}",
-                "filename": fn,
-                "original_path": str(p_path),
-                "width": 100,
-                "height": 100,
-                "status": "pending",
-                "colorized_url": None
-            })
+            pages.append(
+                {
+                    "page_index": i,
+                    "display_name": f"Page {i + 1}",
+                    "filename": fn,
+                    "original_path": str(p_path),
+                    "width": 100,
+                    "height": 100,
+                    "status": "pending",
+                    "colorized_url": None,
+                }
+            )
 
         SESSIONS[session_id] = {
             "session_id": session_id,
@@ -46,7 +81,7 @@ class TestDeleteFeatures(unittest.TestCase):
             "total_pages": 3,
             "pages": pages,
             "status": "idle",
-            "processed_count": 0
+            "processed_count": 0,
         }
         save_session_meta(session_id)
 
@@ -54,7 +89,7 @@ class TestDeleteFeatures(unittest.TestCase):
         self.assertTrue((orig_dir / "page_0002.png").exists())
 
         # Delete Page 1 (middle page: page_0002.png)
-        resp = requests.delete(f"{BASE_URL}/api/session/{session_id}/page/1")
+        resp = api_delete(f"/api/session/{session_id}/page/1")
         self.assertEqual(resp.status_code, 200, resp.text)
         data = resp.json()
         self.assertEqual(data["status"], "success")
@@ -95,9 +130,11 @@ class TestDeleteFeatures(unittest.TestCase):
             "file_path": str(upload_path),
             "ext": ".pdf",
             "total_pages": 1,
-            "pages": [{"page_index": 0, "filename": "page_0001.png", "original_path": str(dummy_file)}],
+            "pages": [
+                {"page_index": 0, "filename": "page_0001.png", "original_path": str(dummy_file)}
+            ],
             "status": "idle",
-            "processed_count": 0
+            "processed_count": 0,
         }
         save_session_meta(session_id)
 
@@ -105,7 +142,7 @@ class TestDeleteFeatures(unittest.TestCase):
         self.assertTrue(upload_path.exists())
 
         # Delete session
-        resp = requests.delete(f"{BASE_URL}/api/session/{session_id}")
+        resp = api_delete(f"/api/session/{session_id}")
         self.assertEqual(resp.status_code, 200, resp.text)
         data = resp.json()
         self.assertEqual(data["status"], "success")
@@ -115,7 +152,7 @@ class TestDeleteFeatures(unittest.TestCase):
         self.assertFalse(upload_path.exists())
 
         # Calling GET /api/session/{session_id} should now return 404
-        get_resp = requests.get(f"{BASE_URL}/api/session/{session_id}")
+        get_resp = api_get(f"/api/session/{session_id}")
         self.assertEqual(get_resp.status_code, 404)
 
     def test_bulk_delete_sessions_endpoint(self):
@@ -149,9 +186,15 @@ class TestDeleteFeatures(unittest.TestCase):
                 "file_path": str(up_path),
                 "ext": ".pdf",
                 "total_pages": 1,
-                "pages": [{"page_index": 0, "filename": "page_0001.png", "original_path": str(dummy_file)}],
+                "pages": [
+                    {
+                        "page_index": 0,
+                        "filename": "page_0001.png",
+                        "original_path": str(dummy_file),
+                    }
+                ],
                 "status": "idle",
-                "processed_count": 0
+                "processed_count": 0,
             }
             save_session_meta(sid)
 
@@ -165,7 +208,7 @@ class TestDeleteFeatures(unittest.TestCase):
 
         # Bulk delete first 2 sessions
         target_sids = [sids[0], sids[1]]
-        resp = requests.post(f"{BASE_URL}/api/sessions/bulk-delete", json={"session_ids": target_sids})
+        resp = api_post("/api/sessions/bulk-delete", json={"session_ids": target_sids})
         self.assertEqual(resp.status_code, 200, resp.text)
         data = resp.json()
         self.assertEqual(data["status"], "success")
@@ -185,11 +228,11 @@ class TestDeleteFeatures(unittest.TestCase):
         self.assertTrue(dirs[2].exists())
         self.assertTrue(uploads[2].exists())
         self.assertTrue(outputs[2].exists())
-        get_resp = requests.get(f"{BASE_URL}/api/session/{sids[2]}")
+        get_resp = api_get(f"/api/session/{sids[2]}")
         self.assertEqual(get_resp.status_code, 200)
 
         # Cleanup 3rd session
-        cleanup_resp = requests.delete(f"{BASE_URL}/api/session/{sids[2]}")
+        cleanup_resp = api_delete(f"/api/session/{sids[2]}")
         self.assertEqual(cleanup_resp.status_code, 200)
 
     def test_delete_sessions_with_query_params(self):
@@ -207,14 +250,14 @@ class TestDeleteFeatures(unittest.TestCase):
                 "total_pages": 0,
                 "pages": [],
                 "status": "idle",
-                "processed_count": 0
+                "processed_count": 0,
             }
             save_session_meta(sid)
 
         for d in dirs:
             self.assertTrue(d.exists())
 
-        resp = requests.delete(f"{BASE_URL}/api/sessions?session_ids={sids[0]},{sids[1]}")
+        resp = api_delete(f"/api/sessions?session_ids={sids[0]},{sids[1]}")
         self.assertEqual(resp.status_code, 200, resp.text)
         data = resp.json()
         self.assertEqual(data["status"], "success")
@@ -226,12 +269,12 @@ class TestDeleteFeatures(unittest.TestCase):
     def test_bulk_delete_validation_and_edge_cases(self):
         """Test validation error for empty session_ids and graceful handling for non-existent IDs."""
         # Empty list without delete_all should return 400
-        resp = requests.post(f"{BASE_URL}/api/sessions/bulk-delete", json={"session_ids": []})
+        resp = api_post("/api/sessions/bulk-delete", json={"session_ids": []})
         self.assertEqual(resp.status_code, 400)
 
         # Non-existent session IDs should return success with deleted_session_ids handled
         fake_id = f"fake-session-{uuid.uuid4().hex[:8]}"
-        resp = requests.post(f"{BASE_URL}/api/sessions/bulk-delete", json={"session_ids": [fake_id]})
+        resp = api_post("/api/sessions/bulk-delete", json={"session_ids": [fake_id]})
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["status"], "success")

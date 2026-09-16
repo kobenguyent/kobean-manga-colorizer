@@ -1,13 +1,15 @@
-import unittest
-from unittest.mock import patch, MagicMock
 import base64
-import os
 import io
+import os
+import unittest
+from unittest.mock import MagicMock, patch
+
 import cv2
 import numpy as np
 from PIL import Image
 
 from colorizer_engine import MangaColorizerEngine
+
 
 class TestGoogleNanoBananaAPI(unittest.TestCase):
     def setUp(self):
@@ -37,16 +39,13 @@ class TestGoogleNanoBananaAPI(unittest.TestCase):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{
-                        "inlineData": {
-                            "mimeType": "image/png",
-                            "data": fake_b64
-                        }
-                    }]
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"inlineData": {"mimeType": "image/png", "data": fake_b64}}]
+                    }
                 }
-            }]
+            ]
         }
         mock_post.return_value = mock_resp
 
@@ -55,7 +54,7 @@ class TestGoogleNanoBananaAPI(unittest.TestCase):
             output_path=self.test_out_path,
             model_provider="google_nano",
             model_name="nano-banana",
-            api_key="AIzaSyValidTestKey123"
+            api_key="AIzaSyValidTestKey123",
         )
 
         # 1. Verify requests.post was called to Google Generative Language API
@@ -77,16 +76,18 @@ class TestGoogleNanoBananaAPI(unittest.TestCase):
             output_path=self.test_out_path,
             model_provider="google_nano",
             model_name="nano-banana",
-            api_key=""
+            api_key="",
         )
         self.assertEqual(res.get("status"), "success")
         self.assertTrue(os.path.exists(self.test_out_path))
+
 
 def test_google_nano():
     suite = unittest.TestLoader().loadTestsFromTestCase(TestGoogleNanoBananaAPI)
     runner = unittest.TextTestRunner()
     result = runner.run(suite)
     assert result.wasSuccessful()
+
 
 if __name__ == "__main__":
     unittest.main()

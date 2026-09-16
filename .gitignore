@@ -1,6 +1,7 @@
 ./.idea
 /output
 /venv
+/.venv
 /sessions
 /uploads
 

@@ -1,13 +1,14 @@
-import os
-import sys
 import io
-import struct
-import zipfile
-import uuid
 import json
+import os
 import shutil
-import requests
+import struct
+import sys
+import uuid
+import zipfile
 from pathlib import Path
+
+import requests
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,7 +35,9 @@ def test_pure_python_mobi_generator(tmp_path):
     ]
 
     out_mobi = str(tmp_path / "manga_test.mobi")
-    result = processor.build_mobi_from_images(images_data, out_mobi, title="Naruto Shippuden", author="Masashi Kishimoto")
+    result = processor.build_mobi_from_images(
+        images_data, out_mobi, title="Naruto Shippuden", author="Masashi Kishimoto"
+    )
     assert result == out_mobi
     assert os.path.exists(out_mobi)
     file_size = os.path.getsize(out_mobi)
@@ -43,9 +46,22 @@ def test_pure_python_mobi_generator(tmp_path):
     # Inspect Palm Database Header
     with open(out_mobi, "rb") as f:
         header = f.read(78)
-        name, attr, ver, ctime, mtime, btime, modnum, app_info, sort_info, b_type, b_creator, seed, next_id, n_records = struct.unpack(
-            ">32sHHIIIIII4s4sIIH", header
-        )
+        (
+            name,
+            attr,
+            ver,
+            ctime,
+            mtime,
+            btime,
+            modnum,
+            app_info,
+            sort_info,
+            b_type,
+            b_creator,
+            seed,
+            next_id,
+            n_records,
+        ) = struct.unpack(">32sHHIIIIII4s4sIIH", header)
         assert b_type == b"BOOK"
         assert b_creator == b"MOBI"
         assert n_records == 7  # rec0, text, img1, img2, FLIS, FCIS, EOF
@@ -77,30 +93,30 @@ def test_pure_python_mobi_generator(tmp_path):
 
         # EXTH header in rec0
         exth_offset = 248
-        exth_magic = rec0_data[exth_offset:exth_offset + 4]
+        exth_magic = rec0_data[exth_offset : exth_offset + 4]
         assert exth_magic == b"EXTH"
-        exth_len, exth_count = struct.unpack(">II", rec0_data[exth_offset + 4:exth_offset + 12])
+        exth_len, exth_count = struct.unpack(">II", rec0_data[exth_offset + 4 : exth_offset + 12])
         assert exth_count >= 8
 
         # Parse EXTH tags
-        exth_bytes = rec0_data[exth_offset + 12:exth_offset + exth_len]
+        exth_bytes = rec0_data[exth_offset + 12 : exth_offset + exth_len]
         curr = 0
         tags = {}
         for _ in range(exth_count):
             if curr + 8 > len(exth_bytes):
                 break
-            tag_type, tag_len = struct.unpack(">II", exth_bytes[curr:curr + 8])
-            data = exth_bytes[curr + 8:curr + tag_len]
+            tag_type, tag_len = struct.unpack(">II", exth_bytes[curr : curr + 8])
+            data = exth_bytes[curr + 8 : curr + tag_len]
             tags[tag_type] = data
             curr += tag_len
 
         assert tags[100] == b"Masashi Kishimoto"  # Author
-        assert tags[503] == b"Naruto Shippuden"    # Title
-        assert tags[121] == b"comic"               # Book type: comic
-        assert tags[122] == b"true"                # Fixed-layout: true
-        assert tags[126] == b"none"                # Orientation lock: none
-        assert tags[127] == b"horizontal-rl"       # RTL Manga reading direction!
-        assert tags[128] == b"pre-paginated"       # Rendition layout
+        assert tags[503] == b"Naruto Shippuden"  # Title
+        assert tags[121] == b"comic"  # Book type: comic
+        assert tags[122] == b"true"  # Fixed-layout: true
+        assert tags[126] == b"none"  # Orientation lock: none
+        assert tags[127] == b"horizontal-rl"  # RTL Manga reading direction!
+        assert tags[128] == b"pre-paginated"  # Rendition layout
 
         # Verify Record 1 (HTML text)
         rec2_offset = rec_headers[2][0]
@@ -109,7 +125,7 @@ def test_pure_python_mobi_generator(tmp_path):
         assert 'dir="rtl"' in html_bytes
         assert 'recindex="0001"' in html_bytes
         assert 'recindex="0002"' in html_bytes
-        assert 'Volume 1' in html_bytes
+        assert "Volume 1" in html_bytes
 
         # Verify Record 2 (first image is JPEG)
         f.seek(rec2_offset)
@@ -128,13 +144,15 @@ def test_kindle_epub_fixed_layout_metadata(tmp_path):
     p1 = orig_dir / "p1.jpg"
     Image.new("RGB", (400, 600), "green").save(str(p1), "JPEG")
 
-    pages_meta = [{
-        "filename": "p1.jpg",
-        "original_path": str(p1),
-        "width": 400,
-        "height": 600,
-        "display_name": "Cover Page"
-    }]
+    pages_meta = [
+        {
+            "filename": "p1.jpg",
+            "original_path": str(p1),
+            "width": 400,
+            "height": 600,
+            "display_name": "Cover Page",
+        }
+    ]
 
     out_epub = str(tmp_path / "manga.epub")
     processor.build_standalone_epub(pages_meta, session_id, out_epub, title="Kindle EPUB Comic")
@@ -160,7 +178,9 @@ def ensure_test_doc():
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
     buf.seek(0)
-    resp = requests.post(f"{BASE_URL}/api/upload", files={"file": ("kindle_test_page.jpg", buf, "image/jpeg")})
+    resp = requests.post(
+        f"{BASE_URL}/api/upload", files={"file": ("kindle_test_page.jpg", buf, "image/jpeg")}
+    )
     assert resp.status_code == 200
     return resp.json()["session_id"]
 
@@ -192,10 +212,9 @@ def test_batch_mobi_export():
     sid1 = ensure_test_doc()
     sid2 = ensure_test_doc()
 
-    resp = requests.post(f"{BASE_URL}/api/export/batch", json={
-        "session_ids": [sid1, sid2],
-        "format": "mobi"
-    })
+    resp = requests.post(
+        f"{BASE_URL}/api/export/batch", json={"session_ids": [sid1, sid2], "format": "mobi"}
+    )
     assert resp.status_code == 200, f"Batch export failed: {resp.text}"
     data = resp.json()
     assert data["status"] == "success"
@@ -214,12 +233,15 @@ def test_combined_mobi_export():
     sid1 = ensure_test_doc()
     sid2 = ensure_test_doc()
 
-    resp = requests.post(f"{BASE_URL}/api/export/combined", json={
-        "session_ids": [sid1, sid2],
-        "format": "mobi",
-        "sync": True,
-        "title": "Amazon Kindle Manga Collection"
-    })
+    resp = requests.post(
+        f"{BASE_URL}/api/export/combined",
+        json={
+            "session_ids": [sid1, sid2],
+            "format": "mobi",
+            "sync": True,
+            "title": "Amazon Kindle Manga Collection",
+        },
+    )
     assert resp.status_code == 200, f"Combined export failed: {resp.text}"
     data = resp.json()
     assert data["status"] == "success"
@@ -243,14 +265,18 @@ def test_kindle_image_optimization_and_grayscale(tmp_path):
     orig_bytes = raw_buf.getvalue()
 
     # 1. Downscale to Kindle 1600px max edge
-    opt_bytes, w, h = MangaFileProcessor.optimize_image_data(orig_bytes, max_dimension=1600, quality=80, grayscale=False)
+    opt_bytes, w, h = MangaFileProcessor.optimize_image_data(
+        orig_bytes, max_dimension=1600, quality=80, grayscale=False
+    )
     assert max(w, h) == 1600
     assert w == 1200
     assert h == 1600
     assert len(opt_bytes) < len(orig_bytes) / 2
 
     # 2. 16-level grayscale conversion for e-ink
-    gray_bytes, gw, gh = MangaFileProcessor.optimize_image_data(orig_bytes, max_dimension=1600, quality=80, grayscale=True)
+    gray_bytes, gw, gh = MangaFileProcessor.optimize_image_data(
+        orig_bytes, max_dimension=1600, quality=80, grayscale=True
+    )
     assert (gw, gh) == (1200, 1600)
     with Image.open(io.BytesIO(gray_bytes)) as pil_gray:
         assert pil_gray.mode == "L"
@@ -269,17 +295,21 @@ def test_omnibus_chunking_direct(tmp_path):
         img_path = s_dir / f"page_{i}.jpg"
         Image.new("RGB", (300, 450), color="purple").save(str(img_path), "JPEG")
 
-        sessions.append({
-            "session_id": s_id,
-            "title": f"Volume {i}",
-            "pages": [{
-                "filename": f"page_{i}.jpg",
-                "original_path": str(img_path),
-                "width": 300,
-                "height": 450,
-                "display_name": f"Page {i}"
-            }]
-        })
+        sessions.append(
+            {
+                "session_id": s_id,
+                "title": f"Volume {i}",
+                "pages": [
+                    {
+                        "filename": f"page_{i}.jpg",
+                        "original_path": str(img_path),
+                        "width": 300,
+                        "height": 450,
+                        "display_name": f"Page {i}",
+                    }
+                ],
+            }
+        )
 
     out_file = str(tmp_path / "Manga_Collection.mobi")
     zip_result = processor.build_combined_omnibus(
@@ -291,7 +321,7 @@ def test_omnibus_chunking_direct(tmp_path):
         title="Epic Manga",
         max_dimension=1600,
         jpeg_quality=80,
-        grayscale=True
+        grayscale=True,
     )
 
     assert zip_result.endswith(".zip")
@@ -315,17 +345,20 @@ def test_omnibus_combined_api_endpoint():
     sid2 = ensure_test_doc()
     sid3 = ensure_test_doc()
 
-    resp = requests.post(f"{BASE_URL}/api/export/combined", json={
-        "session_ids": [sid1, sid2, sid3],
-        "format": "mobi",
-        "sync": True,
-        "chunk_by": "volumes",
-        "chunk_size": 2,
-        "title": "Kindle Omnibus API Collection",
-        "max_dimension": 1600,
-        "jpeg_quality": 80,
-        "grayscale": True
-    })
+    resp = requests.post(
+        f"{BASE_URL}/api/export/combined",
+        json={
+            "session_ids": [sid1, sid2, sid3],
+            "format": "mobi",
+            "sync": True,
+            "chunk_by": "volumes",
+            "chunk_size": 2,
+            "title": "Kindle Omnibus API Collection",
+            "max_dimension": 1600,
+            "jpeg_quality": 80,
+            "grayscale": True,
+        },
+    )
     assert resp.status_code == 200, f"Omnibus export failed: {resp.text}"
     data = resp.json()
     assert data["status"] == "success"
@@ -382,14 +415,17 @@ def test_kindle_colorsoft_optimization(tmp_path):
     # Test API with colorsoft_tune
     sid1 = ensure_test_doc()
     sid2 = ensure_test_doc()
-    resp = requests.post(f"{BASE_URL}/api/export/combined", json={
-        "session_ids": [sid1, sid2],
-        "format": "mobi",
-        "sync": True,
-        "title": "Kindle Colorsoft Test",
-        "colorsoft_tune": True,
-        "grayscale": False
-    })
+    resp = requests.post(
+        f"{BASE_URL}/api/export/combined",
+        json={
+            "session_ids": [sid1, sid2],
+            "format": "mobi",
+            "sync": True,
+            "title": "Kindle Colorsoft Test",
+            "colorsoft_tune": True,
+            "grayscale": False,
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "success"
@@ -409,12 +445,15 @@ def test_combined_export_filters_empty_sessions_and_sorts_volumes():
         json.dump({"session_id": empty_sid, "filename": "test_ghost.pdf", "pages": []}, f)
 
     try:
-        resp = requests.post(f"{BASE_URL}/api/export/combined", json={
-            "session_ids": [empty_sid, sid2, sid1],
-            "format": "mobi",
-            "sync": True,
-            "title": "Natural Sort and Filter Test"
-        })
+        resp = requests.post(
+            f"{BASE_URL}/api/export/combined",
+            json={
+                "session_ids": [empty_sid, sid2, sid1],
+                "format": "mobi",
+                "sync": True,
+                "title": "Natural Sort and Filter Test",
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "success"
@@ -422,5 +461,3 @@ def test_combined_export_filters_empty_sessions_and_sorts_volumes():
         assert data["total_volumes"] == 2
     finally:
         shutil.rmtree(sess_dir, ignore_errors=True)
-
-
