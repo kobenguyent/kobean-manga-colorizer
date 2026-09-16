@@ -1123,6 +1123,7 @@ body {
 
 /* Export Banner */
 .export-card {
+  position: relative;
   background: rgba(16, 185, 129, 0.08);
   border-color: rgba(16, 185, 129, 0.3);
   display: flex;
@@ -1130,6 +1131,37 @@ body {
   align-items: center;
   flex-wrap: wrap;
   gap: 1.25rem;
+  padding-right: 3.25rem;
+}
+
+.export-close-btn {
+  position: absolute;
+  top: 0.85rem;
+  right: 0.85rem;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 1.2rem;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: 10;
+}
+
+.export-close-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: rotate(90deg);
+}
+
+.export-close-btn:active {
+  transform: scale(0.95);
 }
 
 .export-content {
@@ -1218,24 +1250,31 @@ body {
 .gallery-selection-controls {
   display: inline-flex;
   align-items: center;
-  gap: 0.65rem;
-  margin-left: 0.75rem;
 }
 
 .select-all-label {
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--text-secondary);
   cursor: pointer;
-  padding: 0.25rem 0.65rem;
-  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.75rem;
+  border-radius: var(--radius-full, 9999px);
   background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
+  white-space: nowrap;
+}
+
+.select-all-label:hover {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.45);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(6, 182, 212, 0.2);
 }
 
 .select-all-label input[type="checkbox"] {
@@ -1246,23 +1285,18 @@ body {
 }
 
 .select-all-label .custom-checkbox {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   border-radius: 4px;
-  background: rgba(15, 23, 42, 0.8);
-  border: 1.5px solid rgba(255, 255, 255, 0.3);
+  background: rgba(15, 23, 42, 0.9);
+  border: 1.5px solid rgba(255, 255, 255, 0.35);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: transparent;
   font-size: 0.75rem;
+  font-weight: 900;
   transition: all 0.15s ease;
-}
-
-.select-all-label:hover {
-  background: rgba(6, 182, 212, 0.1);
-  border-color: rgba(6, 182, 212, 0.4);
-  color: var(--text-primary);
 }
 
 .select-all-label input:checked + .custom-checkbox {
@@ -1272,7 +1306,7 @@ body {
 }
 
 .select-all-label input:indeterminate + .custom-checkbox {
-  background: rgba(6, 182, 212, 0.5);
+  background: rgba(6, 182, 212, 0.55);
   border-color: var(--accent-cyan);
   color: #fff;
 }
@@ -1282,42 +1316,209 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1.25rem;
+  gap: 1rem;
+  padding: 0.85rem 1.15rem;
   margin-bottom: 1.25rem;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-lg, 12px);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.35);
   flex-wrap: wrap;
 }
 
-.gallery-header-bar .header-left {
+.gallery-header-bar .header-left,
+.gallery-header-left {
   display: flex;
   align-items: center;
   gap: 0.85rem;
   flex-wrap: wrap;
 }
 
-.gallery-header-bar .header-right {
+.gallery-title-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.gallery-title-icon {
+  font-size: 1.2rem;
+  color: var(--accent-cyan);
+}
+
+.gallery-title {
+  font-family: var(--font-display, inherit);
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.gallery-header-bar .header-right,
+.gallery-header-right {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.65rem;
   flex-wrap: wrap;
-  margin-left: auto;
 }
 
 .gallery-counter {
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
-  padding: 0.28rem 0.8rem;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.3rem 0.75rem;
   border-radius: var(--radius-full, 9999px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   font-weight: 500;
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.45rem;
   white-space: nowrap;
+}
+
+.gallery-counter .counter-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 6px var(--accent-cyan);
+  display: inline-block;
 }
 
 .gallery-counter strong {
   color: var(--accent-cyan);
+  font-weight: 700;
+}
+
+/* Recolorize Selected Pill Button */
+.btn-recolorize-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.32rem 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: var(--radius-full, 9999px);
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%) !important;
+  border: 1px solid #fb923c !important;
+  color: #ffffff !important;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(249, 115, 22, 0.35);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+
+.btn-recolorize-pill:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(249, 115, 22, 0.5);
+  background: linear-gradient(135deg, #fb923c 0%, #f97316 100%) !important;
+}
+
+.btn-recolorize-pill i {
+  font-size: 0.85rem;
+  transition: transform 0.3s ease;
+}
+
+.btn-recolorize-pill:hover:not(:disabled) i {
+  transform: rotate(90deg);
+}
+
+/* Export Segmented Capsule */
+.gallery-export-segmented {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-full, 9999px);
+  padding: 2px 3px;
+  gap: 2px;
+}
+
+.export-segmented-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-tertiary, #64748b);
+  padding: 0.25rem 0.45rem 0.25rem 0.65rem;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.export-segmented-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.export-format-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-secondary) !important;
+  border-radius: var(--radius-full, 9999px) !important;
+  padding: 0.28rem 0.65rem !important;
+  font-size: 0.75rem !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+  box-shadow: none !important;
+}
+
+.export-format-btn i {
+  font-size: 0.82rem;
+  opacity: 0.85;
+}
+
+.export-format-btn:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: var(--text-primary) !important;
+  transform: translateY(-1px);
+}
+
+.export-format-btn:active {
+  transform: translateY(0);
+}
+
+/* Responsive Wrap Protections */
+@media (max-width: 980px) {
+  .gallery-header-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.85rem;
+  }
+
+  .gallery-header-bar .header-left,
+  .gallery-header-left {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .gallery-header-bar .header-right,
+  .gallery-header-right {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}
+
+@media (max-width: 620px) {
+  .gallery-export-segmented {
+    flex-wrap: wrap;
+    border-radius: var(--radius-md);
+  }
+  
+  .gallery-header-bar .header-left,
+  .gallery-header-bar .header-right {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 /* Gallery Grid & Cards */
@@ -1376,23 +1577,61 @@ body {
   transform: scale(1.02);
 }
 
-/* Card Checkbox */
+/* Card Checkbox - Elegant Hover Reveal & Checked State */
 .page-select-checkbox {
   position: absolute;
-  top: 0.5rem;
-  left: 0.5rem;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: rgba(15, 23, 42, 0.85);
-  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  top: 0.6rem;
+  left: 0.6rem;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1.5px solid rgba(255, 255, 255, 0.3);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   z-index: 5;
-  backdrop-filter: blur(8px);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  
+  /* Hidden by default until hovered or selected */
+  opacity: 0;
+  transform: scale(0.85);
+  pointer-events: none;
+  transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+              background 0.18s ease,
+              border-color 0.18s ease,
+              box-shadow 0.18s ease;
+}
+
+/* Reveal smoothly when hovering over the manga card or when focused */
+.page-card:hover .page-select-checkbox,
+.page-card:focus-within .page-select-checkbox {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+
+/* Micro-interaction when hovering directly over the checkbox itself */
+.page-select-checkbox:hover {
+  background: rgba(15, 23, 42, 0.92);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.5), 0 2px 8px rgba(0, 0, 0, 0.4);
+  transform: scale(1.08) !important;
+}
+
+/* When selected/checked: ALWAYS visible, elegant cyan gradient & glow */
+.page-select-checkbox.checked,
+.page-card.selected .page-select-checkbox {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+  border-color: #22d3ee;
+  box-shadow: 0 2px 10px rgba(6, 182, 212, 0.5), 0 0 16px rgba(6, 182, 212, 0.3);
 }
 
 .page-select-checkbox input[type="checkbox"] {
@@ -1400,6 +1639,8 @@ body {
   opacity: 0;
   width: 0;
   height: 0;
+  margin: 0;
+  pointer-events: none;
 }
 
 .page-select-checkbox .custom-checkbox {
@@ -1412,31 +1653,25 @@ body {
   font-size: 0.95rem;
   font-weight: 900;
   border-radius: inherit;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, transform 0.15s ease;
 }
 
-.page-select-checkbox:hover {
-  border-color: var(--accent-cyan);
-  background: rgba(15, 23, 42, 0.95);
-  box-shadow: 0 0 10px rgba(6, 182, 212, 0.4);
-}
-
-.page-select-checkbox.checked,
-.page-card.selected .page-select-checkbox {
-  background: var(--accent-cyan);
-  border-color: var(--accent-cyan);
-  box-shadow: 0 0 12px rgba(6, 182, 212, 0.55);
-}
-
+/* Checkmark appears crisp and dark on the bright cyan badge */
 .page-select-checkbox.checked .custom-checkbox,
 .page-card.selected .page-select-checkbox .custom-checkbox {
-  color: #0b1120;
+  color: #042f2e;
+}
+
+/* Hovering on an unselected checkbox gives a subtle preview checkmark */
+.page-card:hover .page-select-checkbox:not(.checked):hover .custom-checkbox {
+  color: rgba(6, 182, 212, 0.85);
+  transform: scale(0.9);
 }
 
 .page-status-badge {
   position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
+  top: 0.6rem;
+  right: 0.6rem;
   padding: 0.2rem 0.5rem;
   border-radius: var(--radius-sm);
   font-size: 0.7rem;
@@ -1447,37 +1682,47 @@ body {
 
 .page-delete-btn {
   position: absolute;
-  top: 0.5rem;
-  left: 2.65rem;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: rgba(15, 23, 42, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  top: 0.6rem;
+  left: 2.85rem;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1.5px solid rgba(255, 255, 255, 0.2);
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   cursor: pointer;
   z-index: 4;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
   opacity: 0;
-  transform: scale(0.9);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: scale(0.85);
+  pointer-events: none;
+  transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+              background 0.18s ease,
+              border-color 0.18s ease,
+              color 0.18s ease,
+              box-shadow 0.18s ease;
 }
 
-.page-card:hover .page-delete-btn {
+.page-card:hover .page-delete-btn,
+.page-card:focus-within .page-delete-btn {
   opacity: 1;
   transform: scale(1);
+  pointer-events: auto;
 }
 
 .page-delete-btn:hover {
   background: #ef4444;
   color: #fff;
-  border-color: #dc2626;
-  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.5);
-  transform: scale(1.1) !important;
+  border-color: #f87171;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  transform: scale(1.08) !important;
 }
 
 .status-pending {

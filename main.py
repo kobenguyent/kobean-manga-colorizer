@@ -1,20 +1,50 @@
+#!/usr/bin/env python3
 import os
-import shutil
-import uuid
-import json
-import asyncio
-import re
-from typing import Dict, List, Optional, Any
+import sys
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException, Body, Query
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+# Auto-respawn in local venv if executed by system python lacking dependencies
+if __name__ == "__main__":
+    _curr_dir = Path(__file__).resolve().parent
+    _venv_py = _curr_dir / ".venv" / "bin" / "python3"
+    if not _venv_py.exists():
+        _venv_py = _curr_dir / "venv" / "bin" / "python3"
+    if _venv_py.exists() and sys.executable != str(_venv_py):
+        try:
+            import fastapi  # noqa: F401
+            import uvicorn  # noqa: F401
+        except ImportError:
+            os.execv(str(_venv_py), [str(_venv_py)] + sys.argv)
+
+
+import asyncio
+import json
+import re
+import shutil
+import uuid
+from typing import Any, Optional
+
+from fastapi import (
+    Body,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from colorizer_engine import (
+    CharacterEntry,
+    CharacterPalette,
+    MangaColorizerEngine,
+    is_colored_page,
+)
 from file_processor import MangaFileProcessor
-from colorizer_engine import MangaColorizerEngine, CharacterPalette, CharacterEntry, is_colored_page
 
 app = FastAPI(title="Manga Colorizer Pro", version="1.0.0")
 
@@ -42,19 +72,20 @@ colorizer_engine = MangaColorizerEngine()
 
 # Session state store
 # session_id -> { "file_path": str, "filename": str, "ext": str, "pages": [...], "status": "idle"|"processing"|"completed", "progress": {...} }
-SESSIONS: Dict[str, dict] = {}
+SESSIONS: dict[str, dict] = {}
 # session_id -> asyncio.Queue for SSE events
-EVENT_QUEUES: Dict[str, List[asyncio.Queue]] = {}
+EVENT_QUEUES: dict[str, list[asyncio.Queue]] = {}
 
 # Global Active Batch Tracking
-CURRENT_BATCH: Dict[str, Any] = {
+CURRENT_BATCH: dict[str, Any] = {
     "is_running": False,
     "total_docs": 0,
     "completed_docs": 0,
     "current_index": 0,
     "current_session_id": None,
-    "session_ids": []
+    "session_ids": [],
 }
+
 
 def save_session_meta(session_id: str):
     """Persists session state to meta.json on disk to survive server restarts."""
@@ -75,6 +106,7 @@ def save_session_meta(session_id: str):
     except Exception as e:
         print(f"[Session Warning] Failed to write meta.json: {e}")
 
+
 def get_or_restore_session(session_id: str) -> Optional[dict]:
     """Retrieves session from memory, or restores from disk if server restarted."""
     if session_id in SESSIONS:
@@ -87,10 +119,12 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
     meta_path = sess_dir / "meta.json"
     if meta_path.exists():
         try:
-            with open(meta_path, "r", encoding="utf-8") as f:
+            with open(meta_path, encoding="utf-8") as f:
                 sess = json.load(f)
                 if "pages" in sess:
-                    sess["processed_count"] = sum(1 for p in sess["pages"] if p.get("status") == "colorized")
+                    sess["processed_count"] = sum(
+                        1 for p in sess["pages"] if p.get("status") == "colorized"
+                    )
                     if sess.get("total_pages") and sess["processed_count"] == sess["total_pages"]:
                         sess["status"] = "completed"
                 SESSIONS[session_id] = sess
@@ -103,22 +137,28 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
     # Fallback auto-recovery from disk session folders
     orig_dir = sess_dir / "original"
     if orig_dir.exists():
-        orig_files = sorted(list(orig_dir.glob("*.*")))
+        orig_files = sorted(orig_dir.glob("*.*"))
         if orig_files:
             pages = []
             colorized_dir = sess_dir / "colorized"
             for idx, p_path in enumerate(orig_files):
                 c_path = colorized_dir / p_path.name
                 is_colored = c_path.exists()
-                pages.append({
-                    "page_index": idx,
-                    "display_name": f"Page {idx + 1}",
-                    "filename": p_path.name,
-                    "original_path": str(p_path),
-                    "status": "colorized" if is_colored else "pending",
-                    "colorized_url": f"/api/session/{session_id}/image/colorized/{p_path.name}" if is_colored else None,
-                    "engine_used": "ResNeXt-50/101 Generator + Vibrant Chroma (MPS)" if is_colored else None
-                })
+                pages.append(
+                    {
+                        "page_index": idx,
+                        "display_name": f"Page {idx + 1}",
+                        "filename": p_path.name,
+                        "original_path": str(p_path),
+                        "status": "colorized" if is_colored else "pending",
+                        "colorized_url": f"/api/session/{session_id}/image/colorized/{p_path.name}"
+                        if is_colored
+                        else None,
+                        "engine_used": "ResNeXt-50/101 Generator + Vibrant Chroma (MPS)"
+                        if is_colored
+                        else None,
+                    }
+                )
             recovered = {
                 "session_id": session_id,
                 "filename": orig_files[0].name,
@@ -129,7 +169,7 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
                 "status": "completed" if all(p["status"] == "colorized" for p in pages) else "idle",
                 "processed_count": sum(1 for p in pages if p["status"] == "colorized"),
                 "model_provider": "resnext_generator",
-                "model_name": "resnext-v2-manga"
+                "model_name": "resnext-v2-manga",
             }
             SESSIONS[session_id] = recovered
             if session_id not in EVENT_QUEUES:
@@ -138,21 +178,23 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
             return recovered
     return None
 
+
 class ColorizeRequest(BaseModel):
     session_id: str
-    model_provider: str = "google_nano" # "google_nano", "apple_foundation", "local_smart"
+    model_provider: str = "google_nano"  # "google_nano", "apple_foundation", "local_smart"
     model_name: str = "nano-banana"
     api_key: Optional[str] = ""
     style: str = "gemini_anime"
     saturation: float = 1.2
     contrast: float = 1.1
     line_preserve: float = 0.85
-    selected_pages: Optional[List[int]] = None
+    selected_pages: Optional[list[int]] = None
     skip_if_colored: bool = False
-    force_recolorize: bool = False   # when True, re-run even if page already has a colorized file
+    force_recolorize: bool = False  # when True, re-run even if page already has a colorized file
+
 
 class BatchColorizeRequest(BaseModel):
-    session_ids: List[str]
+    session_ids: list[str]
     model_provider: str = "google_nano"
     model_name: str = "nano-banana"
     api_key: Optional[str] = ""
@@ -162,30 +204,37 @@ class BatchColorizeRequest(BaseModel):
     line_preserve: float = 0.85
     skip_if_colored: bool = False
 
+
 class BatchExportRequest(BaseModel):
-    session_ids: List[str]
+    session_ids: list[str]
     format: Optional[str] = "auto"
 
+
 class CombinedExportRequest(BaseModel):
-    session_ids: Optional[List[str]] = None
-    format: str = "epub"   # "epub", "mobi", "pdf"
+    session_ids: Optional[list[str]] = None
+    format: str = "epub"  # "epub", "mobi", "pdf"
     title: Optional[str] = "Colorized Manga Collection"
     sync: Optional[bool] = False
-    chunk_by: Optional[str] = "none"       # "none", "volumes", "size_mb"
-    chunk_size: Optional[int] = 3          # e.g. 3 volumes or 400 MB
-    max_dimension: Optional[int] = 1600    # 1600 (Kindle optimal), 1920 (Tablet), 0 (Original)
-    jpeg_quality: Optional[int] = 80       # 80 (E-reader recommended), 85, 90
-    grayscale: Optional[bool] = False      # true for 16-level e-ink optimization
-    colorsoft_tune: Optional[bool] = False # true for Kindle Colorsoft / Color E-Ink vibrancy & contrast boost
+    chunk_by: Optional[str] = "none"  # "none", "volumes", "size_mb"
+    chunk_size: Optional[int] = 3  # e.g. 3 volumes or 400 MB
+    max_dimension: Optional[int] = 1600  # 1600 (Kindle optimal), 1920 (Tablet), 0 (Original)
+    jpeg_quality: Optional[int] = 80  # 80 (E-reader recommended), 85, 90
+    grayscale: Optional[bool] = False  # true for 16-level e-ink optimization
+    colorsoft_tune: Optional[bool] = (
+        False  # true for Kindle Colorsoft / Color E-Ink vibrancy & contrast boost
+    )
+
 
 class TestCleanupRequest(BaseModel):
-    session_ids: Optional[List[str]] = None
+    session_ids: Optional[list[str]] = None
     purge_all: Optional[bool] = False
     clean_orphans: Optional[bool] = True
 
+
 class BulkDeleteSessionsRequest(BaseModel):
-    session_ids: Optional[List[str]] = None
+    session_ids: Optional[list[str]] = None
     delete_all: Optional[bool] = False
+
 
 class PreviewRequest(BaseModel):
     session_id: str
@@ -200,7 +249,9 @@ class PreviewRequest(BaseModel):
     skip_if_colored: bool = False
     force_recolorize: bool = False
 
+
 # ── Character Palette models ─────────────────────────────────────────
+
 
 class CharacterEntryModel(BaseModel):
     name: str
@@ -209,16 +260,19 @@ class CharacterEntryModel(BaseModel):
     costume_hex: str = ""
     extra_hex: str = ""
 
+
 class PaletteUpsertRequest(BaseModel):
     session_id: str
     character: CharacterEntryModel
+
 
 class PaletteDeleteRequest(BaseModel):
     session_id: str
     character_name: str
 
+
 # In-memory palette store: session_id -> CharacterPalette
-SESSION_PALETTES: Dict[str, CharacterPalette] = {}
+SESSION_PALETTES: dict[str, CharacterPalette] = {}
 
 
 def _get_palette(session_id: str) -> CharacterPalette:
@@ -231,8 +285,8 @@ def _get_palette(session_id: str) -> CharacterPalette:
 @app.post("/api/upload")
 async def upload_files(
     file: Optional[UploadFile] = File(None),
-    files: Optional[List[UploadFile]] = File(None),
-    batch_id: Optional[str] = Form(None)
+    files: Optional[list[UploadFile]] = File(None),
+    batch_id: Optional[str] = Form(None),
 ):
     upload_list = []
     if files:
@@ -243,7 +297,18 @@ async def upload_files(
     if not upload_list:
         raise HTTPException(status_code=400, detail="No files uploaded.")
 
-    ALLOWED_EXTENSIONS = [".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip"]
+    ALLOWED_EXTENSIONS = [
+        ".pdf",
+        ".epub",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".bmp",
+        ".gif",
+        ".tiff",
+        ".zip",
+    ]
     effective_batch_id = batch_id or str(uuid.uuid4())
     created_sessions = []
 
@@ -282,7 +347,7 @@ async def upload_files(
             "status": "idle",
             "processed_count": 0,
             "model_provider": "google_nano",
-            "model_name": "nano-banana"
+            "model_name": "nano-banana",
         }
         SESSIONS[session_id] = sess_obj
         EVENT_QUEUES[session_id] = []
@@ -294,28 +359,33 @@ async def upload_files(
 
     session_summaries = []
     for s in created_sessions:
-        session_summaries.append({
-            "session_id": s["session_id"],
-            "batch_id": effective_batch_id,
-            "filename": s["filename"],
-            "ext": s["ext"],
-            "total_pages": s["total_pages"],
-            "status": s["status"],
-            "processed_count": s["processed_count"]
-        })
+        session_summaries.append(
+            {
+                "session_id": s["session_id"],
+                "batch_id": effective_batch_id,
+                "filename": s["filename"],
+                "ext": s["ext"],
+                "total_pages": s["total_pages"],
+                "status": s["status"],
+                "processed_count": s["processed_count"],
+            }
+        )
 
     primary = created_sessions[0]
-    return JSONResponse({
-        "status": "success",
-        "batch_id": effective_batch_id,
-        "total_files": len(created_sessions),
-        "sessions": session_summaries,
-        # backward compatibility fields:
-        "session_id": primary["session_id"],
-        "filename": primary["filename"],
-        "total_pages": primary["total_pages"],
-        "pages": primary["pages"]
-    })
+    return JSONResponse(
+        {
+            "status": "success",
+            "batch_id": effective_batch_id,
+            "total_files": len(created_sessions),
+            "sessions": session_summaries,
+            # backward compatibility fields:
+            "session_id": primary["session_id"],
+            "filename": primary["filename"],
+            "total_pages": primary["total_pages"],
+            "pages": primary["pages"],
+        }
+    )
+
 
 @app.get("/api/session/latest")
 async def get_latest_session():
@@ -340,13 +410,14 @@ async def get_latest_session():
             key=lambda s: (
                 1 if s.get("processed_count", 0) > 0 else 0,
                 s.get("processed_count", 0),
-                s.get("total_pages", 0)
+                s.get("total_pages", 0),
             ),
-            reverse=True
+            reverse=True,
         )
         return JSONResponse(candidates[0])
 
     raise HTTPException(status_code=404, detail="No active session found")
+
 
 @app.get("/api/session/{session_id}")
 async def get_session(session_id: str):
@@ -355,21 +426,24 @@ async def get_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found.")
     return JSONResponse(sess)
 
+
 @app.get("/api/session/{session_id}/image/{img_type}/{filename}")
 async def get_session_image(session_id: str, img_type: str, filename: str):
     if img_type not in ["original", "colorized"]:
         raise HTTPException(status_code=400, detail="Invalid image type")
-    
+
     img_path = STORAGE_DIR / session_id / img_type / filename
     if not img_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
-    
+
     return FileResponse(str(img_path))
+
 
 async def notify_sse_listeners(session_id: str, event_data: dict):
     if session_id in EVENT_QUEUES:
         for q in EVENT_QUEUES[session_id]:
             await q.put(event_data)
+
 
 @app.get("/api/colorize/stream/{session_id}")
 async def stream_progress(session_id: str):
@@ -385,10 +459,7 @@ async def stream_progress(session_id: str):
     async def event_generator():
         try:
             # Yield initial status
-            init_data = {
-                "type": "init",
-                "session": sess
-            }
+            init_data = {"type": "init", "session": sess}
             yield f"data: {json.dumps(init_data)}\n\n"
 
             # If the session is already finished, emit terminal event so client doesn't wait
@@ -409,10 +480,12 @@ async def stream_progress(session_id: str):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+
 def run_colorization_worker(session_id: str, req: ColorizeRequest):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(_async_colorization_worker(session_id, req))
+
 
 async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
     sess = SESSIONS.get(session_id)
@@ -424,12 +497,15 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
     sess["model_provider"] = req.model_provider
     sess["model_name"] = req.model_name
 
-    await notify_sse_listeners(session_id, {
-        "type": "start",
-        "total": sess["total_pages"],
-        "model_provider": req.model_provider,
-        "model_name": req.model_name
-    })
+    await notify_sse_listeners(
+        session_id,
+        {
+            "type": "start",
+            "total": sess["total_pages"],
+            "model_provider": req.model_provider,
+            "model_name": req.model_name,
+        },
+    )
 
     pages = sess["pages"]
     target_pages = req.selected_pages if req.selected_pages is not None else list(range(len(pages)))
@@ -448,16 +524,19 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             for p in pages:
                 if p.get("status") == "processing":
                     p["status"] = "pending"
-            await notify_sse_listeners(session_id, {
-                "type": "cancelled",
-                "processed_count": sess["processed_count"],
-                "total": sess["total_pages"]
-            })
+            await notify_sse_listeners(
+                session_id,
+                {
+                    "type": "cancelled",
+                    "processed_count": sess["processed_count"],
+                    "total": sess["total_pages"],
+                },
+            )
             return
 
         if idx >= len(pages):
             continue
-        
+
         page_info = pages[idx]
         orig_path = page_info["original_path"]
         color_filename = page_info["filename"]
@@ -465,12 +544,16 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
 
         # Skip if page is already colorized and output file exists on disk,
         # UNLESS the caller explicitly requested a force recolorize.
-        if (not req.force_recolorize
-                and page_info.get("status") == "colorized"
-                and Path(output_path).exists()
-                and Path(output_path).stat().st_size > 0):
+        if (
+            not req.force_recolorize
+            and page_info.get("status") == "colorized"
+            and Path(output_path).exists()
+            and Path(output_path).stat().st_size > 0
+        ):
             if not page_info.get("colorized_url"):
-                page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+                page_info["colorized_url"] = (
+                    f"/api/session/{session_id}/image/colorized/{color_filename}"
+                )
             continue
 
         # When forcing recolorize, reset page status so the UI shows it as in-flight
@@ -480,37 +563,44 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
 
         # Fast pre-flight check: if page already has color and user wants to skip colored pages,
         # copy original immediately and NEVER show as "processing" in-flight
-        if req.skip_if_colored and colorizer_engine.is_colored_page(orig_path):
+        if req.skip_if_colored and is_colored_page(orig_path):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             shutil.copy2(orig_path, output_path)
             page_info["status"] = "colorized"
             page_info["skipped_colored"] = True
-            page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+            page_info["colorized_url"] = (
+                f"/api/session/{session_id}/image/colorized/{color_filename}"
+            )
             page_info["engine_used"] = "original (already colored)"
             sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
             save_session_meta(session_id)
 
-            await notify_sse_listeners(session_id, {
+            await notify_sse_listeners(
+                session_id,
+                {
+                    "type": "page_update",
+                    "page_index": idx,
+                    "status": "colorized",
+                    "skipped_colored": True,
+                    "colorized_url": page_info["colorized_url"],
+                    "engine": page_info["engine_used"],
+                    "processed_count": sess["processed_count"],
+                    "total": sess["total_pages"],
+                    "message": f"Page {idx + 1}: Preserved original color (skipped)",
+                },
+            )
+            continue
+        page_info["status"] = "processing"
+
+        await notify_sse_listeners(
+            session_id,
+            {
                 "type": "page_update",
                 "page_index": idx,
-                "status": "colorized",
-                "skipped_colored": True,
-                "colorized_url": page_info["colorized_url"],
-                "engine": page_info["engine_used"],
-                "processed_count": sess["processed_count"],
-                "total": sess["total_pages"],
-                "message": f"Page {idx + 1}: Preserved original color (skipped)"
-            })
-            continue
-
-        page_info["status"] = "processing"
-        
-        await notify_sse_listeners(session_id, {
-            "type": "page_update",
-            "page_index": idx,
-            "status": "processing",
-            "progress": f"{idx + 1}/{len(pages)}"
-        })
+                "status": "processing",
+                "progress": f"{idx + 1}/{len(pages)}",
+            },
+        )
 
         try:
             # Resolve palette for this session (if any characters are defined)
@@ -538,19 +628,26 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             if sess.get("cancel_requested"):
                 sess["status"] = "cancelled"
                 page_info["status"] = "colorized"
-                page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+                page_info["colorized_url"] = (
+                    f"/api/session/{session_id}/image/colorized/{color_filename}"
+                )
                 sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
-                await notify_sse_listeners(session_id, {
-                    "type": "cancelled",
-                    "processed_count": sess["processed_count"],
-                    "total": sess["total_pages"]
-                })
+                await notify_sse_listeners(
+                    session_id,
+                    {
+                        "type": "cancelled",
+                        "processed_count": sess["processed_count"],
+                        "total": sess["total_pages"],
+                    },
+                )
                 return
 
             # "skipped_colored" counts as colorized — output was copied as-is
             eff_status = "colorized"
             page_info["status"] = eff_status
-            page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+            page_info["colorized_url"] = (
+                f"/api/session/{session_id}/image/colorized/{color_filename}"
+            )
             page_info["engine_used"] = res.get("engine", req.model_provider)
             if res.get("status") == "skipped_colored":
                 page_info["skipped_colored"] = True
@@ -558,16 +655,19 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
             save_session_meta(session_id)
 
-            await notify_sse_listeners(session_id, {
-                "type": "page_update",
-                "page_index": idx,
-                "status": "colorized",
-                "skipped_colored": bool(page_info.get("skipped_colored")),
-                "colorized_url": page_info["colorized_url"],
-                "engine": page_info["engine_used"],
-                "processed_count": sess["processed_count"],
-                "total": sess["total_pages"]
-            })
+            await notify_sse_listeners(
+                session_id,
+                {
+                    "type": "page_update",
+                    "page_index": idx,
+                    "status": "colorized",
+                    "skipped_colored": bool(page_info.get("skipped_colored")),
+                    "colorized_url": page_info["colorized_url"],
+                    "engine": page_info["engine_used"],
+                    "processed_count": sess["processed_count"],
+                    "total": sess["total_pages"],
+                },
+            )
 
         except Exception as e:
             print(f"Error colorizing page {idx}: {e}")
@@ -575,20 +675,18 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             page_info["error_msg"] = str(e)
             save_session_meta(session_id)
 
-            await notify_sse_listeners(session_id, {
-                "type": "page_update",
-                "page_index": idx,
-                "status": "error",
-                "error": str(e)
-            })
+            await notify_sse_listeners(
+                session_id,
+                {"type": "page_update", "page_index": idx, "status": "error", "error": str(e)},
+            )
 
     sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
     sess["status"] = "completed"
     save_session_meta(session_id)
-    await notify_sse_listeners(session_id, {
-        "type": "completed",
-        "total_processed": sess["processed_count"]
-    })
+    await notify_sse_listeners(
+        session_id, {"type": "completed", "total_processed": sess["processed_count"]}
+    )
+
 
 @app.post("/api/colorize/start")
 async def start_colorization(req: ColorizeRequest):
@@ -603,10 +701,11 @@ async def start_colorization(req: ColorizeRequest):
     sess["cancel_requested"] = False
     sess["status"] = "processing"
     save_session_meta(session_id)
-    
+
     # Launch worker directly on main event loop using asyncio.create_task
     asyncio.create_task(_async_colorization_worker(session_id, req))
     return JSONResponse({"status": "started", "session_id": session_id})
+
 
 @app.post("/api/colorize/cancel/{session_id}")
 async def cancel_colorization(session_id: str):
@@ -623,13 +722,17 @@ async def cancel_colorization(session_id: str):
 
     save_session_meta(session_id)
 
-    await notify_sse_listeners(session_id, {
-        "type": "cancelled",
-        "processed_count": sess["processed_count"],
-        "total": sess["total_pages"]
-    })
+    await notify_sse_listeners(
+        session_id,
+        {
+            "type": "cancelled",
+            "processed_count": sess["processed_count"],
+            "total": sess["total_pages"],
+        },
+    )
 
     return JSONResponse({"status": "cancelled", "session_id": session_id})
+
 
 @app.post("/api/colorize/preview")
 async def preview_single_page(req: PreviewRequest):
@@ -645,7 +748,7 @@ async def preview_single_page(req: PreviewRequest):
     page_info = pages[req.page_index]
     orig_path = page_info["original_path"]
     color_filename = page_info["filename"]
-    
+
     session_dir = STORAGE_DIR / session_id
     colorized_dir = session_dir / "colorized"
     colorized_dir.mkdir(parents=True, exist_ok=True)
@@ -677,7 +780,6 @@ async def preview_single_page(req: PreviewRequest):
         if res.get("status") == "skipped_colored":
             page_info["skipped_colored"] = True
 
-
         # Update processed_count and status
         sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
         if sess["processed_count"] == sess.get("total_pages", len(pages)):
@@ -685,27 +787,33 @@ async def preview_single_page(req: PreviewRequest):
 
         save_session_meta(session_id)
 
-        await notify_sse_listeners(session_id, {
-            "type": "page_update",
-            "page_index": req.page_index,
-            "status": "colorized",
-            "colorized_url": page_info["colorized_url"],
-            "engine": page_info["engine_used"],
-            "processed_count": sess["processed_count"],
-            "total": sess.get("total_pages", len(pages))
-        })
+        await notify_sse_listeners(
+            session_id,
+            {
+                "type": "page_update",
+                "page_index": req.page_index,
+                "status": "colorized",
+                "colorized_url": page_info["colorized_url"],
+                "engine": page_info["engine_used"],
+                "processed_count": sess["processed_count"],
+                "total": sess.get("total_pages", len(pages)),
+            },
+        )
 
-        return JSONResponse({
-            "status": "success",
-            "page_index": req.page_index,
-            "colorized_url": page_info["colorized_url"],
-            "engine": page_info["engine_used"],
-            "page_info": page_info,
-            "processed_count": sess["processed_count"],
-            "total_pages": sess.get("total_pages", len(pages))
-        })
+        return JSONResponse(
+            {
+                "status": "success",
+                "page_index": req.page_index,
+                "colorized_url": page_info["colorized_url"],
+                "engine": page_info["engine_used"],
+                "page_info": page_info,
+                "processed_count": sess["processed_count"],
+                "total_pages": sess.get("total_pages", len(pages)),
+            }
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+
 
 @app.get("/api/palette/{session_id}")
 async def get_palette(session_id: str):
@@ -739,11 +847,9 @@ async def upsert_palette_character(req: PaletteUpsertRequest):
     palette.characters = [c for c in palette.characters if c.name.lower() != new_entry.name.lower()]
     palette.characters.append(new_entry)
 
-    return JSONResponse({
-        "status": "ok",
-        "session_id": req.session_id,
-        "palette": palette.to_dict()
-    })
+    return JSONResponse(
+        {"status": "ok", "session_id": req.session_id, "palette": palette.to_dict()}
+    )
 
 
 @app.delete("/api/palette/{session_id}/{character_name}")
@@ -758,12 +864,9 @@ async def delete_palette_character(session_id: str, character_name: str):
     palette.characters = [c for c in palette.characters if c.name.lower() != character_name.lower()]
     removed = before - len(palette.characters)
 
-    return JSONResponse({
-        "status": "ok",
-        "removed": removed,
-        "session_id": session_id,
-        "palette": palette.to_dict()
-    })
+    return JSONResponse(
+        {"status": "ok", "removed": removed, "session_id": session_id, "palette": palette.to_dict()}
+    )
 
 
 @app.delete("/api/palette/{session_id}")
@@ -804,22 +907,26 @@ async def export_batch_documents(req: BatchExportRequest):
     output_filepath = str(OUTPUT_DIR / f"batch_{out_filename}")
 
     try:
-        file_processor.build_batch_export(sessions_data, output_filepath, format_override=format_override)
+        file_processor.build_batch_export(
+            sessions_data, output_filepath, format_override=format_override
+        )
         download_url = f"/api/download/batch/{out_filename}"
-        return JSONResponse({
-            "status": "success",
-            "format": format_override,
-            "download_url": download_url,
-            "filename": out_filename,
-            "total_documents": len(sessions_data)
-        })
+        return JSONResponse(
+            {
+                "status": "success",
+                "format": format_override,
+                "download_url": download_url,
+                "filename": out_filename,
+                "total_documents": len(sessions_data),
+            }
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Batch export failed: {str(e)}")
 
 
 # ── Combined Export Background State ──────────────────────────────────
-COMBINED_EXPORTS: Dict[str, dict] = {}
-COMBINED_EXPORT_QUEUES: Dict[str, List[asyncio.Queue]] = {}
+COMBINED_EXPORTS: dict[str, dict] = {}
+COMBINED_EXPORT_QUEUES: dict[str, list[asyncio.Queue]] = {}
 
 
 async def notify_combined_sse(job_id: str, event_data: dict):
@@ -869,7 +976,7 @@ async def _async_combined_export_worker(
             grayscale=grayscale,
             colorsoft_tune=colorsoft_tune,
             progress_callback=on_progress,
-            cancel_check=check_cancelled
+            cancel_check=check_cancelled,
         )
 
         if job.get("cancel_requested"):
@@ -879,11 +986,10 @@ async def _async_combined_export_worker(
                     os.remove(output_filepath)
                 except Exception:
                     pass
-            await notify_combined_sse(job_id, {
-                "type": "cancelled",
-                "job_id": job_id,
-                "message": "Combined export cancelled."
-            })
+            await notify_combined_sse(
+                job_id,
+                {"type": "cancelled", "job_id": job_id, "message": "Combined export cancelled."},
+            )
             return
 
         job["status"] = "completed"
@@ -892,14 +998,17 @@ async def _async_combined_export_worker(
         job["progress"]["percent"] = 100
         download_url = f"/api/download/combined/{out_filename}"
         job["download_url"] = download_url
-        await notify_combined_sse(job_id, {
-            "type": "completed",
-            "job_id": job_id,
-            "download_url": download_url,
-            "filename": out_filename,
-            "total_volumes": len(sessions_data),
-            "title": title
-        })
+        await notify_combined_sse(
+            job_id,
+            {
+                "type": "completed",
+                "job_id": job_id,
+                "download_url": download_url,
+                "filename": out_filename,
+                "total_volumes": len(sessions_data),
+                "title": title,
+            },
+        )
 
     except InterruptedError:
         job["status"] = "cancelled"
@@ -908,11 +1017,9 @@ async def _async_combined_export_worker(
                 os.remove(output_filepath)
             except Exception:
                 pass
-        await notify_combined_sse(job_id, {
-            "type": "cancelled",
-            "job_id": job_id,
-            "message": "Combined export cancelled."
-        })
+        await notify_combined_sse(
+            job_id, {"type": "cancelled", "job_id": job_id, "message": "Combined export cancelled."}
+        )
     except Exception as e:
         print(f"[Combined Export Error] Job {job_id} failed: {e}")
         job["status"] = "error"
@@ -922,11 +1029,7 @@ async def _async_combined_export_worker(
                 os.remove(output_filepath)
             except Exception:
                 pass
-        await notify_combined_sse(job_id, {
-            "type": "error",
-            "job_id": job_id,
-            "error": str(e)
-        })
+        await notify_combined_sse(job_id, {"type": "error", "job_id": job_id, "error": str(e)})
 
 
 @app.post("/api/export/combined")
@@ -948,7 +1051,7 @@ async def export_combined_volume(req: CombinedExportRequest):
 
     # Fallback to all sessions in memory / on disk if none matched or none supplied
     if not sessions_data:
-        for sid, sess in list(SESSIONS.items()):
+        for sess in list(SESSIONS.values()):
             if sess and sess not in sessions_data:
                 sessions_data.append(sess)
         for d in sorted(STORAGE_DIR.iterdir()):
@@ -966,7 +1069,7 @@ async def export_combined_volume(req: CombinedExportRequest):
     # Naturally sort sessions by filename so volumes appear in correct reading order (v01, v02, ...)
     def _natural_volume_key(s):
         fn = s.get("filename", "").lower()
-        return [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', fn)]
+        return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", fn)]
 
     sessions_data.sort(key=_natural_volume_key)
 
@@ -976,25 +1079,28 @@ async def export_combined_volume(req: CombinedExportRequest):
         if free_bytes < 1024 * 1024 * 1024:
             raise HTTPException(
                 status_code=507,
-                detail=f"Low disk space: only {free_bytes // (1024*1024)} MB available. Free up disk space before exporting."
+                detail=f"Low disk space: only {free_bytes // (1024 * 1024)} MB available. Free up disk space before exporting.",
             )
     except HTTPException:
         raise
     except Exception:
         pass
 
-    fmt   = (req.format or "epub").lower().strip()
+    fmt = (req.format or "epub").lower().strip()
     title = (req.title or "Colorized Manga Collection").strip() or "Colorized Manga Collection"
-    clean_title = re.sub(r'[^a-zA-Z0-9_\- ]', '', title).strip().replace(' ', '_')
+    # Sanitize title for filename
+    clean_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", title).strip().replace(" ", "_")
     if not clean_title:
         clean_title = "manga_collection"
     token = str(uuid.uuid4())[:8]
-    n     = len(sessions_data)
+    n = len(sessions_data)
     total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
 
     chunk_by = (req.chunk_by or "none").lower().strip()
     chunk_size = req.chunk_size if (req.chunk_size is not None and req.chunk_size > 0) else 3
-    max_dim = req.max_dimension if (req.max_dimension is not None and req.max_dimension > 0) else None
+    max_dim = (
+        req.max_dimension if (req.max_dimension is not None and req.max_dimension > 0) else None
+    )
     jpeg_qual = req.jpeg_quality if (req.jpeg_quality is not None and req.jpeg_quality > 0) else 80
     is_gray = bool(req.grayscale)
     colorsoft_tune = bool(req.colorsoft_tune)
@@ -1035,17 +1141,19 @@ async def export_combined_volume(req: CombinedExportRequest):
                 max_dimension=max_dim,
                 jpeg_quality=jpeg_qual,
                 grayscale=is_gray,
-                colorsoft_tune=colorsoft_tune
+                colorsoft_tune=colorsoft_tune,
             )
-            return JSONResponse({
-                "status": "success",
-                "format": fmt,
-                "download_url": f"/api/download/combined/{out_filename}",
-                "filename": out_filename,
-                "total_volumes": n,
-                "title": title,
-                "is_omnibus": will_chunk
-            })
+            return JSONResponse(
+                {
+                    "status": "success",
+                    "format": fmt,
+                    "download_url": f"/api/download/combined/{out_filename}",
+                    "filename": out_filename,
+                    "total_volumes": n,
+                    "title": title,
+                    "is_omnibus": will_chunk,
+                }
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Combined export failed: {str(e)}")
 
@@ -1065,31 +1173,41 @@ async def export_combined_volume(req: CombinedExportRequest):
             "percent": 0,
             "processed_pages": 0,
             "total_pages": total_pages,
-            "status": "Starting export..."
-        }
+            "status": "Starting export...",
+        },
     }
     COMBINED_EXPORTS[job_id] = job_info
 
     asyncio.create_task(
         _async_combined_export_worker(
-            job_id, sessions_data, output_filepath, out_filename, fmt, title,
-            chunk_by=chunk_by, chunk_size=chunk_size,
-            max_dimension=max_dim, jpeg_quality=jpeg_qual, grayscale=is_gray,
-            colorsoft_tune=colorsoft_tune
+            job_id,
+            sessions_data,
+            output_filepath,
+            out_filename,
+            fmt,
+            title,
+            chunk_by=chunk_by,
+            chunk_size=chunk_size,
+            max_dimension=max_dim,
+            jpeg_quality=jpeg_qual,
+            grayscale=is_gray,
+            colorsoft_tune=colorsoft_tune,
         )
     )
 
-    return JSONResponse({
-        "status": "started",
-        "job_id": job_id,
-        "format": fmt,
-        "total_volumes": n,
-        "total_pages": total_pages,
-        "title": title,
-        "is_omnibus": will_chunk,
-        "stream_url": f"/api/export/combined/stream/{job_id}",
-        "cancel_url": f"/api/export/combined/cancel/{job_id}"
-    })
+    return JSONResponse(
+        {
+            "status": "started",
+            "job_id": job_id,
+            "format": fmt,
+            "total_volumes": n,
+            "total_pages": total_pages,
+            "title": title,
+            "is_omnibus": will_chunk,
+            "stream_url": f"/api/export/combined/stream/{job_id}",
+            "cancel_url": f"/api/export/combined/cancel/{job_id}",
+        }
+    )
 
 
 @app.get("/api/export/combined/stream/{job_id}")
@@ -1110,7 +1228,7 @@ async def stream_combined_export_progress(job_id: str):
                 "type": "init",
                 "job_id": job_id,
                 "status": job.get("status", "processing"),
-                "progress": job.get("progress", {})
+                "progress": job.get("progress", {}),
             }
             yield f"data: {json.dumps(init_data)}\n\n"
 
@@ -1148,11 +1266,14 @@ async def cancel_combined_export(job_id: str):
 
     job["cancel_requested"] = True
     job["status"] = "cancelled"
-    await notify_combined_sse(job_id, {
-        "type": "cancelled",
-        "job_id": job_id,
-        "message": "Combined export cancellation requested."
-    })
+    await notify_combined_sse(
+        job_id,
+        {
+            "type": "cancelled",
+            "job_id": job_id,
+            "message": "Combined export cancellation requested.",
+        },
+    )
     return JSONResponse({"status": "cancelled", "job_id": job_id})
 
 
@@ -1162,12 +1283,14 @@ async def get_combined_export_status(job_id: str):
     job = COMBINED_EXPORTS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Combined export job not found")
-    return JSONResponse({
-        "job_id": job_id,
-        "status": job.get("status"),
-        "progress": job.get("progress", {}),
-        "cancel_requested": job.get("cancel_requested", False)
-    })
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "progress": job.get("progress", {}),
+            "cancel_requested": job.get("cancel_requested", False),
+        }
+    )
 
 
 @app.get("/api/download/combined/{filename}")
@@ -1190,22 +1313,19 @@ async def download_combined_file(filename: str):
     else:
         media_type = "application/octet-stream"
     return FileResponse(
-        out_filepath,
-        filename=filename,
-        media_type=media_type,
-        headers={"Accept-Ranges": "bytes"}
+        out_filepath, filename=filename, media_type=media_type, headers={"Accept-Ranges": "bytes"}
     )
-
 
 
 @app.post("/api/export/{session_id}")
 async def export_document(session_id: str, format: Optional[str] = None):
     if session_id in ("combined", "batch"):
-        raise HTTPException(status_code=400, detail=f"'{session_id}' is a reserved route, not a session ID.")
+        raise HTTPException(
+            status_code=400, detail=f"'{session_id}' is a reserved route, not a session ID."
+        )
     sess = get_or_restore_session(session_id)
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
-
 
     ext = sess["ext"]
     original_path = sess["file_path"]
@@ -1262,17 +1382,23 @@ async def export_document(session_id: str, format: Optional[str] = None):
                 output_filepath = str(OUTPUT_DIR / f"{session_id}_{out_filename}")
                 file_processor.build_colorized_zip(pages_meta, session_id, output_filepath)
         else:
-            raise HTTPException(status_code=400, detail=f"Unsupported export format: {target_format}. Supported: pdf, epub, mobi, azw3, zip, image")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported export format: {target_format}. Supported: pdf, epub, mobi, azw3, zip, image",
+            )
 
         download_url = f"/api/download/{session_id}/{out_filename}"
-        return JSONResponse({
-            "status": "success",
-            "format": target_format,
-            "download_url": download_url,
-            "filename": out_filename
-        })
+        return JSONResponse(
+            {
+                "status": "success",
+                "format": target_format,
+                "download_url": download_url,
+                "filename": out_filename,
+            }
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
 
 @app.get("/api/download/{session_id}/{filename}")
 async def download_file(session_id: str, filename: str):
@@ -1293,11 +1419,8 @@ async def download_file(session_id: str, filename: str):
     }
     media_type = media_map.get(ext, "application/octet-stream")
 
-    return FileResponse(
-        out_filepath,
-        filename=filename,
-        media_type=media_type
-    )
+    return FileResponse(out_filepath, filename=filename, media_type=media_type)
+
 
 @app.get("/api/sessions")
 async def list_sessions(batch_id: Optional[str] = None):
@@ -1318,39 +1441,45 @@ async def list_sessions(batch_id: Optional[str] = None):
             if actual_count >= len(pages):
                 sess["status"] = "completed"
 
-        results.append({
-            "session_id": sess["session_id"],
-            "batch_id": sess.get("batch_id"),
-            "filename": sess["filename"],
-            "ext": sess.get("ext", ""),
-            "total_pages": sess.get("total_pages", 0),
-            "processed_count": sess.get("processed_count", 0),
-            "status": sess.get("status", "idle")
-        })
+        results.append(
+            {
+                "session_id": sess["session_id"],
+                "batch_id": sess.get("batch_id"),
+                "filename": sess["filename"],
+                "ext": sess.get("ext", ""),
+                "total_pages": sess.get("total_pages", 0),
+                "processed_count": sess.get("processed_count", 0),
+                "status": sess.get("status", "idle"),
+            }
+        )
 
     def _sort_key(s):
         fn = s.get("filename", "").lower()
-        parts = [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', fn)]
+        parts = [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", fn)]
         return parts
 
     results.sort(key=_sort_key)
     return JSONResponse({"sessions": results})
+
 
 @app.get("/api/colorize/batch/status")
 async def get_batch_status():
     """Returns current active batch colorization status."""
     return JSONResponse(CURRENT_BATCH)
 
+
 @app.post("/api/colorize/batch/start")
 async def start_batch_colorization(req: BatchColorizeRequest):
     """Starts sequential colorization for a batch of documents."""
     global CURRENT_BATCH
     if CURRENT_BATCH.get("is_running"):
-        return JSONResponse({
-            "status": "already_running",
-            "message": "Batch colorization is already running",
-            "batch": CURRENT_BATCH
-        })
+        return JSONResponse(
+            {
+                "status": "already_running",
+                "message": "Batch colorization is already running",
+                "batch": CURRENT_BATCH,
+            }
+        )
 
     valid_sessions = []
     for sid in req.session_ids:
@@ -1359,7 +1488,9 @@ async def start_batch_colorization(req: BatchColorizeRequest):
             valid_sessions.append(sid)
 
     if not valid_sessions:
-        raise HTTPException(status_code=404, detail="No valid sessions found for batch colorization")
+        raise HTTPException(
+            status_code=404, detail="No valid sessions found for batch colorization"
+        )
 
     CURRENT_BATCH = {
         "is_running": True,
@@ -1367,7 +1498,7 @@ async def start_batch_colorization(req: BatchColorizeRequest):
         "completed_docs": 0,
         "current_index": 0,
         "current_session_id": valid_sessions[0] if valid_sessions else None,
-        "session_ids": valid_sessions
+        "session_ids": valid_sessions,
     }
 
     async def _run_batch():
@@ -1386,8 +1517,10 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                 pages = sess.get("pages", [])
                 colorized_dir = STORAGE_DIR / sid / "colorized"
                 uncolorized = [
-                    p for p in pages
-                    if p.get("status") != "colorized" or not (colorized_dir / p.get("filename", "")).exists()
+                    p
+                    for p in pages
+                    if p.get("status") != "colorized"
+                    or not (colorized_dir / p.get("filename", "")).exists()
                 ]
 
                 if not uncolorized and len(pages) > 0:
@@ -1395,15 +1528,18 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     sess["processed_count"] = len(pages)
                     save_session_meta(sid)
                     CURRENT_BATCH["completed_docs"] += 1
-                    await notify_sse_listeners(sid, {
-                        "type": "completed",
-                        "total_processed": len(pages),
-                        "batch_info": {
-                            "current_doc_idx": idx + 1,
-                            "total_docs": len(valid_sessions),
-                            "completed_docs": CURRENT_BATCH["completed_docs"]
-                        }
-                    })
+                    await notify_sse_listeners(
+                        sid,
+                        {
+                            "type": "completed",
+                            "total_processed": len(pages),
+                            "batch_info": {
+                                "current_doc_idx": idx + 1,
+                                "total_docs": len(valid_sessions),
+                                "completed_docs": CURRENT_BATCH["completed_docs"],
+                            },
+                        },
+                    )
                     continue
 
                 single_req = ColorizeRequest(
@@ -1415,7 +1551,7 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     saturation=req.saturation,
                     contrast=req.contrast,
                     line_preserve=req.line_preserve,
-                    skip_if_colored=req.skip_if_colored
+                    skip_if_colored=req.skip_if_colored,
                 )
                 await _async_colorization_worker(sid, single_req)
                 CURRENT_BATCH["completed_docs"] += 1
@@ -1424,11 +1560,14 @@ async def start_batch_colorization(req: BatchColorizeRequest):
             CURRENT_BATCH["current_session_id"] = None
 
     asyncio.create_task(_run_batch())
-    return JSONResponse({
-        "status": "started",
-        "message": f"Batch colorization started for {len(valid_sessions)} documents",
-        "session_ids": valid_sessions
-    })
+    return JSONResponse(
+        {
+            "status": "started",
+            "message": f"Batch colorization started for {len(valid_sessions)} documents",
+            "session_ids": valid_sessions,
+        }
+    )
+
 
 def remove_single_session_artifacts(session_id: str) -> bool:
     """
@@ -1489,19 +1628,23 @@ async def delete_session(session_id: str):
             f.unlink(missing_ok=True)
         for out_f in OUTPUT_DIR.glob(f"{session_id}_*"):
             out_f.unlink(missing_ok=True)
-        return JSONResponse({
-            "status": "success",
-            "message": f"Document session {session_id} already deleted",
-            "deleted_session_id": session_id
-        })
+        return JSONResponse(
+            {
+                "status": "success",
+                "message": f"Document session {session_id} already deleted",
+                "deleted_session_id": session_id,
+            }
+        )
 
     remove_single_session_artifacts(session_id)
 
-    return JSONResponse({
-        "status": "success",
-        "message": f"Document session {session_id} deleted successfully",
-        "deleted_session_id": session_id
-    })
+    return JSONResponse(
+        {
+            "status": "success",
+            "message": f"Document session {session_id} deleted successfully",
+            "deleted_session_id": session_id,
+        }
+    )
 
 
 @app.post("/api/sessions/bulk-delete")
@@ -1514,7 +1657,7 @@ async def bulk_delete_sessions(req: BulkDeleteSessionsRequest):
     failed_ids = []
 
     if req.delete_all:
-        all_sids = set(list(SESSIONS.keys()))
+        all_sids = set(SESSIONS.keys())
         for d in STORAGE_DIR.iterdir():
             if d.is_dir():
                 all_sids.add(d.name)
@@ -1522,15 +1665,17 @@ async def bulk_delete_sessions(req: BulkDeleteSessionsRequest):
             try:
                 remove_single_session_artifacts(sid)
                 deleted_ids.append(sid)
-            except Exception as e:
+            except Exception:
                 failed_ids.append(sid)
-        return JSONResponse({
-            "status": "success",
-            "message": f"All {len(deleted_ids)} document sessions deleted successfully",
-            "deleted_session_ids": deleted_ids,
-            "failed_session_ids": failed_ids,
-            "count": len(deleted_ids)
-        })
+        return JSONResponse(
+            {
+                "status": "success",
+                "message": f"All {len(deleted_ids)} document sessions deleted successfully",
+                "deleted_session_ids": deleted_ids,
+                "failed_session_ids": failed_ids,
+                "count": len(deleted_ids),
+            }
+        )
 
     if not req.session_ids:
         raise HTTPException(status_code=400, detail="No session_ids provided for bulk deletion.")
@@ -1539,16 +1684,18 @@ async def bulk_delete_sessions(req: BulkDeleteSessionsRequest):
         try:
             remove_single_session_artifacts(sid)
             deleted_ids.append(sid)
-        except Exception as e:
+        except Exception:
             failed_ids.append(sid)
 
-    return JSONResponse({
-        "status": "success",
-        "message": f"Successfully deleted {len(deleted_ids)} document session(s)",
-        "deleted_session_ids": deleted_ids,
-        "failed_session_ids": failed_ids,
-        "count": len(deleted_ids)
-    })
+    return JSONResponse(
+        {
+            "status": "success",
+            "message": f"Successfully deleted {len(deleted_ids)} document session(s)",
+            "deleted_session_ids": deleted_ids,
+            "failed_session_ids": failed_ids,
+            "count": len(deleted_ids),
+        }
+    )
 
 
 @app.post("/api/test/cleanup")
@@ -1569,7 +1716,7 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
             if p.is_file():
                 return p.stat().st_size
             elif p.is_dir():
-                return sum(f.stat().st_size for f in p.rglob('*') if f.is_file())
+                return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
         except Exception:
             pass
         return 0
@@ -1579,12 +1726,12 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
     if session_ids:
         target_sids.update(session_ids)
     elif purge_all:
-        target_sids.update(list(SESSIONS.keys()))
+        target_sids.update(SESSIONS.keys())
         for d in STORAGE_DIR.iterdir():
             if d.is_dir():
                 target_sids.add(d.name)
     else:
-        all_sids = set(list(SESSIONS.keys()))
+        all_sids = set(SESSIONS.keys())
         for d in STORAGE_DIR.iterdir():
             if d.is_dir():
                 all_sids.add(d.name)
@@ -1641,7 +1788,9 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
                 should_delete = True
             else:
                 prefix = f.name.split("_")[0]
-                if prefix not in active_sids and (f.name.startswith("combined_") or f.name.startswith("batch_")):
+                if prefix not in active_sids and (
+                    f.name.startswith("combined_") or f.name.startswith("batch_")
+                ):
                     should_delete = True
 
             if should_delete:
@@ -1666,14 +1815,16 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
                 freed_bytes += calc_size(f)
                 f.unlink(missing_ok=True)
 
-    return JSONResponse({
-        "status": "success",
-        "cleaned_sessions_count": len(cleaned_sids),
-        "cleaned_sessions": cleaned_sids,
-        "cleaned_output_files": cleaned_output_files,
-        "freed_bytes": freed_bytes,
-        "freed_mb": round(freed_bytes / (1024 * 1024), 2)
-    })
+    return JSONResponse(
+        {
+            "status": "success",
+            "cleaned_sessions_count": len(cleaned_sids),
+            "cleaned_sessions": cleaned_sids,
+            "cleaned_output_files": cleaned_output_files,
+            "freed_bytes": freed_bytes,
+            "freed_mb": round(freed_bytes / (1024 * 1024), 2),
+        }
+    )
 
 
 @app.delete("/api/session/{session_id}/page/{page_index}")
@@ -1685,7 +1836,9 @@ async def delete_session_page(session_id: str, page_index: int):
 
     pages = sess.get("pages", [])
     if page_index < 0 or page_index >= len(pages):
-        raise HTTPException(status_code=400, detail=f"Invalid page index: {page_index}. Total pages: {len(pages)}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid page index: {page_index}. Total pages: {len(pages)}"
+        )
 
     del_page = pages.pop(page_index)
 
@@ -1721,17 +1874,20 @@ async def delete_session_page(session_id: str, page_index: int):
 
     save_session_meta(session_id)
 
-    return JSONResponse({
-        "status": "success",
-        "message": "Page deleted successfully",
-        "total_pages": sess["total_pages"],
-        "session": sess
-    })
+    return JSONResponse(
+        {
+            "status": "success",
+            "message": "Page deleted successfully",
+            "total_pages": sess["total_pages"],
+            "session": sess,
+        }
+    )
+
 
 @app.delete("/api/sessions")
 async def delete_all_sessions(
     req: Optional[BulkDeleteSessionsRequest] = Body(None),
-    session_ids: Optional[str] = Query(None, description="Comma-separated session IDs to delete")
+    session_ids: Optional[str] = Query(None, description="Comma-separated session IDs to delete"),
 ):
     """
     Deletes all document sessions, uploads, and outputs, OR bulk deletes specified sessions
@@ -1752,13 +1908,15 @@ async def delete_all_sessions(
                 deleted_ids.append(sid)
             except Exception:
                 failed_ids.append(sid)
-        return JSONResponse({
-            "status": "success",
-            "message": f"Successfully deleted {len(deleted_ids)} document session(s)",
-            "deleted_session_ids": deleted_ids,
-            "failed_session_ids": failed_ids,
-            "count": len(deleted_ids)
-        })
+        return JSONResponse(
+            {
+                "status": "success",
+                "message": f"Successfully deleted {len(deleted_ids)} document session(s)",
+                "deleted_session_ids": deleted_ids,
+                "failed_session_ids": failed_ids,
+                "count": len(deleted_ids),
+            }
+        )
 
     # Default fallback: delete all sessions
     for sess in SESSIONS.values():
@@ -1790,10 +1948,10 @@ async def delete_all_sessions(
 
     SESSIONS.clear()
 
-    return JSONResponse({
-        "status": "success",
-        "message": "All document sessions and files deleted successfully"
-    })
+    return JSONResponse(
+        {"status": "success", "message": "All document sessions and files deleted successfully"}
+    )
+
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def get_favicon():
@@ -1802,5 +1960,63 @@ async def get_favicon():
         return FileResponse(favicon_path, media_type="image/x-icon")
     return JSONResponse(status_code=404, content={"detail": "Favicon not found"})
 
+
 # Serve Frontend static assets
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+
+if __name__ == "__main__":
+    import argparse
+    import socket
+    import threading
+    import time
+    import webbrowser
+
+    parser = argparse.ArgumentParser(description="🎨 Kobean Manga Colorizer Web Studio")
+    parser.add_argument("--host", default="127.0.0.1", help="Host IP to bind (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
+    parser.add_argument("--reload", action="store_true", help="Enable live code reloading")
+    parser.add_argument(
+        "--no-open", action="store_true", help="Do not automatically open browser on launch"
+    )
+    args = parser.parse_args()
+
+    def is_port_busy(port: int, host: str = "127.0.0.1") -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((host, port)) == 0
+
+    if is_port_busy(args.port, args.host):
+        print(f"\n⚠️  [Notice] Port {args.port} is already busy on {args.host}.")
+        print(f"👉 Studio might already be running: http://{args.host}:{args.port}")
+        print(f"👉 To terminate any old process: lsof -ti :{args.port} | xargs kill -9\n")
+
+    if not args.no_open:
+
+        def _launch_browser(host: str, port: int):
+            url = f"http://{host}:{port}"
+            for _ in range(40):
+                time.sleep(0.25)
+                if is_port_busy(port, host):
+                    try:
+                        webbrowser.open(url)
+                    except Exception:
+                        pass
+                    break
+
+        threading.Thread(target=_launch_browser, args=(args.host, args.port), daemon=True).start()
+
+    banner = f"""
+╔═══════════════════════════════════════════════════════════════╗
+║               🎨  Kobean Manga Colorizer Studio               ║
+╠═══════════════════════════════════════════════════════════════╣
+║  🌐 Studio URL:    http://{args.host}:{args.port:<5}                             ║
+║  ⚡ Hardware:      Apple Silicon MPS / CUDA / CPU             ║
+║  📂 Workspace:     {str(BASE_DIR):<42} ║
+║  🛑 Stop Studio:   Press CTRL + C                             ║
+╚═══════════════════════════════════════════════════════════════╝
+"""
+    print(banner)
+
+    import uvicorn
+
+    uvicorn.run("main:app", host=args.host, port=args.port, reload=args.reload)

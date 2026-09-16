@@ -9,6 +9,7 @@ let currentPreviewPageIndex = 0;
 let isBatchColorizing = false;
 let batchQueuePoller = null;
 let selectedPages = new Set();
+let exportBannerDismissed = false;
 let historyData = [];
 let currentHistoryFilter = "all";
 let currentHistorySearch = "";
@@ -341,6 +342,7 @@ function startBatchQueuePoller() {
             if (btnStart) btnStart.disabled = false;
             const btnBatch = document.getElementById("btn-start-batch-colorize");
             if (btnBatch) btnBatch.disabled = false;
+            exportBannerDismissed = false;
             const expCard = document.getElementById("export-card");
             if (expCard) expCard.classList.remove("hidden");
             const sidebarExportCard = document.getElementById("sidebar-export-card");
@@ -908,12 +910,9 @@ function renderDashboard() {
   document.getElementById("doc-filename").innerText = currentSession.filename;
   document.getElementById("doc-total-pages").innerText = currentSession.total_pages;
 
-  // Initialize all pages as selected when opening or switching documents
-  if (currentSession.pages) {
-    selectedPages = new Set(currentSession.pages.map((_, i) => i));
-  } else {
-    selectedPages = new Set();
-  }
+  // Default to none selected as requested
+  selectedPages = new Set();
+  exportBannerDismissed = false;
 
   const iconBox = document.getElementById("file-type-icon");
   const fn = currentSession.filename.toLowerCase();
@@ -954,7 +953,7 @@ function updateColorizedCount() {
   const exportCard = document.getElementById("export-card");
   const sidebarExportCard = document.getElementById("sidebar-export-card");
   if (colorizedCount > 0 || (currentSession && currentSession.status === "completed")) {
-    if (exportCard) exportCard.classList.remove("hidden");
+    if (exportCard && !exportBannerDismissed) exportCard.classList.remove("hidden");
     if (sidebarExportCard) sidebarExportCard.classList.remove("hidden");
   } else {
     if (exportCard) exportCard.classList.add("hidden");
@@ -981,6 +980,14 @@ function updateColorizedCount() {
       }
       renderDocumentQueue();
     }
+  }
+}
+
+function closeExportBanner() {
+  exportBannerDismissed = true;
+  const exportCard = document.getElementById("export-card");
+  if (exportCard) {
+    exportCard.classList.add("hidden");
   }
 }
 
@@ -1104,9 +1111,25 @@ function updateSelectionUI() {
     if (count === total && total > 0) {
       selectedTextElem.innerText = `All (${total}) Selected`;
     } else if (count === 0) {
-      selectedTextElem.innerText = `0 Selected`;
+      selectedTextElem.innerText = `Select All`;
     } else {
       selectedTextElem.innerText = `${count} of ${total} Selected`;
+    }
+  }
+
+  // Update Recolorize Selected button state dynamically
+  const btnRecolorizeSelected = document.getElementById("btn-recolorize-selected");
+  if (btnRecolorizeSelected) {
+    if (count === 0) {
+      btnRecolorizeSelected.disabled = true;
+      btnRecolorizeSelected.title = "Select one or more pages to recolorize";
+      btnRecolorizeSelected.style.opacity = "0.55";
+      btnRecolorizeSelected.style.cursor = "not-allowed";
+    } else {
+      btnRecolorizeSelected.disabled = false;
+      btnRecolorizeSelected.title = `Recolorize ${count} selected page(s)`;
+      btnRecolorizeSelected.style.opacity = "1";
+      btnRecolorizeSelected.style.cursor = "pointer";
     }
   }
 

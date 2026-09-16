@@ -1,14 +1,11 @@
-import io
-import os
 import shutil
 import uuid
-import pytest
+
 import requests
-from pathlib import Path
 from PIL import Image
 
 from colorizer_engine import is_colored_page
-from main import app, SESSIONS, STORAGE_DIR, UPLOAD_DIR, get_or_restore_session
+from main import SESSIONS, STORAGE_DIR
 
 BASE_URL = "http://127.0.0.1:8000"
 
@@ -66,32 +63,37 @@ def test_skip_if_colored_endpoint(tmp_path):
                 "display_name": "Page 1",
                 "filename": "page_0001.jpg",
                 "original_path": str(p1_path),
-                "status": "pending"
+                "status": "pending",
             },
             {
                 "page_index": 1,
                 "display_name": "Page 2",
                 "filename": "page_0002.jpg",
                 "original_path": str(p2_path),
-                "status": "pending"
-            }
-        ]
+                "status": "pending",
+            },
+        ],
     }
     SESSIONS[session_id] = sess
     import json
+
     with open(sess_dir / "meta.json", "w") as f:
         json.dump(sess, f)
 
     try:
-        resp = requests.post(f"{BASE_URL}/api/colorize/start", json={
-            "session_id": session_id,
-            "model_provider": "local_smart",
-            "skip_if_colored": True
-        })
+        resp = requests.post(
+            f"{BASE_URL}/api/colorize/start",
+            json={
+                "session_id": session_id,
+                "model_provider": "local_smart",
+                "skip_if_colored": True,
+            },
+        )
         assert resp.status_code == 200
 
         # Wait for processing to complete
         import time
+
         for _ in range(50):
             time.sleep(0.2)
             r = requests.get(f"{BASE_URL}/api/session/{session_id}")
@@ -144,24 +146,29 @@ def test_batch_colorization_respects_skip_if_colored():
                 "display_name": "Page 1",
                 "filename": "page_0001.jpg",
                 "original_path": str(p1_path),
-                "status": "pending"
+                "status": "pending",
             }
-        ]
+        ],
     }
     SESSIONS[session_id] = sess
     import json
+
     with open(sess_dir / "meta.json", "w") as f:
         json.dump(sess, f)
 
     try:
-        resp = requests.post(f"{BASE_URL}/api/colorize/batch/start", json={
-            "session_ids": [session_id],
-            "model_provider": "local_smart",
-            "skip_if_colored": True
-        })
+        resp = requests.post(
+            f"{BASE_URL}/api/colorize/batch/start",
+            json={
+                "session_ids": [session_id],
+                "model_provider": "local_smart",
+                "skip_if_colored": True,
+            },
+        )
         assert resp.status_code == 200
 
         import time
+
         for _ in range(50):
             time.sleep(0.2)
             r = requests.get(f"{BASE_URL}/api/session/{session_id}")

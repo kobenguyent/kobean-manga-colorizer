@@ -11,8 +11,9 @@ version 3 of the License, or (at your option) any later
 version. You should have received a copy of this license along
 this program. If not, see <http://www.gnu.org/licenses/>.
 """
-import numpy as np
+
 import cv2
+import numpy as np
 
 
 def variable_to_cv2_image(varim):
@@ -23,18 +24,19 @@ def variable_to_cv2_image(varim):
     """
     nchannels = varim.size()[1]
     if nchannels == 1:
-        res = (varim.data.cpu().numpy()[0, 0, :]*255.).clip(0, 255).astype(np.uint8)
+        res = (varim.data.cpu().numpy()[0, 0, :] * 255.0).clip(0, 255).astype(np.uint8)
     elif nchannels == 3:
         res = varim.data.cpu().numpy()[0]
         res = cv2.cvtColor(res.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
-        res = (res*255.).clip(0, 255).astype(np.uint8)
+        res = (res * 255.0).clip(0, 255).astype(np.uint8)
     else:
-        raise Exception('Number of color channels not supported')
+        raise Exception("Number of color channels not supported")
     return res
 
 
 def normalize(data):
-    return np.float32(data/255.)
+    return np.float32(data / 255.0)
+
 
 def remove_dataparallel_wrapper(state_dict):
     r"""Converts a DataParallel model to a normal one by removing the "module."
@@ -47,20 +49,21 @@ def remove_dataparallel_wrapper(state_dict):
 
     new_state_dict = OrderedDict()
     for k, vl in state_dict.items():
-        name = k[7:] # remove 'module.' of DataParallel
+        name = k[7:]  # remove 'module.' of DataParallel
         new_state_dict[name] = vl
 
     return new_state_dict
 
+
 def is_rgb(im_path):
-    r""" Returns True if the image in im_path is an RGB image
-    """
+    r"""Returns True if the image in im_path is an RGB image"""
     from skimage.io import imread
+
     rgb = False
     im = imread(im_path)
-    if (len(im.shape) == 3):
-        if not(np.allclose(im[...,0], im[...,1]) and np.allclose(im[...,2], im[...,1])):
+    if len(im.shape) == 3:
+        if not (np.allclose(im[..., 0], im[..., 1]) and np.allclose(im[..., 2], im[..., 1])):
             rgb = True
-    print("rgb: {}".format(rgb))
-    print("im shape: {}".format(im.shape))
+    print(f"rgb: {rgb}")
+    print(f"im shape: {im.shape}")
     return rgb

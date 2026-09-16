@@ -89,24 +89,22 @@ Manga pages rendered as uncompressed PNGs can quickly consume 3–4 GB per volum
 ## 🚀 Quickstart
 
 ### 1. Prerequisites
-- **Python 3.9+** (Python 3.9–3.11 recommended)
-- **Git**
+- **Python 3.9+**
+- **uv** (Recommended: `curl -LsSf https://astral.sh/uv/install.sh | sh` or `brew install uv`)
 - *(Optional)* Apple Silicon Mac (M-series) or NVIDIA GPU for hardware-accelerated inference.
 
-### 2. Installation
+### 2. Instant Setup with `kobean`
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/kobet/kobean-manga-colorizer.git
 cd kobean-manga-colorizer
 
-# 2. Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
+# 2. One-command UV environment & alias setup
+./kobean setup
 ```
+
+This automatically synchronizes the `.venv` via `uv sync`, verifies model weights, and installs the global `kobean` CLI alias.
 
 ### 3. Model Weights (`generator.zip`)
 
@@ -125,10 +123,28 @@ ls -lh networks/generator.zip
 
 ### 4. Run the Studio
 
+Launch the studio with the **`kobean` command**:
+
 ```bash
-# Launch the FastAPI backend & Web Studio
-python3 -m uvicorn main:app --host 127.0.0.1 --port 8000
+# Launch studio (auto-resolves ports & launches browser)
+kobean run app
+
+# Or launch with live auto-reload (development mode)
+kobean run app --reload
+
+# Or check system & acceleration status
+kobean status
 ```
+
+> [!TIP]
+> - **All CLI Commands**:
+>   - `kobean run app` — Launch web studio
+>   - `kobean setup` — Install/sync UV dependencies
+>   - `kobean test` — Run unit and regression tests
+>   - `kobean lint` — Audit PEP 8 compliance via Ruff
+>   - `kobean format` — Auto-format code to strict PEP 8
+>   - `kobean status` — Hardware, port & disk stats
+> - **Direct script fallback**: `./run.sh` or `python3 main.py` or `make run`
 
 Open your browser at **[http://127.0.0.1:8000](http://127.0.0.1:8000)**.
 

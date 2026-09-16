@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# 🎨 Kobean Manga Colorizer - Unified Command-Line Interface (CLI)
+# ==============================================================================
+# Examples:
+#   kobean run app            # Launch studio & open browser
+#   kobean run app --reload   # Launch studio with live auto-reload
+#   kobean setup              # One-command dependency & environment setup
+#   kobean test               # Run automated unit & regression test suite
+#   kobean lint               # Run PEP 8 linter (Ruff)
+#   kobean format             # Automatically format code to PEP 8
+#   kobean status             # View hardware, acceleration, and port status
+#   kobean clean              # Clean sessions, uploads, and output caches
+# ==============================================================================
+
+set -e
+
+# Resolve repository directory even through symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+cd "$REPO_DIR"
+
+# ANSI Color Palette
+BOLD='\033[1m'
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+MAGENTA='\033[0;35m'
+BLUE='\033[0;34m'
+RESET='\033[0m'
+
+# Banner
+print_banner() {
+  echo -e "${CYAN}${BOLD}"
+  echo "  ╔═══════════════════════════════════════════════════════════════╗"
+  echo "  ║               🎨  Kobean Manga Colorizer Studio               ║"
+  echo "  ╠═══════════════════════════════════════════════════════════════╣"
+  echo "  ║  Unified CLI: kobean run app | kobean setup | kobean test     ║"
+  echo "  ╚═══════════════════════════════════════════════════════════════╝"
+  echo -e "${RESET}"
+}
+
+# Help message
+show_help() {
+  print_banner
+  echo -e "${BOLD}Usage:${RESET} kobean <command> [options]"
+  echo ""
+  echo -e "${BOLD}Available Commands:${RESET}"
+  echo -e "  ${GREEN}run app${RESET} [flags]      Launch the Web Studio (auto-opens browser)"
+  echo -e "  ${GREEN}setup${RESET}                Install dependencies via UV & setup environment"
+  echo -e "  ${GREEN}test${RESET}                 Run the full automated test suite"
+  echo -e "  ${GREEN}lint${RESET}                 Audit code for PEP 8 compliance using Ruff"
+  echo -e "  ${GREEN}format${RESET}               Auto-format codebase to strict PEP 8 standards"
+  echo -e "  ${GREEN}status${RESET}               Display hardware acceleration, ports & disk stats"
+  echo -e "  ${GREEN}clean${RESET}                Clear temporary session, upload, and export files"
+  echo -e "  ${GREEN}hook${RESET} [run|install]   Manage and verify Git & Agent PEP 8 pre-commit hooks"
+  echo -e "  ${GREEN}alias${RESET}                Install global 'kobean' alias into ~/.zshrc"
+  echo ""
+  echo -e "${BOLD}Flags for 'run app':${RESET}"
+  echo -e "  ${CYAN}--reload, -r${RESET}         Enable live code reloading (development mode)"
+  echo -e "  ${CYAN}--port <PORT>, -p${RESET}    Specify custom port (default: 8000)"
+  echo -e "  ${CYAN}--no-open${RESET}            Do not automatically launch web browser"
+  echo -e "  ${CYAN}--kill, -k${RESET}           Force-terminate any process occupying the port"
+  echo ""
+  echo -e "${BOLD}Examples:${RESET}"
+  echo "  kobean run app"
+  echo "  kobean run app --reload"
+  echo "  kobean setup"
+  echo "  kobean test"
+  echo "  kobean hook run"
+  echo ""
+}
+
+# Subcommand: setup
+cmd_setup() {
+  print_banner
+  echo -e "${BOLD}${BLUE}==> [1/5] Checking UV Package Manager...${RESET}"
+  if ! command -v uv >/dev/null 2>&1; then
+    echo -e "${YELLOW}UV is not installed. Installing via official Astral installer...${RESET}"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+  echo -e "${GREEN}✓ UV version: $(uv --version)${RESET}"
+
+  echo -e "\n${BOLD}${BLUE}==> [2/5] Syncing Python dependencies (including dev tools)...${RESET}"
+  uv sync --extra dev
+  echo -e "${GREEN}✓ Dependencies synchronized successfully in .venv!${RESET}"
+
+  echo -e "\n${BOLD}${BLUE}==> [3/5] Verifying Neural Model Weights...${RESET}"
+  if [ -f "networks/generator.zip" ]; then
+    echo -e "${GREEN}✓ Generator weights found: networks/generator.zip ($(du -h networks/generator.zip | awk '{print $1}'))${RESET}"
+  else
+    echo -e "${YELLOW}⚠️  Notice: networks/generator.zip not found.${RESET}"
+    echo "👉 You can download it from Google Drive: https://drive.google.com/file/d/1aIXUL1YHytRfkucujtfCPKpKyDwD_cpk/view?usp=sharing"
+    echo "👉 Place the file at: networks/generator.zip"
+  fi
+
+  echo -e "\n${BOLD}${BLUE}==> [4/5] Installing global 'kobean' CLI launcher...${RESET}"
+  cmd_alias_install silent
+
+  echo -e "\n${BOLD}${BLUE}==> [5/5] Activating Git and Agent PEP 8 hooks...${RESET}"
+  chmod +x .git/hooks/pre-commit .agents/hooks/check_ruff.sh 2>/dev/null || true
+  echo -e "${GREEN}✓ Git pre-commit and agent lifecycle hooks active!${RESET}"
+
+  echo -e "\n${GREEN}${BOLD}🎉 Kobean Studio Setup Complete!${RESET}"
+  echo -e "Launch the app anytime with: ${CYAN}kobean run app${RESET}\n"
+}
+
+# Subcommand: run app
+cmd_run() {
+  shift # remove 'run'
+  if [ "$1" == "app" ]; then
+    shift # remove 'app'
+  fi
+  ./run.sh "$@"
+}
+
+# Subcommand: test
+cmd_test() {
+  print_banner
+  echo -e "${BOLD}${BLUE}==> Running automated test suite...${RESET}\n"
+  if [ $# -gt 0 ]; then
+    uv run python -m unittest "$@"
+  else
+    uv run python -m unittest discover tests
+  fi
+}
+
+# Subcommand: lint
+cmd_lint() {
+  print_banner
+  echo -e "${BOLD}${BLUE}==> Auditing codebase for PEP 8 compliance...${RESET}\n"
+  uv run ruff check . "$@"
+}
+
+# Subcommand: format
+cmd_format() {
+  print_banner
+  echo -e "${BOLD}${BLUE}==> Formatting codebase to PEP 8 standards...${RESET}\n"
+  uv run ruff format . "$@"
+}
+
+# Subcommand: status
+cmd_status() {
+  print_banner
+  echo -e "${BOLD}System & Studio Status:${RESET}"
+  echo -e "  📁 Repo Directory:  $REPO_DIR"
+  echo -e "  🐍 Python Target:   $(uv run python --version 2>/dev/null || python3 --version)"
+  echo -e "  ⚡ UV Version:      $(uv --version 2>/dev/null || echo 'Not found')"
+
+  # Hardware acceleration
+  HW_STATUS=$(uv run python -c "
+import torch
+if torch.backends.mps.is_available():
+    print('Apple Silicon MPS ✅ (Active)')
+elif torch.cuda.is_available():
+    print(f'NVIDIA CUDA ✅ ({torch.cuda.get_device_name(0)})')
+else:
+    print('CPU Mode (Active)')
+" 2>/dev/null || echo "Unknown")
+  echo -e "  🧠 Hardware Engine: ${GREEN}$HW_STATUS${RESET}"
+
+  # Check Port 8000
+  PORT_PID=$(lsof -nP -iTCP:8000 -sTCP:LISTEN -t 2>/dev/null || true)
+  if [ -n "$PORT_PID" ]; then
+    echo -e "  🌐 Port 8000:       ${GREEN}In use (Studio running, PID: $PORT_PID)${RESET}"
+    echo -e "                      URL: http://127.0.0.1:8000"
+  else
+    echo -e "  🌐 Port 8000:       ${CYAN}Available (Ready to launch)${RESET}"
+  fi
+
+  # Disk stats
+  echo ""
+  echo -e "${BOLD}Storage Statistics:${RESET}"
+  for dir in sessions uploads output; do
+    if [ -d "$dir" ]; then
+      SZ=$(du -sh "$dir" 2>/dev/null | awk '{print $1}')
+      COUNT=$(find "$dir" -maxdepth 1 | wc -l | tr -d ' ')
+      echo -e "  📂 $dir/: ${SZ} ($((COUNT - 1)) items)"
+    fi
+  done
+  echo ""
+}
+
+# Subcommand: clean
+cmd_clean() {
+  print_banner
+  echo -e "${YELLOW}Cleaning temporary studio files (uploads, sessions, outputs)...${RESET}"
+  rm -rf uploads/* sessions/* output/*
+  echo -e "${GREEN}✓ Cleaned storage directories.${RESET}"
+}
+
+# Subcommand: alias install
+cmd_alias_install() {
+  SILENT="$1"
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$REPO_DIR/kobean" "$HOME/.local/bin/kobean"
+
+  # Ensure alias in ~/.zshrc
+  ZSHRC="$HOME/.zshrc"
+  if [ -f "$ZSHRC" ]; then
+    if ! grep -q "alias kobean=" "$ZSHRC"; then
+      echo "" >> "$ZSHRC"
+      echo "# Kobean Manga Colorizer CLI" >> "$ZSHRC"
+      echo "alias kobean=\"$HOME/.local/bin/kobean\"" >> "$ZSHRC"
+    fi
+  fi
+
+  if [ "$SILENT" != "silent" ]; then
+    echo -e "${GREEN}✓ 'kobean' installed to $HOME/.local/bin/kobean and registered in ~/.zshrc!${RESET}"
+    echo -e "You can now run: ${CYAN}kobean run app${RESET} from anywhere."
+  fi
+}
+
+# Subcommand: hook management
+cmd_hook() {
+  ACTION="$1"
+  case "$ACTION" in
+    run|test)
+      print_banner
+      echo -e "${BOLD}${BLUE}==> Executing pre-commit PEP 8 & Ruff check...${RESET}\n"
+      .git/hooks/pre-commit
+      ;;
+    install|*)
+      print_banner
+      echo -e "${BOLD}${BLUE}==> Installing Git Pre-Commit Hook & Agent Lifecycle Hooks...${RESET}\n"
+      chmod +x .git/hooks/pre-commit .agents/hooks/check_ruff.sh 2>/dev/null || true
+      echo -e "${GREEN}✓ Git pre-commit hook active (.git/hooks/pre-commit)${RESET}"
+      echo -e "${GREEN}✓ Agent post-edit hook active (.agents/hooks.json)${RESET}"
+      echo -e "PEP 8 & Ruff conventions will now be automatically checked on every commit and agent edit!"
+      ;;
+  esac
+}
+
+# Main Command Dispatcher
+COMMAND="$1"
+
+case "$COMMAND" in
+  run|app|start)
+    cmd_run "$@"
+    ;;
+  setup)
+    cmd_setup
+    ;;
+  test)
+    shift
+    cmd_test "$@"
+    ;;
+  lint)
+    shift
+    cmd_lint "$@"
+    ;;
+  format)
+    shift
+    cmd_format "$@"
+    ;;
+  status)
+    cmd_status
+    ;;
+  clean)
+    cmd_clean
+    ;;
+  hook)
+    shift
+    cmd_hook "$@"
+    ;;
+  alias)
+    cmd_alias_install
+    ;;
+  -h|--help|help|"")
+    show_help
+    ;;
+  *)
+    echo -e "${RED}Unknown command: $COMMAND${RESET}\n"
+    show_help
+    exit 1
+    ;;
+esac

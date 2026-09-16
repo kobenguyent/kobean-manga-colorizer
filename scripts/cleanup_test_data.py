@@ -11,12 +11,11 @@ Usage:
   python scripts/cleanup_test_data.py --all         # Clean ALL sessions & outputs (full reset)
 """
 
-import os
-import sys
-import json
-import glob
-import shutil
 import argparse
+import glob
+import json
+import os
+import shutil
 from pathlib import Path
 
 try:
@@ -31,8 +30,16 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 TEST_KEYWORDS = [
-    "test", "sample", "cancel", "switch", "kindle_test", "batch_test",
-    "preview_manga", "exp_page", "test_export", "test_vol"
+    "test",
+    "sample",
+    "cancel",
+    "switch",
+    "kindle_test",
+    "batch_test",
+    "preview_manga",
+    "exp_page",
+    "test_export",
+    "test_vol",
 ]
 
 TMP_TEST_PATTERNS = [
@@ -49,16 +56,16 @@ TMP_TEST_PATTERNS = [
     "/tmp/kindle_test*",
     "/tmp/test_export*",
     "/tmp/single_image_test*",
-    "/tmp/progress_test*"
+    "/tmp/progress_test*",
 ]
 
 
 def format_bytes(size_bytes: int) -> str:
     """Formats bytes into human readable string."""
-    if size_bytes >= 1024 ** 3:
-        return f"{size_bytes / (1024 ** 3):.2f} GB"
-    elif size_bytes >= 1024 ** 2:
-        return f"{size_bytes / (1024 ** 2):.2f} MB"
+    if size_bytes >= 1024**3:
+        return f"{size_bytes / (1024**3):.2f} GB"
+    elif size_bytes >= 1024**2:
+        return f"{size_bytes / (1024**2):.2f} MB"
     elif size_bytes >= 1024:
         return f"{size_bytes / 1024:.2f} KB"
     return f"{size_bytes} B"
@@ -70,7 +77,7 @@ def get_path_size(path: Path) -> int:
         if path.is_file() or path.is_symlink():
             return path.stat().st_size
         elif path.is_dir():
-            return sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+            return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
     except Exception:
         pass
     return 0
@@ -84,7 +91,7 @@ def cleanup_via_api(purge_all: bool = False, session_ids: list = None) -> dict:
         resp = requests.post(
             f"{BASE_URL}/api/test/cleanup",
             json={"purge_all": purge_all, "session_ids": session_ids, "clean_orphans": True},
-            timeout=10
+            timeout=10,
         )
         if resp.status_code == 200:
             return resp.json()
@@ -93,7 +100,9 @@ def cleanup_via_api(purge_all: bool = False, session_ids: list = None) -> dict:
     return None
 
 
-def run_cleanup(purge_all: bool = False, keep_slump: bool = True, clean_tmp: bool = True, dry_run: bool = False) -> dict:
+def run_cleanup(
+    purge_all: bool = False, keep_slump: bool = True, clean_tmp: bool = True, dry_run: bool = False
+) -> dict:
     """Main cleanup routine."""
     total_freed = 0
     deleted_sessions = []
@@ -123,14 +132,14 @@ def run_cleanup(purge_all: bool = False, keep_slump: bool = True, clean_tmp: boo
             title = ""
             if meta_file.exists():
                 try:
-                    with open(meta_file, "r", encoding="utf-8") as mf:
+                    with open(meta_file, encoding="utf-8") as mf:
                         mdata = json.load(mf)
                         fn = (mdata.get("filename") or "").lower()
                         title = (mdata.get("title") or "").lower()
                 except Exception:
                     pass
 
-            is_user_slump = ("slump" in fn or "slump" in title or "slump" in sid.lower())
+            is_user_slump = "slump" in fn or "slump" in title or "slump" in sid.lower()
             if keep_slump and is_user_slump and not purge_all:
                 continue
 
@@ -197,7 +206,10 @@ def run_cleanup(purge_all: bool = False, keep_slump: bool = True, clean_tmp: boo
                     should_delete = True
                 elif name_lower.startswith("combined_") or name_lower.startswith("batch_"):
                     # Delete test combined & batch exports
-                    if any(kw in name_lower for kw in ["test", "sample", "cancel", "switch", "progress", "kindle"]):
+                    if any(
+                        kw in name_lower
+                        for kw in ["test", "sample", "cancel", "switch", "progress", "kindle"]
+                    ):
                         should_delete = True
                 elif prefix not in remaining_sids:
                     should_delete = True
@@ -231,25 +243,28 @@ def run_cleanup(purge_all: bool = False, keep_slump: bool = True, clean_tmp: boo
         "uploads_count": len(deleted_uploads),
         "outputs_count": len(deleted_outputs),
         "tmps_count": len(deleted_tmps),
-        "api_used": api_result is not None
+        "api_used": api_result is not None,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Clean up test data and stale artifacts.")
-    parser.add_argument("--all", action="store_true", help="Purge ALL sessions and outputs (full reset).")
-    parser.add_argument("--dry-run", action="store_true", help="Report what would be cleaned without deleting.")
-    parser.add_argument("--no-tmp", action="store_true", help="Skip cleaning temporary files in /tmp.")
+    parser.add_argument(
+        "--all", action="store_true", help="Purge ALL sessions and outputs (full reset)."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Report what would be cleaned without deleting."
+    )
+    parser.add_argument(
+        "--no-tmp", action="store_true", help="Skip cleaning temporary files in /tmp."
+    )
     args = parser.parse_args()
 
     action = "SIMULATING CLEANUP (DRY-RUN)" if args.dry_run else "CLEANING TEST DATA"
     print(f"=== {action} ===")
 
     res = run_cleanup(
-        purge_all=args.all,
-        keep_slump=not args.all,
-        clean_tmp=not args.no_tmp,
-        dry_run=args.dry_run
+        purge_all=args.all, keep_slump=not args.all, clean_tmp=not args.no_tmp, dry_run=args.dry_run
     )
 
     print(f"Sessions cleaned:   {res['sessions_count']}")
@@ -257,7 +272,7 @@ def main():
     print(f"Outputs cleaned:    {res['outputs_count']}")
     print(f"Temp files cleaned: {res['tmps_count']}")
     print(f"Total space freed:  {res['freed_formatted']}")
-    if res['api_used']:
+    if res["api_used"]:
         print("Server in-memory state was also synced via API.")
     print("=== Cleanup Complete ===")
 
