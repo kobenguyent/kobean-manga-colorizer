@@ -478,7 +478,29 @@ function setupEventListeners() {
       e.preventDefault();
       navigatePreviewPage(1);
     } else if (e.key === "Escape") {
-      closeSplitPreview();
+      const openZoomMenu = document.querySelector(".zoom-dropdown-wrapper.open");
+      if (openZoomMenu) {
+        closeAllZoomMenus();
+        return;
+      }
+      const card = document.getElementById("split-preview-card");
+      if (card && (card.classList.contains("is-fullscreen") || document.fullscreenElement)) {
+        toggleComparatorFullscreen();
+      } else {
+        closeSplitPreview();
+      }
+    } else if (e.key === "f" || e.key === "F") {
+      e.preventDefault();
+      toggleComparatorFullscreen();
+    } else if (e.key === "+" || e.key === "=") {
+      e.preventDefault();
+      changeComparatorZoom(0.25);
+    } else if (e.key === "-" || e.key === "_") {
+      e.preventDefault();
+      changeComparatorZoom(-0.25);
+    } else if (e.key === "0") {
+      e.preventDefault();
+      resetComparatorZoom();
     }
   });
 
@@ -1682,6 +1704,7 @@ function openSplitPreview(pageIdx, preventScroll = false) {
 
   // Setup slider listeners
   setupSplitSlider();
+  resetComparatorZoom();
 
   // Set initial view: if page is colorized, show split; if not, show B&W
   if (page.colorized_url) {
@@ -1694,7 +1717,311 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   requestAnimationFrame(() => setSplitPosition(currentSplitPct));
 }
 
+// --- Comparator Zoom & Pan Engine ---
+let currentZoom = 1.0;
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 5.0;
+let panX = 0;
+let panY = 0;
+let isPanning = false;
+let startPanX = 0;
+let startPanY = 0;
+let initialPanX = 0;
+let initialPanY = 0;
+
+const ZOOM_PRESETS = [
+  { label: "Fit Window", value: 1.0, isFit: true },
+  { label: "20%", value: 0.2 },
+  { label: "35%", value: 0.35 },
+  { label: "50%", value: 0.5 },
+  { label: "70%", value: 0.7 },
+  { label: "100%", value: 1.0 },
+  { label: "125%", value: 1.25 },
+  { label: "150%", value: 1.5 },
+  { label: "200%", value: 2.0 },
+  { label: "300%", value: 3.0 },
+  { label: "400%", value: 4.0 },
+];
+
+function changeComparatorZoom(delta) {
+  applyZoom(currentZoom + delta);
+}
+window.changeComparatorZoom = changeComparatorZoom;
+
+function resetComparatorZoom() {
+  currentZoom = 1.0;
+  panX = 0;
+  panY = 0;
+  closeAllZoomMenus();
+  updateZoomTransform(true);
+}
+window.resetComparatorZoom = resetComparatorZoom;
+
+function applyZoom(newZoom, clientX = null, clientY = null) {
+  const clampedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(newZoom * 100) / 100));
+  if (clampedZoom === currentZoom) return;
+
+  const container = document.getElementById("split-container");
+  if (!container) return;
+
+  if (clientX !== null && clientY !== null) {
+    const rect = container.getBoundingClientRect();
+    const cursorOffsetX = clientX - (rect.left + rect.width / 2);
+    const cursorOffsetY = clientY - (rect.top + rect.height / 2);
+    const zoomRatio = clampedZoom / currentZoom;
+    panX -= cursorOffsetX * (zoomRatio - 1);
+    panY -= cursorOffsetY * (zoomRatio - 1);
+  } else if (clampedZoom === 1.0) {
+    panX = 0;
+    panY = 0;
+  }
+
+  currentZoom = clampedZoom;
+  clampPan();
+  updateZoomTransform(clientX === null);
+}
+window.applyZoom = applyZoom;
+
+function clampPan() {
+  const container = document.getElementById("split-container");
+  const wrapper = document.querySelector(".split-slider-wrapper");
+  if (!container || !wrapper) return;
+
+  if (currentZoom <= 1.0) {
+    panX = 0;
+    panY = 0;
+    return;
+  }
+
+  const containerW = container.offsetWidth * currentZoom;
+  const containerH = container.offsetHeight * currentZoom;
+  const wrapperW = wrapper.clientWidth;
+  const wrapperH = wrapper.clientHeight;
+
+  const maxPanX = Math.max(0, (containerW - wrapperW) / 2 + 100);
+  const maxPanY = Math.max(0, (containerH - wrapperH) / 2 + 100);
+
+  panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+  panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+}
+
+function updateZoomTransform(smooth = false) {
+  const container = document.getElementById("split-container");
+  if (!container) return;
+
+  if (smooth) {
+    container.style.transition = "transform 0.22s cubic-bezier(0.16, 1, 0.3, 1)";
+    setTimeout(() => {
+      if (container) container.style.transition = "";
+    }, 240);
+  } else {
+    container.style.transition = "";
+  }
+
+  container.style.transform = `translate(${panX}px, ${panY}px) scale(${currentZoom})`;
+  container.style.transformOrigin = "center center";
+
+  if (currentZoom > 1.0) {
+    container.classList.add("is-zoomed");
+  } else {
+    container.classList.remove("is-zoomed");
+  }
+
+  const pctStr = `${Math.round(currentZoom * 100)}%`;
+  const headerText = document.getElementById("header-zoom-text");
+  if (headerText) headerText.innerText = pctStr;
+  const btnReset = document.getElementById("btn-zoom-reset");
+  if (btnReset && !headerText) btnReset.innerText = pctStr;
+
+  const floatLabel = document.getElementById("float-zoom-label");
+  if (floatLabel) floatLabel.innerText = pctStr;
+  const floatText = document.getElementById("float-zoom-text");
+  if (floatText && !floatLabel) floatText.innerText = pctStr;
+
+  const btnZoomOut = document.getElementById("btn-zoom-out");
+  if (btnZoomOut) btnZoomOut.disabled = currentZoom <= MIN_ZOOM;
+  const btnZoomIn = document.getElementById("btn-zoom-in");
+  if (btnZoomIn) btnZoomIn.disabled = currentZoom >= MAX_ZOOM;
+}
+
+// --- Zoom Presets Menu Engine ---
+function toggleZoomMenu(type, event) {
+  if (event) {
+    event.stopPropagation();
+  }
+  const wrapperId = type === "float" ? "float-zoom-wrapper" : "header-zoom-wrapper";
+  const wrapper = document.getElementById(wrapperId);
+  if (!wrapper) return;
+
+  const wasOpen = wrapper.classList.contains("open");
+  closeAllZoomMenus();
+
+  if (!wasOpen) {
+    renderZoomMenuItems(type);
+    wrapper.classList.add("open");
+    setTimeout(() => {
+      const input = document.getElementById(`${type}-zoom-custom-input`);
+      if (input) input.select();
+    }, 50);
+  }
+}
+window.toggleZoomMenu = toggleZoomMenu;
+
+function closeAllZoomMenus() {
+  document.querySelectorAll(".zoom-dropdown-wrapper.open").forEach(w => {
+    w.classList.remove("open");
+  });
+}
+window.closeAllZoomMenus = closeAllZoomMenus;
+
+function renderZoomMenuItems(type) {
+  const menuId = type === "float" ? "float-zoom-menu" : "header-zoom-menu";
+  const menu = document.getElementById(menuId);
+  if (!menu) return;
+
+  const currentPct = Math.round(currentZoom * 100);
+
+  let html = `
+    <div class="zoom-custom-row" onclick="event.stopPropagation()">
+      <input type="number" class="zoom-custom-input" id="${type}-zoom-custom-input" min="15" max="500" placeholder="${currentPct}%" value="${currentPct}" onkeydown="if(event.key==='Enter') applyCustomZoomInput('${type}')" />
+      <button class="zoom-custom-apply" type="button" onclick="applyCustomZoomInput('${type}')">Set</button>
+    </div>
+    <div class="zoom-preset-options">
+  `;
+
+  ZOOM_PRESETS.forEach(item => {
+    const isSelected = Math.abs(currentZoom - item.value) < 0.03;
+    html += `
+      <button type="button" class="zoom-menu-item ${isSelected ? 'active' : ''}" onclick="selectZoomPreset(${item.value})">
+        <span>${item.label}</span>
+        ${item.isFit ? '<span class="zoom-menu-hint">Fit</span>' : ''}
+        <i class="ri-check-line"></i>
+      </button>
+    `;
+  });
+
+  html += `</div>`;
+  menu.innerHTML = html;
+}
+
+function selectZoomPreset(val) {
+  closeAllZoomMenus();
+  if (val === 1.0) {
+    resetComparatorZoom();
+  } else {
+    applyZoom(val);
+  }
+}
+window.selectZoomPreset = selectZoomPreset;
+
+function applyCustomZoomInput(type) {
+  const input = document.getElementById(`${type}-zoom-custom-input`);
+  if (!input) return;
+  const num = parseFloat(input.value);
+  if (!isNaN(num) && num >= 15 && num <= 500) {
+    closeAllZoomMenus();
+    if (num === 100) {
+      resetComparatorZoom();
+    } else {
+      applyZoom(num / 100);
+    }
+  }
+}
+window.applyCustomZoomInput = applyCustomZoomInput;
+
+// Dismiss zoom menus when clicking outside
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".zoom-dropdown-wrapper")) {
+    closeAllZoomMenus();
+  }
+});
+
+// --- Fullscreen Engine ---
+function toggleComparatorFullscreen() {
+  const card = document.getElementById("split-preview-card");
+  if (!card) return;
+
+  const isFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement || card.classList.contains("is-fullscreen"));
+
+  if (!isFs) {
+    if (card.requestFullscreen) {
+      card.requestFullscreen().catch(() => {
+        card.classList.add("is-fullscreen");
+        document.body.classList.add("comparator-fullscreen-active");
+        updateFullscreenUI(true);
+      });
+    } else if (card.webkitRequestFullscreen) {
+      card.webkitRequestFullscreen();
+    } else {
+      card.classList.add("is-fullscreen");
+      document.body.classList.add("comparator-fullscreen-active");
+      updateFullscreenUI(true);
+    }
+  } else {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      if (document.exitFullscreen) document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+    card.classList.remove("is-fullscreen");
+    document.body.classList.remove("comparator-fullscreen-active");
+    updateFullscreenUI(false);
+  }
+}
+window.toggleComparatorFullscreen = toggleComparatorFullscreen;
+
+function updateFullscreenUI(isFullscreen) {
+  const icon = document.getElementById("fullscreen-icon");
+  const floatIcon = document.getElementById("float-fullscreen-icon");
+  const btn = document.getElementById("btn-toggle-fullscreen");
+
+  const iconClass = isFullscreen ? "ri-fullscreen-exit-line" : "ri-fullscreen-line";
+  const titleText = isFullscreen ? "Exit Full Screen (F)" : "Full Screen (F)";
+
+  if (icon) icon.className = iconClass;
+  if (floatIcon) floatIcon.className = iconClass;
+  if (btn) {
+    btn.title = titleText;
+    btn.classList.toggle("active", isFullscreen);
+  }
+}
+
+document.addEventListener("fullscreenchange", () => {
+  const card = document.getElementById("split-preview-card");
+  const isFs = Boolean(document.fullscreenElement);
+  if (card) card.classList.toggle("is-fullscreen", isFs);
+  document.body.classList.toggle("comparator-fullscreen-active", isFs);
+  updateFullscreenUI(isFs);
+  setTimeout(() => {
+    setSplitPosition(currentSplitPct);
+    clampPan();
+    updateZoomTransform();
+  }, 100);
+});
+
+document.addEventListener("webkitfullscreenchange", () => {
+  const card = document.getElementById("split-preview-card");
+  const isFs = Boolean(document.webkitFullscreenElement);
+  if (card) card.classList.toggle("is-fullscreen", isFs);
+  document.body.classList.toggle("comparator-fullscreen-active", isFs);
+  updateFullscreenUI(isFs);
+  setTimeout(() => {
+    setSplitPosition(currentSplitPct);
+    clampPan();
+    updateZoomTransform();
+  }, 100);
+});
+
 function closeSplitPreview() {
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    if (document.exitFullscreen) document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+  }
+  const card = document.getElementById("split-preview-card");
+  if (card) card.classList.remove("is-fullscreen");
+  document.body.classList.remove("comparator-fullscreen-active");
+  updateFullscreenUI(false);
+  closeAllZoomMenus();
+  resetComparatorZoom();
   document.getElementById("split-preview-card").classList.add("hidden");
 }
 
@@ -1704,6 +2031,7 @@ let isSplitSliderInitialized = false;
 function setupSplitSlider() {
   const container = document.getElementById("split-container");
   const handle = document.getElementById("split-handle");
+  const wrapper = document.querySelector(".split-slider-wrapper");
   if (!container || isSplitSliderInitialized) return;
   isSplitSliderInitialized = true;
 
@@ -1725,9 +2053,27 @@ function setupSplitSlider() {
     setSplitPosition(pct);
   };
 
-  // Modern Pointer Events API (supports Mouse, Touch, and Stylus without native drag interference)
+  // Modern Pointer Events API (supports Mouse, Touch, and Stylus)
   container.addEventListener("pointerdown", (e) => {
     if (e.button !== undefined && e.button !== 0) return;
+    if (e.target.closest(".split-label")) return;
+
+    const isHandle = e.target.closest("#split-handle") || e.target.closest(".split-handle-button");
+
+    if (currentZoom > 1.0 && !isHandle) {
+      // Pan mode when zoomed
+      isPanning = true;
+      startPanX = e.clientX;
+      startPanY = e.clientY;
+      initialPanX = panX;
+      initialPanY = panY;
+      container.classList.add("is-grabbing");
+      try { container.setPointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+      return;
+    }
+
+    // Split handle dragging
     isDragging = true;
     if (handle) handle.classList.add("active");
     try {
@@ -1738,12 +2084,25 @@ function setupSplitSlider() {
   });
 
   container.addEventListener("pointermove", (e) => {
+    if (isPanning) {
+      panX = initialPanX + (e.clientX - startPanX);
+      panY = initialPanY + (e.clientY - startPanY);
+      clampPan();
+      updateZoomTransform(false);
+      e.preventDefault();
+      return;
+    }
     if (!isDragging) return;
     updateFromPointer(e.clientX);
     e.preventDefault();
   });
 
   const stopDrag = (e) => {
+    if (isPanning) {
+      isPanning = false;
+      container.classList.remove("is-grabbing");
+      try { container.releasePointerCapture(e.pointerId); } catch (err) {}
+    }
     if (isDragging) {
       isDragging = false;
       if (handle) handle.classList.remove("active");
@@ -1756,26 +2115,66 @@ function setupSplitSlider() {
   container.addEventListener("pointerup", stopDrag);
   container.addEventListener("pointercancel", stopDrag);
 
+  // Double-click to toggle Zoom (100% <-> 200%)
+  container.addEventListener("dblclick", (e) => {
+    if (e.target.closest(".split-label") || e.target.closest("#split-handle")) return;
+    if (currentZoom > 1.0) {
+      resetComparatorZoom();
+    } else {
+      applyZoom(2.0, e.clientX, e.clientY);
+    }
+  });
+
   // Prevent browser native image dragging and selection
   container.addEventListener("dragstart", (e) => e.preventDefault());
   container.addEventListener("selectstart", (e) => e.preventDefault());
 
-  // Horizontal Trackpad / Wheel Scroll Support (Swipe left/right to slide divider)
-  container.addEventListener("wheel", (e) => {
+  // Mouse Wheel & Trackpad Pinch Zoom Support
+  const handleWheel = (e) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const zoomDelta = e.deltaY < 0 ? 0.15 : -0.15;
+      applyZoom(currentZoom + zoomDelta, e.clientX, e.clientY);
+      return;
+    }
+
+    if (currentZoom > 1.0) {
+      e.preventDefault();
+      panX -= e.deltaX;
+      panY -= e.deltaY;
+      clampPan();
+      updateZoomTransform(false);
+      return;
+    }
+
+    // Normal horizontal wheel swipe for split divider when not zoomed
     const isHorizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
     const delta = isHorizontal ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
     if (delta !== 0) {
       e.preventDefault();
       const step = (delta / (container.clientWidth || 600)) * 100 * 1.2;
-      const newPct = Math.max(0, Math.min(100, currentSplitPct + step));
-      setSplitPosition(newPct);
+      setSplitPosition(Math.max(0, Math.min(100, currentSplitPct + step)));
     }
-  }, { passive: false });
+  };
+
+  container.addEventListener("wheel", handleWheel, { passive: false });
+  if (wrapper) {
+    wrapper.addEventListener("wheel", handleWheel, { passive: false });
+  }
 
   // Window resize & ResizeObserver for dynamic image alignment
-  window.addEventListener("resize", () => setSplitPosition(currentSplitPct));
+  window.addEventListener("resize", () => {
+    setSplitPosition(currentSplitPct);
+    clampPan();
+    updateZoomTransform(false);
+  });
+
   if (window.ResizeObserver) {
-    const ro = new ResizeObserver(() => setSplitPosition(currentSplitPct));
+    const ro = new ResizeObserver(() => {
+      setSplitPosition(currentSplitPct);
+      clampPan();
+      updateZoomTransform(false);
+    });
     ro.observe(container);
   }
 }
