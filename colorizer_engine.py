@@ -37,23 +37,35 @@ DENOISING_DIR = BASE_DIR / "denoising" / "models"
 # ─────────────────────────────────────────────────────────────────────
 
 def is_colored_page(image_path: str,
-                    sat_threshold: float = 15.0,
-                    colored_pixel_ratio: float = 0.04) -> bool:
+                    sat_threshold: float = 14.0,
+                    colored_pixel_ratio: float = 0.02) -> bool:
     """
     Returns True when the image already contains meaningful color information
     and does not need to be re-colorized.
 
     Method:
+      - Uses fast PIL JPEG draft decoding to avoid full-resolution RAM decode.
       - Convert to HSV.
       - Count pixels with Saturation > sat_threshold (0-255 scale).
-      - If the fraction of such pixels exceeds `colored_pixel_ratio` (default 4%)
+      - If the fraction of such pixels exceeds `colored_pixel_ratio` (default 2%)
         the page is considered already colored.
-
-    Thresholds are conservative so that:
-      - Pure B&W pages with mild JPEG compression artifacts are still processed.
-      - Pages with even a modest splash of color (colored covers, partial-color
-        chapters) are correctly detected and skipped.
     """
+    try:
+        from PIL import Image
+        with Image.open(image_path) as im:
+            # Fast JPEG draft mode: decodes proxy directly from DCT coefficients in ~20ms
+            im.draft('RGB', (256, 256))
+            resample_box = getattr(Image, 'Resampling', Image).BOX if hasattr(getattr(Image, 'Resampling', None), 'BOX') else Image.NEAREST
+            small = im.resize((256, 256), resample_box)
+            hsv = small.convert('HSV')
+            _, s, _ = hsv.split()
+            sat = np.array(s, dtype=np.float32)
+            colored_pixels = np.sum(sat > sat_threshold)
+            ratio = float(colored_pixels) / float(sat.size)
+            return ratio > colored_pixel_ratio
+    except Exception:
+        pass
+
     try:
         img = cv2.imread(image_path)
         if img is None:
@@ -262,6 +274,11 @@ class MangaColorizerEngine:
     - 🛡️ Clean White Paper & Speech Bubble Protection: eliminates color bleeding onto margins and bubbles.
     - ⚡ Apple Silicon MPS / NVIDIA CUDA acceleration for fast sub-second inference.
     """
+
+    @staticmethod
+    def is_colored_page(image_path: str, sat_threshold: float = 14.0, colored_pixel_ratio: float = 0.02) -> bool:
+        """Determines if an image already contains color (e.g. color cover/spread)."""
+        return is_colored_page(image_path, sat_threshold=sat_threshold, colored_pixel_ratio=colored_pixel_ratio)
 
     @staticmethod
     def _write_optimized_image(output_path: str, img: np.ndarray, quality: int = 88) -> None:

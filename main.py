@@ -7,14 +7,14 @@ import re
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException, Body, Query
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from file_processor import MangaFileProcessor
-from colorizer_engine import MangaColorizerEngine, CharacterPalette, CharacterEntry
+from colorizer_engine import MangaColorizerEngine, CharacterPalette, CharacterEntry, is_colored_page
 
 app = FastAPI(title="Manga Colorizer Pro", version="1.0.0")
 
@@ -182,6 +182,10 @@ class TestCleanupRequest(BaseModel):
     session_ids: Optional[List[str]] = None
     purge_all: Optional[bool] = False
     clean_orphans: Optional[bool] = True
+
+class BulkDeleteSessionsRequest(BaseModel):
+    session_ids: Optional[List[str]] = None
+    delete_all: Optional[bool] = False
 
 class PreviewRequest(BaseModel):
     session_id: str
@@ -387,6 +391,11 @@ async def stream_progress(session_id: str):
             }
             yield f"data: {json.dumps(init_data)}\n\n"
 
+            # If the session is already finished, emit terminal event so client doesn't wait
+            if sess.get("status") in ["completed", "cancelled", "error"]:
+                yield f"data: {json.dumps({'type': sess.get('status'), 'total_processed': sess.get('processed_count', 0)})}\n\n"
+                return
+
             while True:
                 data = await q.get()
                 yield f"data: {json.dumps(data)}\n\n"
@@ -469,7 +478,30 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             page_info["status"] = "pending"
             page_info.pop("skipped_colored", None)
 
+        # Fast pre-flight check: if page already has color and user wants to skip colored pages,
+        # copy original immediately and NEVER show as "processing" in-flight
+        if req.skip_if_colored and colorizer_engine.is_colored_page(orig_path):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            shutil.copy2(orig_path, output_path)
+            page_info["status"] = "colorized"
+            page_info["skipped_colored"] = True
+            page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+            page_info["engine_used"] = "original (already colored)"
+            sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+            save_session_meta(session_id)
 
+            await notify_sse_listeners(session_id, {
+                "type": "page_update",
+                "page_index": idx,
+                "status": "colorized",
+                "skipped_colored": True,
+                "colorized_url": page_info["colorized_url"],
+                "engine": page_info["engine_used"],
+                "processed_count": sess["processed_count"],
+                "total": sess["total_pages"],
+                "message": f"Page {idx + 1}: Preserved original color (skipped)"
+            })
+            continue
 
         page_info["status"] = "processing"
         
@@ -530,6 +562,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 "type": "page_update",
                 "page_index": idx,
                 "status": "colorized",
+                "skipped_colored": bool(page_info.get("skipped_colored")),
                 "colorized_url": page_info["colorized_url"],
                 "engine": page_info["engine_used"],
                 "processed_count": sess["processed_count"],
@@ -1381,7 +1414,8 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     style=req.style,
                     saturation=req.saturation,
                     contrast=req.contrast,
-                    line_preserve=req.line_preserve
+                    line_preserve=req.line_preserve,
+                    skip_if_colored=req.skip_if_colored
                 )
                 await _async_colorization_worker(sid, single_req)
                 CURRENT_BATCH["completed_docs"] += 1
@@ -1395,6 +1429,55 @@ async def start_batch_colorization(req: BatchColorizeRequest):
         "message": f"Batch colorization started for {len(valid_sessions)} documents",
         "session_ids": valid_sessions
     })
+
+def remove_single_session_artifacts(session_id: str) -> bool:
+    """
+    Deletes all files and memory state for a single session ID.
+    Returns True if session was found/deleted, False if already absent.
+    """
+    sess = SESSIONS.get(session_id) or get_or_restore_session(session_id)
+    sess_dir = STORAGE_DIR / session_id
+
+    # Stop any running process
+    if sess:
+        sess["cancel_requested"] = True
+
+    # Pop from memory
+    SESSIONS.pop(session_id, None)
+    EVENT_QUEUES.pop(session_id, None)
+    SESSION_PALETTES.pop(session_id, None)
+
+    deleted = False
+
+    # Delete storage directory
+    if sess_dir.exists():
+        shutil.rmtree(str(sess_dir), ignore_errors=True)
+        deleted = True
+
+    # Delete original uploaded file
+    if sess and sess.get("file_path"):
+        try:
+            up_path = Path(sess["file_path"])
+            if up_path.exists() and "uploads" in str(up_path.resolve()):
+                up_path.unlink(missing_ok=True)
+                deleted = True
+        except Exception as e:
+            print(f"Error removing upload file: {e}")
+
+    for f in UPLOAD_DIR.glob(f"{session_id}_*"):
+        f.unlink(missing_ok=True)
+        deleted = True
+
+    # Delete output archives
+    for out_f in OUTPUT_DIR.glob(f"{session_id}_*"):
+        try:
+            out_f.unlink(missing_ok=True)
+            deleted = True
+        except Exception:
+            pass
+
+    return deleted or (sess is not None)
+
 
 @app.delete("/api/session/{session_id}")
 async def delete_session(session_id: str):
@@ -1412,40 +1495,59 @@ async def delete_session(session_id: str):
             "deleted_session_id": session_id
         })
 
-    # Ensure removed from in-memory dictionary
-    SESSIONS.pop(session_id, None)
-
-    # Cancel if running
-    if sess:
-        sess["cancel_requested"] = True
-
-    # Remove event listeners
-    EVENT_QUEUES.pop(session_id, None)
-
-    # Remove storage folder in sessions/
-    if sess_dir.exists():
-        shutil.rmtree(str(sess_dir), ignore_errors=True)
-
-    # Remove original uploaded file from uploads/ if it exists
-    if sess and sess.get("file_path"):
-        try:
-            up_path = Path(sess["file_path"])
-            if up_path.exists() and "uploads" in str(up_path.resolve()):
-                up_path.unlink(missing_ok=True)
-        except Exception as e:
-            print(f"Error removing upload file: {e}")
-
-    # Remove any exported archives from output/ matching this session
-    for out_f in OUTPUT_DIR.glob(f"{session_id}_*"):
-        try:
-            out_f.unlink(missing_ok=True)
-        except Exception:
-            pass
+    remove_single_session_artifacts(session_id)
 
     return JSONResponse({
         "status": "success",
         "message": f"Document session {session_id} deleted successfully",
         "deleted_session_id": session_id
+    })
+
+
+@app.post("/api/sessions/bulk-delete")
+async def bulk_delete_sessions(req: BulkDeleteSessionsRequest):
+    """
+    Bulk deletes specified document sessions and their files.
+    If delete_all=True or session_ids is empty with delete_all, deletes all sessions.
+    """
+    deleted_ids = []
+    failed_ids = []
+
+    if req.delete_all:
+        all_sids = set(list(SESSIONS.keys()))
+        for d in STORAGE_DIR.iterdir():
+            if d.is_dir():
+                all_sids.add(d.name)
+        for sid in all_sids:
+            try:
+                remove_single_session_artifacts(sid)
+                deleted_ids.append(sid)
+            except Exception as e:
+                failed_ids.append(sid)
+        return JSONResponse({
+            "status": "success",
+            "message": f"All {len(deleted_ids)} document sessions deleted successfully",
+            "deleted_session_ids": deleted_ids,
+            "failed_session_ids": failed_ids,
+            "count": len(deleted_ids)
+        })
+
+    if not req.session_ids:
+        raise HTTPException(status_code=400, detail="No session_ids provided for bulk deletion.")
+
+    for sid in req.session_ids:
+        try:
+            remove_single_session_artifacts(sid)
+            deleted_ids.append(sid)
+        except Exception as e:
+            failed_ids.append(sid)
+
+    return JSONResponse({
+        "status": "success",
+        "message": f"Successfully deleted {len(deleted_ids)} document session(s)",
+        "deleted_session_ids": deleted_ids,
+        "failed_session_ids": failed_ids,
+        "count": len(deleted_ids)
     })
 
 
@@ -1627,12 +1729,43 @@ async def delete_session_page(session_id: str, page_index: int):
     })
 
 @app.delete("/api/sessions")
-async def delete_all_sessions():
-    """Deletes all document sessions, uploads, and outputs."""
+async def delete_all_sessions(
+    req: Optional[BulkDeleteSessionsRequest] = Body(None),
+    session_ids: Optional[str] = Query(None, description="Comma-separated session IDs to delete")
+):
+    """
+    Deletes all document sessions, uploads, and outputs, OR bulk deletes specified sessions
+    if session_ids is provided via JSON body or query param.
+    """
+    target_ids = []
+    if req and req.session_ids:
+        target_ids.extend(req.session_ids)
+    elif session_ids:
+        target_ids.extend([s.strip() for s in session_ids.split(",") if s.strip()])
+
+    if target_ids:
+        deleted_ids = []
+        failed_ids = []
+        for sid in target_ids:
+            try:
+                remove_single_session_artifacts(sid)
+                deleted_ids.append(sid)
+            except Exception:
+                failed_ids.append(sid)
+        return JSONResponse({
+            "status": "success",
+            "message": f"Successfully deleted {len(deleted_ids)} document session(s)",
+            "deleted_session_ids": deleted_ids,
+            "failed_session_ids": failed_ids,
+            "count": len(deleted_ids)
+        })
+
+    # Default fallback: delete all sessions
     for sess in SESSIONS.values():
         sess["cancel_requested"] = True
 
     EVENT_QUEUES.clear()
+    SESSION_PALETTES.clear()
 
     # Clean sessions/ storage
     for item in STORAGE_DIR.iterdir():

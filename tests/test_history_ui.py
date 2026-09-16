@@ -45,7 +45,12 @@ class TestHistoryUI(unittest.TestCase):
         self.assertIn('id="hist-stat-idle"', html)
         self.assertIn('id="history-search-input"', html)
         self.assertIn('id="history-list-container"', html)
-        self.assertIn('id="btn-history-batch-export"', html)
+        # Bulk deletion modal elements
+        self.assertIn('id="history-selection-bar"', html)
+        self.assertIn('id="hist-select-all-cb"', html)
+        self.assertIn('id="btn-hist-bulk-delete"', html)
+        self.assertIn('id="btn-footer-bulk-delete"', html)
+        self.assertIn('id="btn-delete-selected-queue"', html)
 
     def test_static_assets_contain_history_handlers(self):
         """Test that static JavaScript and CSS contain History styling and logic."""
@@ -59,6 +64,10 @@ class TestHistoryUI(unittest.TestCase):
         self.assertIn("renderHistoryList", js)
         self.assertIn("switchFromHistory", js)
         self.assertIn("exportDocumentFromHistory", js)
+        self.assertIn("bulkDeleteHistory", js)
+        self.assertIn("executeBulkDeletion", js)
+        self.assertIn("toggleHistorySessionSelection", js)
+        self.assertIn("toggleQueueSelection", js)
 
         # Check styles.css
         css_resp = requests.get(f"{BASE_URL}/styles.css")
@@ -67,6 +76,8 @@ class TestHistoryUI(unittest.TestCase):
         self.assertIn(".history-modal-dialog", css)
         self.assertIn(".history-stats-bar", css)
         self.assertIn(".history-item", css)
+        self.assertIn(".history-selection-bar", css)
+        self.assertIn(".history-item.is-selected", css)
 
 if __name__ == "__main__":
     unittest.main()

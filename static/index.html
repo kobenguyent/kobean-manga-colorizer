@@ -139,6 +139,9 @@
             <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="triggerAddFiles()">
               <i class="ri-add-line"></i> Add Files
             </button>
+            <button class="btn btn-danger btn-sm hidden" id="btn-delete-selected-queue" onclick="deleteSelectedQueueDocuments(event)" title="Delete checked documents from queue">
+              <i class="ri-delete-bin-line"></i> Delete Selected (<span id="queue-selected-count">0</span>)
+            </button>
             <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-delete-all-files" onclick="clearAllDocuments(event)">
               <i class="ri-delete-bin-line"></i> Delete All
             </button>
@@ -699,6 +702,30 @@
         </button>
       </div>
 
+      <!-- Bulk Selection Action Bar -->
+      <div class="history-selection-bar" id="history-selection-bar">
+        <div class="history-selection-left">
+          <label class="history-select-all-label" title="Select or deselect all visible documents">
+            <input type="checkbox" id="hist-select-all-cb" onchange="toggleSelectAllHistory(this.checked)" />
+            <span id="hist-select-all-text">Select All</span>
+          </label>
+          <span class="history-selected-count-badge hidden" id="hist-selected-badge">
+            <span id="hist-selected-count">0</span> selected
+          </span>
+        </div>
+        <div class="history-selection-actions">
+          <button class="btn btn-secondary btn-xs" id="btn-hist-select-completed" onclick="selectHistoryByStatus('completed')" title="Select all completed sessions">
+            <i class="ri-checkbox-circle-line"></i> Select Completed
+          </button>
+          <button class="btn btn-secondary btn-xs" id="btn-hist-clear-sel" onclick="clearHistorySelection()" title="Clear current selection">
+            <i class="ri-close-line"></i> Clear
+          </button>
+          <button class="btn btn-danger btn-xs" id="btn-hist-bulk-delete" onclick="bulkDeleteHistory()" disabled title="Delete selected document sessions">
+            <i class="ri-delete-bin-line"></i> Delete Selected (<span id="hist-btn-count">0</span>)
+          </button>
+        </div>
+      </div>
+
       <!-- Document Sessions List Container -->
       <div class="history-list-container" id="history-list-container">
         <!-- Rendered dynamically -->
@@ -714,6 +741,9 @@
           Showing 0 documents
         </div>
         <div class="history-footer-actions">
+          <button class="btn btn-outline btn-danger-outline btn-sm hidden" id="btn-footer-bulk-delete" onclick="bulkDeleteHistory()">
+            <i class="ri-delete-bin-line"></i> Delete Selected (<span id="footer-bulk-delete-count">0</span>)
+          </button>
           <button class="btn btn-secondary btn-sm" onclick="exportBatch('auto')" id="btn-history-batch-export" title="Export all colorized documents as a single ZIP archive">
             <i class="ri-archive-line"></i> Export All Completed ZIP
           </button>

@@ -12,6 +12,8 @@ let selectedPages = new Set();
 let historyData = [];
 let currentHistoryFilter = "all";
 let currentHistorySearch = "";
+let selectedHistorySessions = new Set();
+let selectedQueueSessions = new Set();
 
 
 // Sub-model options per provider
@@ -767,7 +769,8 @@ function renderDocumentQueue() {
   activeSessions.forEach((sess) => {
     const item = document.createElement("div");
     const isActive = currentSession && currentSession.session_id === sess.session_id;
-    item.className = `doc-queue-item ${isActive ? "active" : ""}`;
+    const isQueueSelected = selectedQueueSessions.has(sess.session_id);
+    item.className = `doc-queue-item ${isActive ? "active" : ""} ${isQueueSelected ? "is-selected" : ""}`;
     item.onclick = () => switchActiveDocument(sess.session_id);
 
     const fn = (sess.filename || "").toLowerCase();
@@ -792,6 +795,7 @@ function renderDocumentQueue() {
     }
 
     item.innerHTML = `
+      <input type="checkbox" class="doc-queue-item-cb" data-session-id="${sess.session_id}" ${isQueueSelected ? "checked" : ""} onclick="event.stopPropagation()" onchange="toggleQueueSelection('${sess.session_id}', this.checked)" title="Select document" />
       <div class="doc-queue-icon">${iconHTML}</div>
       <div class="doc-queue-info">
         <div class="doc-queue-name" title="${sess.filename}">${sess.filename}</div>
@@ -807,6 +811,49 @@ function renderDocumentQueue() {
     `;
     queueList.appendChild(item);
   });
+  updateQueueSelectionUI();
+}
+
+function toggleQueueSelection(sessionId, isChecked) {
+  if (isChecked) {
+    selectedQueueSessions.add(sessionId);
+  } else {
+    selectedQueueSessions.delete(sessionId);
+  }
+  updateQueueSelectionUI();
+  const queueItem = document.querySelector(`.doc-queue-item-cb[data-session-id="${sessionId}"]`)?.closest(".doc-queue-item");
+  if (queueItem) {
+    if (isChecked) queueItem.classList.add("is-selected");
+    else queueItem.classList.remove("is-selected");
+  }
+}
+
+function updateQueueSelectionUI() {
+  const btn = document.getElementById("btn-delete-selected-queue");
+  const countSpan = document.getElementById("queue-selected-count");
+  const count = selectedQueueSessions.size;
+  if (btn) {
+    if (count > 0) {
+      btn.classList.remove("hidden");
+      if (countSpan) countSpan.innerText = count;
+    } else {
+      btn.classList.add("hidden");
+    }
+  }
+}
+
+async function deleteSelectedQueueDocuments(event) {
+  if (event) event.stopPropagation();
+  const count = selectedQueueSessions.size;
+  if (count === 0) return;
+
+  const sessionIdsToDelete = Array.from(selectedQueueSessions);
+  if (!confirm(`Are you sure you want to delete ${count} selected document(s)? This will permanently delete the files and all pages.`)) {
+    return;
+  }
+
+  showToast(`Deleting ${count} document(s)...`, "info");
+  await executeBulkDeletion(sessionIdsToDelete);
 }
 
 async function switchActiveDocument(sessionId) {
@@ -973,8 +1020,8 @@ function renderGalleryGrid() {
         <button class="page-delete-btn" title="Delete this page" onclick="deletePage(event, ${idx})">
           <i class="ri-delete-bin-line"></i>
         </button>
-        <span class="page-status-badge status-${page.status}" id="page-badge-${idx}">
-          ${page.status.toUpperCase()}
+        <span class="page-status-badge ${page.skipped_colored ? 'status-skipped-colored' : ('status-' + page.status)}" id="page-badge-${idx}" ${page.skipped_colored ? 'title="Already contained color — original artwork preserved"' : ''}>
+          ${page.skipped_colored ? '<i class="ri-palette-line"></i> ORIGINAL COLOR' : page.status.toUpperCase()}
         </span>
         ${recolorizeBtn}
         <img class="page-thumb-img" id="page-img-${idx}" src="${thumbUrl}" alt="${page.display_name}" loading="lazy" />
@@ -1163,11 +1210,35 @@ function subscribeToProgressStream(sessionId = null) {
   eventSource.onmessage = (e) => {
     const data = JSON.parse(e.data);
 
+    if (data.type === "init") {
+      // If the session was already completed or skipped before connecting, finish immediately
+      if (data.session && (data.session.status === "completed" || (data.session.total_pages > 0 && data.session.processed_count >= data.session.total_pages))) {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        document.getElementById("progress-card")?.classList.add("hidden");
+        document.getElementById("export-card")?.classList.remove("hidden");
+        const btnStart = document.getElementById("btn-start-colorize");
+        if (btnStart) btnStart.disabled = false;
+        if (currentSession && currentSession.session_id === targetId) {
+          currentSession.status = "completed";
+          currentSession.processed_count = currentSession.total_pages;
+        }
+        renderDocumentQueue();
+        updateColorizedCount();
+        return;
+      }
+    }
+
     if (data.type === "page_update") {
       const idx = data.page_index;
       if (currentSession && currentSession.session_id === targetId && currentSession.pages && currentSession.pages[idx]) {
         const pageInfo = currentSession.pages[idx];
         pageInfo.status = data.status;
+        if (data.skipped_colored) {
+          pageInfo.skipped_colored = true;
+        }
 
         if (data.colorized_url) {
           pageInfo.colorized_url = data.colorized_url;
@@ -1177,8 +1248,19 @@ function subscribeToProgressStream(sessionId = null) {
 
         const badge = document.getElementById(`page-badge-${idx}`);
         if (badge) {
-          badge.className = `page-status-badge status-${data.status}`;
-          badge.innerText = data.status.toUpperCase();
+          if (data.skipped_colored || pageInfo.skipped_colored) {
+            badge.className = "page-status-badge status-skipped-colored";
+            badge.innerHTML = '<i class="ri-palette-line"></i> ORIGINAL COLOR';
+            badge.title = "Page already contained color — original artwork preserved";
+          } else {
+            badge.className = `page-status-badge status-${data.status}`;
+            badge.innerText = data.status.toUpperCase();
+          }
+        }
+
+        if (data.message) {
+          const progSub = document.getElementById("progress-subtext");
+          if (progSub) progSub.innerText = data.message;
         }
 
         // Update progress bar
@@ -1800,7 +1882,8 @@ async function startBatchColorization() {
         style: style,
         saturation: saturation,
         contrast: 1.1,
-        line_preserve: linePreserve
+        line_preserve: linePreserve,
+        skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
       })
     });
 
@@ -2220,6 +2303,55 @@ async function deleteActiveDocument(event) {
   await deleteDocument(event, currentSession.session_id);
 }
 
+async function executeBulkDeletion(sessionIds) {
+  if (!sessionIds || sessionIds.length === 0) return;
+
+  try {
+    const resp = await fetch("/api/sessions/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_ids: sessionIds })
+    });
+    const data = await resp.json();
+
+    if (resp.ok) {
+      const deletedSet = new Set(data.deleted_session_ids || sessionIds);
+
+      activeSessions = activeSessions.filter(s => !deletedSet.has(s.session_id));
+      historyData = historyData.filter(s => !deletedSet.has(s.session_id));
+
+      sessionIds.forEach(id => {
+        selectedHistorySessions.delete(id);
+        selectedQueueSessions.delete(id);
+      });
+
+      updateQueueSelectionUI();
+      updateHistorySelectionUI();
+      updateHistoryBadges();
+      updateHistoryStatsBar();
+
+      if (currentSession && deletedSet.has(currentSession.session_id)) {
+        if (activeSessions.length > 0) {
+          await switchActiveDocument(activeSessions[0].session_id);
+          showToast(`Deleted ${deletedSet.size} document(s). Switched to "${activeSessions[0].filename}".`, "success");
+        } else {
+          resetUpload();
+          showToast(`Deleted ${deletedSet.size} document(s). All documents removed.`, "success");
+        }
+      } else {
+        renderDocumentQueue();
+        showToast(`Deleted ${deletedSet.size} document(s) successfully.`, "success");
+      }
+
+      renderHistoryList();
+    } else {
+      showToast(`Failed to delete documents: ${data.detail || "Error"}`, "error");
+    }
+  } catch (err) {
+    showToast(`Error deleting documents: ${err.message}`, "error");
+  }
+}
+
 async function deletePage(event, pageIdx) {
   if (event) event.stopPropagation();
   if (!currentSession || !currentSession.pages || !currentSession.pages[pageIdx]) return;
@@ -2309,6 +2441,8 @@ function resetUpload() {
   currentSession = null;
   activeSessions = [];
   currentBatchId = null;
+  selectedQueueSessions.clear();
+  updateQueueSelectionUI();
   document.getElementById("dashboard-section").classList.add("hidden");
   document.getElementById("upload-section").classList.remove("hidden");
   
@@ -2409,6 +2543,12 @@ async function loadHistoryData(forceRefresh = false) {
     const data = await res.json();
     historyData = data.sessions || [];
 
+    // Prune selections for any sessions that no longer exist
+    const existingIds = new Set(historyData.map(s => s.session_id));
+    selectedHistorySessions.forEach(id => {
+      if (!existingIds.has(id)) selectedHistorySessions.delete(id);
+    });
+
     // Keep activeSessions in sync if needed
     if (historyData.length > 0 && (!activeSessions || activeSessions.length === 0)) {
       activeSessions = historyData;
@@ -2494,19 +2634,12 @@ function clearHistorySearch() {
   filterHistoryList();
 }
 
-function renderHistoryList() {
-  const container = document.getElementById("history-list-container");
-  const summaryEl = document.getElementById("history-footer-summary");
-  if (!container) return;
-
-  // Filter items
-  let filtered = historyData.filter(item => {
-    // Status filter
+function getFilteredHistoryItems() {
+  return historyData.filter(item => {
     if (currentHistoryFilter === "completed" && item.status !== "completed") return false;
     if (currentHistoryFilter === "processing" && item.status !== "processing") return false;
     if (currentHistoryFilter === "idle" && (item.status === "completed" || item.status === "processing")) return false;
 
-    // Search query filter
     if (currentHistorySearch) {
       const name = (item.filename || "").toLowerCase();
       if (!name.includes(currentHistorySearch)) return false;
@@ -2514,6 +2647,126 @@ function renderHistoryList() {
 
     return true;
   });
+}
+
+function updateHistorySelectionUI() {
+  const visible = getFilteredHistoryItems();
+  const count = selectedHistorySessions.size;
+
+  const selectAllCb = document.getElementById("hist-select-all-cb");
+  const selectAllText = document.getElementById("hist-select-all-text");
+  const badge = document.getElementById("hist-selected-badge");
+  const countSpan = document.getElementById("hist-selected-count");
+  const topDeleteBtn = document.getElementById("btn-hist-bulk-delete");
+  const btnCountSpan = document.getElementById("hist-btn-count");
+  const footerDeleteBtn = document.getElementById("btn-footer-bulk-delete");
+  const footerCountSpan = document.getElementById("footer-bulk-delete-count");
+
+  if (selectAllText) {
+    selectAllText.innerText = visible.length > 0 ? `Select All (${visible.length})` : "Select All";
+  }
+
+  if (selectAllCb) {
+    if (visible.length > 0 && visible.every(item => selectedHistorySessions.has(item.session_id))) {
+      selectAllCb.checked = true;
+      selectAllCb.indeterminate = false;
+    } else if (visible.some(item => selectedHistorySessions.has(item.session_id))) {
+      selectAllCb.checked = false;
+      selectAllCb.indeterminate = true;
+    } else {
+      selectAllCb.checked = false;
+      selectAllCb.indeterminate = false;
+    }
+  }
+
+  if (badge && countSpan) {
+    if (count > 0) {
+      badge.classList.remove("hidden");
+      countSpan.innerText = count;
+    } else {
+      badge.classList.add("hidden");
+    }
+  }
+
+  if (topDeleteBtn && btnCountSpan) {
+    topDeleteBtn.disabled = count === 0;
+    btnCountSpan.innerText = count;
+  }
+
+  if (footerDeleteBtn && footerCountSpan) {
+    if (count > 0) {
+      footerDeleteBtn.classList.remove("hidden");
+      footerCountSpan.innerText = count;
+    } else {
+      footerDeleteBtn.classList.add("hidden");
+    }
+  }
+}
+
+function toggleHistorySessionSelection(sessionId, isChecked) {
+  if (isChecked) {
+    selectedHistorySessions.add(sessionId);
+  } else {
+    selectedHistorySessions.delete(sessionId);
+  }
+  updateHistorySelectionUI();
+  const row = document.getElementById(`history-item-${sessionId}`);
+  if (row) {
+    if (isChecked) row.classList.add("is-selected");
+    else row.classList.remove("is-selected");
+  }
+}
+
+function toggleSelectAllHistory(isChecked) {
+  const visible = getFilteredHistoryItems();
+  visible.forEach(item => {
+    if (isChecked) {
+      selectedHistorySessions.add(item.session_id);
+    } else {
+      selectedHistorySessions.delete(item.session_id);
+    }
+  });
+  updateHistorySelectionUI();
+  renderHistoryList();
+}
+
+function selectHistoryByStatus(status) {
+  const matching = historyData.filter(s => s.status === status);
+  if (matching.length === 0) {
+    showToast(`No documents found with status "${status}".`, "info");
+    return;
+  }
+  matching.forEach(item => selectedHistorySessions.add(item.session_id));
+  updateHistorySelectionUI();
+  renderHistoryList();
+  showToast(`Selected ${matching.length} ${status} document(s).`, "info");
+}
+
+function clearHistorySelection() {
+  selectedHistorySessions.clear();
+  updateHistorySelectionUI();
+  renderHistoryList();
+}
+
+async function bulkDeleteHistory() {
+  const count = selectedHistorySessions.size;
+  if (count === 0) return;
+
+  const sessionIdsToDelete = Array.from(selectedHistorySessions);
+  if (!confirm(`Are you sure you want to permanently delete ${count} selected document session(s)? All extracted pages and colorized files will be deleted.`)) {
+    return;
+  }
+
+  showToast(`Deleting ${count} document session(s)...`, "info");
+  await executeBulkDeletion(sessionIdsToDelete);
+}
+
+function renderHistoryList() {
+  const container = document.getElementById("history-list-container");
+  const summaryEl = document.getElementById("history-footer-summary");
+  if (!container) return;
+
+  const filtered = getFilteredHistoryItems();
 
   if (summaryEl) {
     summaryEl.innerText = `Showing ${filtered.length} of ${historyData.length} documents`;
@@ -2539,6 +2792,7 @@ function renderHistoryList() {
         ` : ""}
       </div>
     `;
+    updateHistorySelectionUI();
     return;
   }
 
@@ -2546,6 +2800,7 @@ function renderHistoryList() {
 
   filtered.forEach(item => {
     const isCurrent = currentSession && currentSession.session_id === item.session_id;
+    const isSelected = selectedHistorySessions.has(item.session_id);
     const totalPages = item.total_pages || 0;
     const processedPages = item.processed_count || 0;
     const pct = totalPages > 0 ? Math.min(100, Math.round((processedPages / totalPages) * 100)) : 0;
@@ -2571,10 +2826,13 @@ function renderHistoryList() {
     }
 
     const row = document.createElement("div");
-    row.className = `history-item ${isCurrent ? "is-current" : ""}`;
+    row.className = `history-item ${isCurrent ? "is-current" : ""} ${isSelected ? "is-selected" : ""}`;
     row.id = `history-item-${item.session_id}`;
 
     row.innerHTML = `
+      <div class="history-item-checkbox-cell" onclick="event.stopPropagation();">
+        <input type="checkbox" class="history-item-cb" data-session-id="${item.session_id}" ${isSelected ? "checked" : ""} onchange="toggleHistorySessionSelection('${item.session_id}', this.checked)" title="Select document" />
+      </div>
       <div class="history-item-icon">
         ${iconHTML}
       </div>
@@ -2612,6 +2870,8 @@ function renderHistoryList() {
 
     container.appendChild(row);
   });
+
+  updateHistorySelectionUI();
 }
 
 async function switchFromHistory(sessionId) {
@@ -2668,6 +2928,15 @@ window.clearHistorySearch = clearHistorySearch;
 window.switchFromHistory = switchFromHistory;
 window.exportDocumentFromHistory = exportDocumentFromHistory;
 window.deleteFromHistory = deleteFromHistory;
+window.toggleHistorySessionSelection = toggleHistorySessionSelection;
+window.toggleSelectAllHistory = toggleSelectAllHistory;
+window.selectHistoryByStatus = selectHistoryByStatus;
+window.clearHistorySelection = clearHistorySelection;
+window.bulkDeleteHistory = bulkDeleteHistory;
+window.toggleQueueSelection = toggleQueueSelection;
+window.deleteSelectedQueueDocuments = deleteSelectedQueueDocuments;
+window.executeBulkDeletion = executeBulkDeletion;
+
 
 
 // ─────────────────────────────────────────────────────────────────────

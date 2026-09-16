@@ -1496,6 +1496,13 @@ body {
   color: #fff;
 }
 
+.status-skipped-colored {
+  background: rgba(14, 165, 233, 0.9);
+  color: #fff;
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  box-shadow: 0 2px 6px rgba(14, 165, 233, 0.25);
+}
+
 .status-error {
   background: rgba(239, 68, 68, 0.85);
   color: #fff;
@@ -1611,6 +1618,11 @@ body {
   background: rgba(6, 182, 212, 0.08);
   border-color: var(--accent-cyan);
   border-left: 3px solid var(--accent-cyan);
+}
+
+.doc-queue-item.is-selected {
+  border-color: rgba(6, 182, 212, 0.45);
+  background: rgba(6, 182, 212, 0.06);
 }
 
 .doc-queue-icon {
@@ -2030,10 +2042,112 @@ body {
   background: var(--accent-cyan);
 }
 
+/* History Selection Bar */
+.history-selection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1.75rem;
+  background: rgba(0, 0, 0, 0.22);
+  border-bottom: 1px solid var(--bg-card-border);
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.history-selection-left {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.history-select-all-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  user-select: none;
+  font-weight: 500;
+}
+
+.history-select-all-label:hover {
+  color: var(--text-primary);
+}
+
+.history-select-all-label input[type="checkbox"],
+.history-item-checkbox-cell input[type="checkbox"],
+.doc-queue-item-cb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 17px;
+  height: 17px;
+  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  transition: all 0.2s;
+  margin: 0;
+}
+
+.history-select-all-label input[type="checkbox"]:hover,
+.history-item-checkbox-cell input[type="checkbox"]:hover,
+.doc-queue-item-cb:hover {
+  border-color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.1);
+}
+
+.history-select-all-label input[type="checkbox"]:checked,
+.history-item-checkbox-cell input[type="checkbox"]:checked,
+.doc-queue-item-cb:checked {
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+}
+
+.history-select-all-label input[type="checkbox"]:checked::before,
+.history-item-checkbox-cell input[type="checkbox"]:checked::before,
+.doc-queue-item-cb:checked::before {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid #040812;
+  border-bottom: 2px solid #040812;
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+
+.history-selected-count-badge {
+  font-size: 0.72rem;
+  background: rgba(6, 182, 212, 0.18);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-weight: 600;
+}
+
+.history-selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.history-item-checkbox-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.history-item.is-selected {
+  border-color: rgba(6, 182, 212, 0.5);
+  background: rgba(6, 182, 212, 0.08);
+}
+
 /* History Row Item */
 .history-item {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   align-items: center;
   gap: 1.1rem;
   padding: 0.85rem 1.15rem;
