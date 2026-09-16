@@ -773,7 +773,8 @@ function renderDocumentQueue() {
 
   const count = activeSessions.length;
   if (queueBadge) {
-    queueBadge.innerText = `${count} Document${count > 1 ? "s" : ""}`;
+    queueBadge.innerText = `${count} ${count === 1 ? "doc" : "docs"}`;
+    queueBadge.title = `${count} document${count === 1 ? "" : "s"} in queue`;
   }
 
   const hasMultiple = count > 1;

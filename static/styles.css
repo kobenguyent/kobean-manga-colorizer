@@ -142,6 +142,7 @@ body {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid var(--bg-card-border);
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .badge-model.active {
@@ -200,6 +201,7 @@ body {
   font-family: var(--font-display);
   font-size: 1.15rem;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .card-header.space-between {
@@ -2342,6 +2344,122 @@ body.comparator-fullscreen-active {
 }
 
 /* Document Queue & Multi-File UI */
+.file-info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 1.15rem;
+}
+
+.file-info-header .header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.file-info-header .header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.queue-header-icon {
+  font-size: 1.25rem;
+  color: var(--accent-cyan);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 0 8px rgba(6, 182, 212, 0.45));
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  flex-shrink: 0;
+}
+
+.card:hover .queue-header-icon {
+  transform: scale(1.08);
+}
+
+.queue-header-title {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.doc-queue-count-badge {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  padding: 0.15rem 0.55rem !important;
+  border-radius: 9999px !important;
+  font-size: 0.72rem !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em;
+  white-space: nowrap !important;
+  background: rgba(6, 182, 212, 0.12) !important;
+  color: var(--accent-cyan) !important;
+  border: 1px solid rgba(6, 182, 212, 0.32) !important;
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.15);
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+
+.doc-queue-count-badge:hover {
+  background: rgba(6, 182, 212, 0.22) !important;
+  border-color: var(--accent-cyan) !important;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.35);
+  transform: scale(1.04);
+}
+
+.btn-queue-history {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.65rem;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.btn-queue-history i {
+  font-size: 0.82rem;
+  color: var(--accent-cyan);
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), color 0.18s ease;
+}
+
+.btn-queue-history:hover {
+  background: rgba(6, 182, 212, 0.1);
+  border-color: rgba(6, 182, 212, 0.35);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(6, 182, 212, 0.2);
+}
+
+.btn-queue-history:hover i {
+  transform: rotate(-35deg);
+  color: #38bdf8;
+}
+
+.btn-queue-history:active {
+  transform: translateY(0);
+}
+
 .active-doc-box {
   border-left: 3px solid var(--accent-cyan);
   display: flex;

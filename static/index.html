@@ -102,16 +102,16 @@
 
         <!-- File Info & Documents Queue Card -->
         <div class="card file-info-card">
-          <div class="card-header space-between">
+          <div class="card-header space-between file-info-header">
             <div class="header-left">
-              <i class="ri-folders-line"></i>
-              <h3>Documents Queue</h3>
+              <i class="ri-folders-line queue-header-icon"></i>
+              <h3 class="queue-header-title">Document Queue</h3>
+              <span class="badge badge-accent doc-queue-count-badge" id="doc-queue-badge" title="1 document in queue">1 doc</span>
             </div>
-            <div class="header-right" style="display: flex; gap: 8px; align-items: center;">
-              <button class="btn btn-secondary btn-xs" onclick="openHistoryModal()" title="View full document history" style="font-size: 0.72rem; padding: 2px 7px;">
+            <div class="header-right">
+              <button class="btn-queue-history" onclick="openHistoryModal()" title="View full document history">
                 <i class="ri-history-line"></i> History
               </button>
-              <span class="badge badge-accent" id="doc-queue-badge">1 Document</span>
             </div>
           </div>
 
