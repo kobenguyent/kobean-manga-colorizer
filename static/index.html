@@ -487,6 +487,28 @@
               <button class="btn-icon btn-nav-preview" id="btn-next-page" title="Next Page (Right Arrow)" onclick="navigatePreviewPage(1)">
                 <i class="ri-arrow-right-s-line"></i>
               </button>
+
+              <!-- Zoom Controls Group -->
+              <div class="comparator-zoom-group" title="Zoom image (Double-click, Pinch, or +/-)">
+                <button class="btn-zoom" id="btn-zoom-out" onclick="changeComparatorZoom(-0.25)" title="Zoom Out (-)">
+                  <i class="ri-subtract-line"></i>
+                </button>
+                <div class="zoom-dropdown-wrapper" id="header-zoom-wrapper">
+                  <button class="btn-zoom-level" id="btn-zoom-reset" onclick="toggleZoomMenu('header', event)" title="Choose Zoom Level (Click for presets)">
+                    <span id="header-zoom-text">100%</span>
+                  </button>
+                  <div class="zoom-presets-menu" id="header-zoom-menu"></div>
+                </div>
+                <button class="btn-zoom" id="btn-zoom-in" onclick="changeComparatorZoom(0.25)" title="Zoom In (+)">
+                  <i class="ri-add-line"></i>
+                </button>
+              </div>
+
+              <!-- Fullscreen Toggle Button -->
+              <button class="btn-icon btn-fullscreen-toggle" id="btn-toggle-fullscreen" onclick="toggleComparatorFullscreen()" title="Toggle Full Screen (F)">
+                <i class="ri-fullscreen-line" id="fullscreen-icon"></i>
+              </button>
+
               <button class="btn btn-sm" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
                       style="background:var(--accent-orange,#f97316);border-color:var(--accent-orange,#f97316);color:#fff;"
                       title="Force re-colorize this page from scratch">
@@ -507,6 +529,26 @@
             <button class="preview-nav-chevron preview-nav-next" onclick="navigatePreviewPage(1)" title="Next Page (Right Arrow)">
               <i class="ri-arrow-right-s-line"></i>
             </button>
+
+            <!-- Floating Viewer Quick Controls Pill -->
+            <div class="comparator-floating-toolbar" id="comparator-floating-toolbar">
+              <button class="float-btn" onclick="changeComparatorZoom(-0.25)" title="Zoom Out (-)">
+                <i class="ri-subtract-line"></i>
+              </button>
+              <div class="zoom-dropdown-wrapper" id="float-zoom-wrapper">
+                <button class="float-btn float-zoom-text" id="float-zoom-text" onclick="toggleZoomMenu('float', event)" title="Choose Zoom Level (Click for presets)">
+                  <span id="float-zoom-label">100%</span>
+                </button>
+                <div class="zoom-presets-menu zoom-menu-upwards" id="float-zoom-menu"></div>
+              </div>
+              <button class="float-btn" onclick="changeComparatorZoom(0.25)" title="Zoom In (+)">
+                <i class="ri-add-line"></i>
+              </button>
+              <div class="float-divider"></div>
+              <button class="float-btn" onclick="toggleComparatorFullscreen()" title="Toggle Full Screen (F)">
+                <i class="ri-fullscreen-line" id="float-fullscreen-icon"></i>
+              </button>
+            </div>
 
             <div class="split-image-container" id="split-container">
               <!-- Colorized Base Image (Bottom/Right) -->
