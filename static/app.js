@@ -52,6 +52,9 @@ function initCustomSelect(selectElement) {
   // Create container
   const container = document.createElement("div");
   container.className = "custom-select-container";
+  if (selectElement.classList.contains("form-select-sm") || selectElement.classList.contains("custom-select-sm")) {
+    container.classList.add("custom-select-sm");
+  }
   container.id = `custom-select-${selectElement.id}`;
 
   // Create trigger button
@@ -151,10 +154,12 @@ function initCustomSelect(selectElement) {
       dropdown.style.top = "auto";
       dropdown.style.bottom = "calc(100% + 6px)";
       dropdown.style.transformOrigin = "bottom center";
+      container.classList.add("open-upwards");
     } else {
       dropdown.style.top = "calc(100% + 6px)";
       dropdown.style.bottom = "auto";
       dropdown.style.transformOrigin = "top center";
+      container.classList.remove("open-upwards");
     }
 
     container.classList.add("open");
@@ -168,6 +173,7 @@ function initCustomSelect(selectElement) {
 
   function closeDropdown() {
     container.classList.remove("open");
+    container.classList.remove("open-upwards");
     trigger.setAttribute("aria-expanded", "false");
   }
 
@@ -242,7 +248,7 @@ function initCustomSelect(selectElement) {
 }
 
 function initAllCustomSelects() {
-  document.querySelectorAll("select.form-select").forEach(initCustomSelect);
+  document.querySelectorAll("select.form-select, select:not(.no-custom)").forEach(initCustomSelect);
 }
 
 // Global click-outside listener to close dropdowns smoothly
@@ -552,6 +558,7 @@ function setupEventListeners() {
     combinedGray.addEventListener("change", () => {
       if (combinedGray.checked && combinedPreset.value === "colorsoft") {
         combinedPreset.value = "kindle";
+        combinedPreset.dispatchEvent(new Event("change", { bubbles: true }));
       }
     });
   }
@@ -766,7 +773,8 @@ function renderDocumentQueue() {
 
   const count = activeSessions.length;
   if (queueBadge) {
-    queueBadge.innerText = `${count} Document${count > 1 ? "s" : ""}`;
+    queueBadge.innerText = `${count} ${count === 1 ? "doc" : "docs"}`;
+    queueBadge.title = `${count} document${count === 1 ? "" : "s"} in queue`;
   }
 
   const hasMultiple = count > 1;
@@ -825,13 +833,14 @@ function renderDocumentQueue() {
         <div class="doc-queue-name" title="${sess.filename}">${sess.filename}</div>
         <div class="doc-queue-meta">
           <span>${sess.total_pages} pages</span>
-          <span class="page-status-badge ${statusBadgeClass}" id="doc-queue-badge-${sess.session_id}" style="font-size: 0.68rem; padding: 1px 6px;">${statusHTML}</span>
         </div>
       </div>
-      <button class="btn-icon doc-delete-btn" title="Delete ${sess.filename}" onclick="deleteDocument(event, '${sess.session_id}')">
-        <i class="ri-delete-bin-line"></i>
-      </button>
-      <i class="ri-arrow-right-s-line" style="color: var(--text-secondary); margin-left: 2px;"></i>
+      <div class="doc-queue-top-actions">
+        <span class="page-status-badge doc-queue-status-badge ${statusBadgeClass}" id="doc-queue-badge-${sess.session_id}">${statusHTML}</span>
+        <button class="btn-icon doc-delete-btn" title="Delete ${sess.filename}" onclick="deleteDocument(event, '${sess.session_id}')">
+          <i class="ri-delete-bin-line"></i>
+        </button>
+      </div>
     `;
     queueList.appendChild(item);
   });
