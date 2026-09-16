@@ -825,13 +825,14 @@ function renderDocumentQueue() {
         <div class="doc-queue-name" title="${sess.filename}">${sess.filename}</div>
         <div class="doc-queue-meta">
           <span>${sess.total_pages} pages</span>
-          <span class="page-status-badge ${statusBadgeClass}" id="doc-queue-badge-${sess.session_id}" style="font-size: 0.68rem; padding: 1px 6px;">${statusHTML}</span>
         </div>
       </div>
-      <button class="btn-icon doc-delete-btn" title="Delete ${sess.filename}" onclick="deleteDocument(event, '${sess.session_id}')">
-        <i class="ri-delete-bin-line"></i>
-      </button>
-      <i class="ri-arrow-right-s-line" style="color: var(--text-secondary); margin-left: 2px;"></i>
+      <div class="doc-queue-top-actions">
+        <span class="page-status-badge doc-queue-status-badge ${statusBadgeClass}" id="doc-queue-badge-${sess.session_id}">${statusHTML}</span>
+        <button class="btn-icon doc-delete-btn" title="Delete ${sess.filename}" onclick="deleteDocument(event, '${sess.session_id}')">
+          <i class="ri-delete-bin-line"></i>
+        </button>
+      </div>
     `;
     queueList.appendChild(item);
   });
