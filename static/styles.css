@@ -39,6 +39,7 @@
   padding: 0;
 }
 
+html,
 body {
   font-family: var(--font-main);
   background-color: var(--bg-dark);
@@ -46,7 +47,9 @@ body {
   min-height: 100vh;
   line-height: 1.5;
   overflow-x: hidden;
+  max-width: 100vw;
   position: relative;
+  scroll-padding-top: 100px;
 }
 
 /* Background Animated Glow Effects */
@@ -80,13 +83,17 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
   padding: 1rem clamp(1.25rem, 2.5vw, 2.5rem);
-  background: rgba(9, 13, 22, 0.8);
+  background: rgba(9, 13, 22, 0.85);
   backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--bg-card-border);
   position: sticky;
   top: 0;
   z-index: 100;
+  width: 100%;
 }
 
 .logo-container {
@@ -127,7 +134,9 @@ body {
 
 .header-status {
   display: flex;
+  align-items: center;
   gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 /* Badges */
@@ -187,6 +196,7 @@ body {
   box-shadow: var(--shadow-main);
   margin-bottom: 1.5rem;
   transition: transform 0.2s ease, border-color 0.2s ease;
+  scroll-margin-top: 105px;
 }
 
 .card-header {
@@ -321,20 +331,21 @@ body {
 /* Dashboard Grid Layout */
 .dashboard-grid {
   display: grid;
-  grid-template-columns: 360px 1fr;
+  grid-template-columns: 360px minmax(0, 1fr);
   gap: 1.5rem;
+  width: 100%;
 }
 
 @media (min-width: 1440px) {
   .dashboard-grid {
-    grid-template-columns: 380px 1fr;
+    grid-template-columns: 380px minmax(0, 1fr);
     gap: 1.75rem;
   }
 }
 
 @media (min-width: 1800px) {
   .dashboard-grid {
-    grid-template-columns: 400px 1fr;
+    grid-template-columns: 400px minmax(0, 1fr);
     gap: 2rem;
   }
 }
@@ -343,6 +354,11 @@ body {
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.content-area {
+  min-width: 0;
+  width: 100%;
 }
 
 /* Sidebar & Config */
@@ -1021,12 +1037,38 @@ select option {
 /* Interactive Split Comparator */
 .split-preview-card {
   padding: 1.25rem;
+  scroll-margin-top: 105px;
+}
+
+#split-preview-card .card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+#split-preview-card .card-header .header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+#split-preview-card .card-header .header-left h3 {
+  font-size: 1.05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .preview-controls-group {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .btn-nav-preview {
@@ -2349,15 +2391,16 @@ body.comparator-fullscreen-active {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+  flex-wrap: wrap;
   margin-bottom: 1.15rem;
 }
 
 .file-info-header .header-left {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.45rem;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
 }
 
 .file-info-header .header-right {
@@ -2384,7 +2427,7 @@ body.comparator-fullscreen-active {
 
 .queue-header-title {
   font-family: var(--font-display);
-  font-size: 1.05rem;
+  font-size: 0.98rem;
   font-weight: 700;
   color: var(--text-primary);
   white-space: nowrap;
