@@ -222,6 +222,7 @@ class ColorizeRequest(BaseModel):
     force_recolorize: bool = False  # when True, re-run even if page already has a colorized file
     denoise_screentone: bool = True
     denoise_sigma: int = 25
+    recognition_mode: Optional[str] = "auto"
 
 
 class BatchColorizeRequest(BaseModel):
@@ -236,6 +237,7 @@ class BatchColorizeRequest(BaseModel):
     skip_if_colored: bool = False
     denoise_screentone: bool = True
     denoise_sigma: int = 25
+    recognition_mode: Optional[str] = "auto"
 
 
 class BatchExportRequest(BaseModel):
@@ -295,6 +297,7 @@ class PreviewRequest(BaseModel):
     denoise_screentone: bool = True
     denoise_sigma: int = 25
     active_character_names: Optional[list[str]] = None
+    recognition_mode: Optional[str] = "auto"
 
 
 # ── Character Palette models ─────────────────────────────────────────
@@ -315,6 +318,7 @@ class CharacterEntryModel(BaseModel):
 class CharacterRecognizeRequest(BaseModel):
     api_key: Optional[str] = ""
     model_name: Optional[str] = ""
+    recognition_mode: Optional[str] = "auto"
 
 
 class PaletteUpsertRequest(BaseModel):
@@ -1037,6 +1041,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 character_palette=palette,
                 denoise_screentone=getattr(req, "denoise_screentone", True),
                 denoise_sigma=getattr(req, "denoise_sigma", 25),
+                recognition_mode=getattr(req, "recognition_mode", "auto"),
             )
 
             # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -1195,6 +1200,7 @@ async def preview_single_page(req: PreviewRequest):
             character_palette=palette,
             denoise_screentone=getattr(req, "denoise_screentone", True),
             denoise_sigma=getattr(req, "denoise_sigma", 25),
+            recognition_mode=getattr(req, "recognition_mode", "auto"),
         )
 
         page_info["status"] = "colorized"
@@ -1456,6 +1462,7 @@ async def recognize_characters_for_page(
 
     api_key = req.api_key if req else ""
     model_name = req.model_name if req else ""
+    recognition_mode = req.recognition_mode if (req and req.recognition_mode) else "auto"
 
     recognized = await asyncio.to_thread(
         colorizer_engine.recognizer.recognize_page_characters,
@@ -1463,6 +1470,7 @@ async def recognize_characters_for_page(
         palette=palette,
         api_key=api_key,
         model_name=model_name,
+        recognition_mode=recognition_mode,
     )
 
     rec_dicts = [rc.to_dict() for rc in recognized]

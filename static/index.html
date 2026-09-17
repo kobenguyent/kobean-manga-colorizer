@@ -331,13 +331,21 @@
 
           <!-- Page Recognition & Active Character Chips -->
           <div id="palette-page-recognition-section" style="margin-bottom:0.75rem;padding:0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;gap:6px;">
               <span style="font-size:0.75rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:4px;">
                 <i class="ri-user-search-line" style="color:var(--accent-purple,#a855f7);"></i> Page Characters
               </span>
-              <button class="btn btn-secondary btn-sm" id="btn-recognize-page" onclick="recognizeCurrentPageCharacters()" title="Scan this page to recognize characters" style="padding:2px 8px;font-size:0.72rem;height:24px;">
-                <i class="ri-scan-line"></i> Scan Page
-              </button>
+              <div style="display:flex;align-items:center;gap:4px;">
+                <select id="recognition-mode-select" class="form-select" style="font-size:0.7rem;padding:1px 6px;height:24px;background:var(--card-bg, #1a1a24);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;" title="Character Recognition Engine">
+                  <option value="auto" selected>Auto</option>
+                  <option value="offline_ai">Offline AI (CLIP)</option>
+                  <option value="heuristics">Fast Heuristics</option>
+                  <option value="gemini">Google Gemini</option>
+                </select>
+                <button class="btn btn-secondary btn-sm" id="btn-recognize-page" onclick="recognizeCurrentPageCharacters()" title="Scan this page to recognize characters" style="padding:2px 8px;font-size:0.72rem;height:24px;white-space:nowrap;">
+                  <i class="ri-scan-line"></i> Scan Page
+                </button>
+              </div>
             </div>
             <div id="palette-page-characters-chips" style="display:flex;flex-wrap:wrap;gap:0.35rem;min-height:22px;align-items:center;">
               <span id="palette-page-chips-placeholder" style="font-size:0.72rem;color:var(--text-secondary);font-style:italic;">

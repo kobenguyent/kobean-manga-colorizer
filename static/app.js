@@ -1968,7 +1968,8 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     contrast: 1.1,
     line_preserve: linePreserve,
     denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
-    active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null
+    active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null,
+    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
   };
 
   try {
@@ -4327,12 +4328,15 @@ async function recognizeCurrentPageCharacters() {
 
   try {
     const apiKey = typeof getActiveApiKey === "function" ? getActiveApiKey() : (document.getElementById("api-key-input")?.value || "");
+    const modeSelect = document.getElementById("recognition-mode-select");
+    const recognitionMode = modeSelect ? modeSelect.value : "auto";
     const resp = await fetch(`/api/session/${currentSession.session_id}/page/${currentPreviewPageIndex}/recognize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         api_key: apiKey || "",
-        model_name: "gemini-2.5-flash"
+        model_name: "gemini-2.5-flash",
+        recognition_mode: recognitionMode
       })
     });
 
@@ -4495,6 +4499,7 @@ async function recolorizePage(pageIdx) {
         force_recolorize: true,
         denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
         active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null,
+        recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto",
       })
     });
 

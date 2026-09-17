@@ -612,15 +612,44 @@ def apply_character_palette_harmonization(
 class MangaCharacterRecognizer:
     """
     Intelligent manga character recognition system:
-    - Analyzes manga panels and candidate figure silhouettes.
-    - Evaluates hair shading (black ink vs screentone vs light), accessories (glasses, hats, horns),
+    - Pre-trained Offline Neural AI (CLIP zero-shot visual character classification) running on MPS / CPU.
+    - Candidate figure silhouette & manga panel isolation.
+    - Hair shading analysis (black ink vs screentone vs light), accessories (glasses, hats, horns),
       and chibi vs standard proportions.
     - Checks dialogue keywords if text is available.
-    - Supports multimodal AI verification (Google Gemini) when API key is available.
+    - Multimodal AI verification (Google Gemini) when API key is available.
     """
 
+    _clip_model = None
+    _clip_processor = None
+    _clip_device = None
+
     def __init__(self):
-        pass
+        self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+    @classmethod
+    def _ensure_clip(cls):
+        """Lazy-loads openai/clip-vit-base-patch32 singleton model and processor."""
+        if cls._clip_model is not None and cls._clip_processor is not None:
+            return cls._clip_model, cls._clip_processor, cls._clip_device
+
+        try:
+            from transformers import CLIPModel, CLIPProcessor
+
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            model_name = "openai/clip-vit-base-patch32"
+            processor = CLIPProcessor.from_pretrained(model_name)
+            model = CLIPModel.from_pretrained(model_name).to(device)
+            model.eval()
+
+            cls._clip_model = model
+            cls._clip_processor = processor
+            cls._clip_device = device
+            print(f"[MangaCharacterRecognizer] Loaded offline CLIP model on {device}")
+            return cls._clip_model, cls._clip_processor, cls._clip_device
+        except Exception as e:
+            print(f"[MangaCharacterRecognizer WARNING] Could not load offline CLIP model: {e}")
+            return None, None, None
 
     def recognize_page_characters(
         self,
@@ -630,11 +659,57 @@ class MangaCharacterRecognizer:
         model_name: str = "",
         page_text: str = "",
         min_confidence: float = 0.35,
+        recognition_mode: str = "auto",
     ) -> list[RecognizedCharacter]:
         if not palette or not palette.characters:
             return []
 
-        # 1. If Google Gemini API key is available, attempt multimodal vision recognition
+        mode = (recognition_mode or "auto").lower()
+
+        # 1. Explicit Google Gemini cloud vision mode
+        if mode in ("gemini", "cloud", "gemini_multimodal"):
+            gemini_key = (
+                api_key
+                or os.environ.get("GOOGLE_API_KEY", "")
+                or os.environ.get("GEMINI_API_KEY", "")
+            )
+            if gemini_key:
+                try:
+                    res = self._recognize_with_gemini(
+                        image_path=image_path,
+                        palette=palette,
+                        api_key=gemini_key,
+                        model_name=model_name,
+                    )
+                    if res:
+                        return res
+                except Exception as e:
+                    print(f"[MangaCharacterRecognizer] Gemini recognition error: {e}")
+            # Fallback to offline CLIP or heuristics if gemini had no results
+            clip_res = self._recognize_with_clip(image_path, palette, min_confidence)
+            if clip_res:
+                return clip_res
+            return self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+
+        # 2. Explicit Fast Visual Heuristics mode
+        if mode in ("heuristics", "fast", "visual_heuristic"):
+            return self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+
+        # 3. Explicit Offline Pre-trained Neural AI (CLIP) mode
+        if mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai"):
+            try:
+                res = self._recognize_with_clip(
+                    image_path=image_path,
+                    palette=palette,
+                    min_confidence=min_confidence,
+                )
+                if res:
+                    return res
+            except Exception as e:
+                print(f"[MangaCharacterRecognizer WARNING] Offline CLIP error: {e}")
+            return self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+
+        # 4. Auto mode (Best Available: Gemini -> Offline CLIP -> Fast Heuristics)
         gemini_key = (
             api_key
             or os.environ.get("GOOGLE_API_KEY", "")
@@ -653,7 +728,19 @@ class MangaCharacterRecognizer:
             except Exception as e:
                 print(f"[MangaCharacterRecognizer] Gemini recognition fallback: {e}")
 
-        # 2. Visual Heuristic Recognition (Fast, Offline, No API key needed)
+        # Try offline pre-trained CLIP neural network
+        try:
+            clip_results = self._recognize_with_clip(
+                image_path=image_path,
+                palette=palette,
+                min_confidence=min_confidence,
+            )
+            if clip_results:
+                return clip_results
+        except Exception as e:
+            print(f"[MangaCharacterRecognizer] Offline CLIP fallback: {e}")
+
+        # Fallback to visual heuristics
         return self._recognize_heuristics(
             image_path=image_path,
             palette=palette,
@@ -766,6 +853,146 @@ class MangaCharacterRecognizer:
                 )
         return results
 
+    def _extract_candidate_boxes(self, img: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """
+        Extracts candidate panel and figure bounding boxes (y0, x0, y1, x1) from grayscale image.
+        Uses morphological closing and contour analysis to locate panel segments and character silhouettes.
+        """
+        h, w = img.shape
+        candidate_boxes: list[tuple[int, int, int, int]] = []
+        scale = 1.0
+        if max(h, w) > 1200:
+            scale = 1200.0 / max(h, w)
+            small = cv2.resize(
+                img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+            )
+        else:
+            small = img
+
+        sh, sw = small.shape
+        ink_mask = (small < 215).astype(np.uint8) * 255
+        kernel_size = max(5, int(min(sh, sw) / 45))
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        closed = cv2.morphologyEx(ink_mask, cv2.MORPH_CLOSE, k)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            area = bw * bh
+            if 0.02 * sh * sw <= area <= 0.88 * sh * sw and bw >= 30 and bh >= 40:
+                orig_y0 = int(by / scale)
+                orig_x0 = int(bx / scale)
+                orig_y1 = min(h, int((by + bh) / scale))
+                orig_x1 = min(w, int((bx + bw) / scale))
+                candidate_boxes.append((orig_y0, orig_x0, orig_y1, orig_x1))
+
+        if not candidate_boxes:
+            candidate_boxes.append((int(0.05 * h), int(0.05 * w), int(0.95 * h), int(0.95 * w)))
+
+        return candidate_boxes
+
+    def _recognize_with_clip(
+        self,
+        image_path: str,
+        palette: CharacterPalette,
+        min_confidence: float = 0.35,
+    ) -> list[RecognizedCharacter]:
+        """
+        Zero-shot offline character recognition using pre-trained CLIP vision-language transformer.
+        Locates candidate panels/figures and performs zero-shot classification against character descriptions.
+        """
+        model, processor, device = self._ensure_clip()
+        if model is None or processor is None:
+            return []
+
+        pil_img = Image.open(image_path).convert("RGB")
+        w_img, h_img = pil_img.size
+
+        cv_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if cv_img is None:
+            cv_img = np.array(pil_img.convert("L"))
+
+        candidate_boxes = self._extract_candidate_boxes(cv_img)
+        if not candidate_boxes:
+            candidate_boxes = [(int(0.05 * h_img), int(0.05 * w_img), int(0.95 * h_img), int(0.95 * w_img))]
+
+        series = getattr(palette, "preset_title", None) or getattr(palette, "title", None) or "manga"
+        prompts = [
+            f"manga drawing of {c.name} from {series}" + (f", {c.notes}" if c.notes else "")
+            for c in palette.characters
+        ]
+        neutral_prompt = "manga speech bubble, sound effect, or scenery background without characters"
+        all_prompts = prompts + [neutral_prompt]
+        num_chars = len(palette.characters)
+
+        # Collect candidate crops
+        valid_boxes: list[tuple[int, int, int, int]] = []
+        crops: list[Image.Image] = []
+        for y0, x0, y1, x1 in candidate_boxes:
+            bh = y1 - y0
+            bw = x1 - x0
+            if bh >= 30 and bw >= 30:
+                valid_boxes.append((y0, x0, y1, x1))
+                crops.append(pil_img.crop((x0, y0, x1, y1)))
+
+        if not crops:
+            valid_boxes = [(0, 0, h_img, w_img)]
+            crops = [pil_img]
+
+        inputs = processor(
+            text=all_prompts,
+            images=crops,
+            return_tensors="pt",
+            padding=True,
+        ).to(device)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+            probs_matrix = outputs.logits_per_image.softmax(dim=1).cpu().numpy()
+
+        recognized_candidates: list[RecognizedCharacter] = []
+        for (y0, x0, y1, x1), probs in zip(valid_boxes, probs_matrix):
+            top_idx = int(np.argmax(probs))
+            top_prob = float(probs[top_idx])
+
+            # If the candidate crop was classified as neutral background/bubble, skip
+            if top_idx >= num_chars:
+                continue
+
+            char_probs = probs[:num_chars]
+            char_sum = float(np.sum(char_probs))
+            rel_conf = (top_prob / char_sum) if char_sum > 0 else top_prob
+
+            if top_prob >= min_confidence or (rel_conf >= 0.50 and top_prob >= 0.18):
+                matched_char = palette.characters[top_idx]
+                norm_box = (
+                    round(y0 / float(h_img), 4),
+                    round(x0 / float(w_img), 4),
+                    round(y1 / float(h_img), 4),
+                    round(x1 / float(w_img), 4),
+                )
+                effective_conf = min(0.99, round(max(top_prob, rel_conf * 0.85), 2))
+                recognized_candidates.append(
+                    RecognizedCharacter(
+                        name=matched_char.name,
+                        confidence=effective_conf,
+                        bounding_box=norm_box,
+                        detection_method="offline_clip_ai",
+                        matched_features=[
+                            f"clip_score:{top_prob:.2f}",
+                            f"rel_score:{rel_conf:.2f}",
+                        ],
+                    )
+                )
+
+        # Deduplicate per character: keep highest confidence
+        best_per_char: dict[str, RecognizedCharacter] = {}
+        for rc in recognized_candidates:
+            if rc.name not in best_per_char or rc.confidence > best_per_char[rc.name].confidence:
+                best_per_char[rc.name] = rc
+
+        return sorted(best_per_char.values(), key=lambda x: x.confidence, reverse=True)
+
     def _recognize_heuristics(
         self,
         image_path: str,
@@ -800,35 +1027,7 @@ class MangaCharacterRecognizer:
                         break
 
         # 2. Candidate panel / figure detection
-        candidate_boxes: list[tuple[int, int, int, int]] = []
-        scale = 1.0
-        if max(h, w) > 1200:
-            scale = 1200.0 / max(h, w)
-            small = cv2.resize(
-                img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
-            )
-        else:
-            small = img
-
-        sh, sw = small.shape
-        ink_mask = (small < 215).astype(np.uint8) * 255
-        kernel_size = max(5, int(min(sh, sw) / 45))
-        k = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-        closed = cv2.morphologyEx(ink_mask, cv2.MORPH_CLOSE, k)
-
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours:
-            bx, by, bw, bh = cv2.boundingRect(cnt)
-            area = bw * bh
-            if 0.02 * sh * sw <= area <= 0.88 * sh * sw and bw >= 30 and bh >= 40:
-                orig_y0 = int(by / scale)
-                orig_x0 = int(bx / scale)
-                orig_y1 = min(h, int((by + bh) / scale))
-                orig_x1 = min(w, int((bx + bw) / scale))
-                candidate_boxes.append((orig_y0, orig_x0, orig_y1, orig_x1))
-
-        if not candidate_boxes:
-            candidate_boxes.append((int(0.05 * h), int(0.05 * w), int(0.95 * h), int(0.95 * w)))
+        candidate_boxes = self._extract_candidate_boxes(img)
 
         recognized_candidates: list[RecognizedCharacter] = []
 
@@ -1238,6 +1437,7 @@ class MangaColorizerEngine:
         character_palette: Optional["CharacterPalette"] = None,
         denoise_screentone: bool = True,
         denoise_sigma: int = 25,
+        recognition_mode: str = "auto",
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -1253,6 +1453,7 @@ class MangaColorizerEngine:
                                 remove halftone dots before neural colorization while
                                 preserving 100% native ink lines downstream.
             denoise_sigma:      Denoising noise level (default 25).
+            recognition_mode:   Character recognition mode ("auto", "offline_ai", "heuristics", "gemini").
         """
         # ── Early exit: page already has colors ─────────────────────
         if skip_if_colored and is_colored_page(image_path):
@@ -1284,6 +1485,7 @@ class MangaColorizerEngine:
                         palette=character_palette,
                         api_key=api_key,
                         model_name=model_name,
+                        recognition_mode=recognition_mode,
                     )
                     recognized_chars = [r.to_dict() for r in recs]
                     active_palette = character_palette.optimize_for_page(recs)

@@ -1022,3 +1022,148 @@ def test_preview_with_active_character_names_override(tmp_path):
         SESSION_PALETTES.pop(session_id, None)
 
 
+def test_offline_clip_character_recognition():
+    """Verifies that offline pre-trained CLIP model accurately detects manga characters."""
+    from colorizer_engine import MangaCharacterRecognizer, CharacterPalette, CharacterEntry
+    from manga_presets import get_preset_by_id
+
+    recognizer = MangaCharacterRecognizer()
+    preset = get_preset_by_id("one_piece")
+    assert preset is not None
+
+    palette = CharacterPalette(
+        preset_title=preset.title,
+        characters=[
+            CharacterEntry(name=c.name, hair_hex=c.hair_hex, notes=c.notes)
+            for c in preset.characters
+        ],
+    )
+
+    demo_img = Path("demo/original.png")
+    if not demo_img.exists():
+        pytest.skip("demo/original.png not available")
+
+    # Run offline CLIP AI recognition
+    recs = recognizer.recognize_page_characters(
+        image_path=str(demo_img),
+        palette=palette,
+        recognition_mode="offline_ai",
+    )
+
+    assert len(recs) >= 1
+    # Check that Chopper was detected by CLIP
+    top_char = recs[0]
+    assert top_char.name == "Tony Tony Chopper"
+    assert top_char.detection_method == "offline_clip_ai"
+    assert top_char.confidence >= 0.40
+    assert top_char.bounding_box is not None
+    assert len(top_char.bounding_box) == 4
+
+
+def test_manga_character_recognizer_mode_routing_and_fallbacks(tmp_path):
+    """Verifies mode selection routing and error fallback behavior."""
+    from colorizer_engine import MangaCharacterRecognizer, CharacterPalette, CharacterEntry
+
+    img_path = tmp_path / "panel.png"
+    # Create test image with ink figure
+    arr = np.ones((200, 200), dtype=np.uint8) * 255
+    arr[40:160, 40:160] = 30
+    Image.fromarray(arr).save(img_path)
+
+    palette = CharacterPalette(
+        preset_title="Test Manga",
+        characters=[
+            CharacterEntry(name="Hero", visual_traits=["black_hair"]),
+            CharacterEntry(name="Sidekick", visual_traits=["light_hair"]),
+        ],
+    )
+    recognizer = MangaCharacterRecognizer()
+
+    # 1. Fast heuristics mode
+    recs_heuristics = recognizer.recognize_page_characters(
+        image_path=str(img_path),
+        palette=palette,
+        recognition_mode="heuristics",
+    )
+    assert len(recs_heuristics) >= 1
+    assert recs_heuristics[0].detection_method == "visual_heuristic"
+
+    # 2. Offline AI fallback when CLIP fails
+    with patch.object(recognizer, "_recognize_with_clip", side_effect=RuntimeError("GPU OOM")):
+        recs_fallback = recognizer.recognize_page_characters(
+            image_path=str(img_path),
+            palette=palette,
+            recognition_mode="offline_ai",
+        )
+        assert len(recs_fallback) >= 1
+        # Seamlessly falls back to visual heuristics
+        assert recs_fallback[0].detection_method == "visual_heuristic"
+
+
+def test_api_recognize_characters_with_mode_selection(tmp_path):
+    """Verifies /api/session/.../recognize endpoint with recognition_mode payload."""
+    from main import SESSIONS, SESSION_PALETTES, STORAGE_DIR, save_session_meta
+    from colorizer_engine import CharacterEntry, CharacterPalette
+
+    session_id = "test_rec_mode_" + str(uuid.uuid4())[:8]
+    sess_dir = STORAGE_DIR / session_id
+    orig_dir = sess_dir / "original"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+
+    img_path = orig_dir / "page_0001.png"
+    arr = np.ones((200, 200), dtype=np.uint8) * 255
+    arr[50:150, 50:150] = 20
+    Image.fromarray(arr).save(img_path)
+
+    SESSIONS[session_id] = {
+        "session_id": session_id,
+        "filename": "onepiece.cbz",
+        "total_pages": 1,
+        "processed_count": 0,
+        "status": "idle",
+        "pages": [
+            {
+                "page_index": 0,
+                "display_name": "Page 1",
+                "filename": "page_0001.png",
+                "original_path": str(img_path),
+                "status": "pending",
+            }
+        ],
+    }
+    SESSION_PALETTES[session_id] = CharacterPalette(
+        preset_title="One Piece",
+        characters=[
+            CharacterEntry(name="Monkey D. Luffy", visual_traits=["black_hair", "straw_hat"]),
+        ],
+    )
+    save_session_meta(session_id)
+
+    try:
+        # 1. Test with explicit heuristics mode
+        resp = client.post(
+            f"/api/session/{session_id}/page/0/recognize",
+            json={"recognition_mode": "heuristics"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert len(data["recognized"]) >= 1
+        assert data["recognized"][0]["detection_method"] == "visual_heuristic"
+
+        # 2. Test with explicit auto mode
+        resp = client.post(
+            f"/api/session/{session_id}/page/0/recognize",
+            json={"recognition_mode": "auto"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert len(data["recognized"]) >= 1
+    finally:
+        shutil.rmtree(sess_dir, ignore_errors=True)
+        SESSIONS.pop(session_id, None)
+        SESSION_PALETTES.pop(session_id, None)
+
+
+
