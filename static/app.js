@@ -594,6 +594,19 @@ function setupEventListeners() {
     });
   }
 
+  // Combined Chunk & Custom Size sync
+  const combinedChunk = document.getElementById("combined-chunk-select");
+  const customSizeBox = document.getElementById("combined-custom-size-box");
+  if (combinedChunk && customSizeBox) {
+    combinedChunk.addEventListener("change", () => {
+      if (combinedChunk.value === "size_custom") {
+        customSizeBox.classList.remove("hidden");
+      } else {
+        customSizeBox.classList.add("hidden");
+      }
+    });
+  }
+
   // Setup Split Slider Dragging
   setupSplitSlider();
 }
@@ -2918,18 +2931,22 @@ async function exportCombined(format = "epub") {
     title = isOriginal ? "Manga Collection" : "Colorized Manga Collection";
   }
 
-  const chunkVal = document.getElementById("combined-chunk-select")?.value || "none";
+  const chunkVal = document.getElementById("combined-chunk-select")?.value || "size_250";
   let chunkBy = "none";
   let chunkSize = 3;
-  if (chunkVal === "volumes_3") {
+  if (chunkVal === "none") {
+    chunkBy = "none";
+    chunkSize = 0;
+  } else if (chunkVal.startsWith("volumes_")) {
     chunkBy = "volumes";
-    chunkSize = 3;
-  } else if (chunkVal === "volumes_5") {
-    chunkBy = "volumes";
-    chunkSize = 5;
-  } else if (chunkVal === "size_500") {
+    chunkSize = parseInt(chunkVal.replace("volumes_", ""), 10) || 3;
+  } else if (chunkVal === "size_custom") {
     chunkBy = "size_mb";
-    chunkSize = 500;
+    const customMb = parseInt(document.getElementById("combined-custom-size-input")?.value, 10);
+    chunkSize = (!isNaN(customMb) && customMb >= 20) ? customMb : 200;
+  } else if (chunkVal.startsWith("size_")) {
+    chunkBy = "size_mb";
+    chunkSize = parseInt(chunkVal.replace("size_", ""), 10) || 250;
   }
 
   const presetVal = document.getElementById("combined-preset-select")?.value || "colorsoft";

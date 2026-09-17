@@ -417,11 +417,28 @@
                     <i class="ri-split-cells-vertical"></i> Series Splitting (Kindle Indexing Safe):
                   </label>
                   <select id="combined-chunk-select" class="form-select form-select-sm">
-                    <option value="none" selected>📜 Single Continuous File (All volumes merged)</option>
-                    <option value="volumes_3">📚 3-in-1 Omnibus Edition (ZIP bundle of 3-vol parts)</option>
-                    <option value="volumes_5">📦 5-in-1 Omnibus Edition (ZIP bundle of 5-vol parts)</option>
-                    <option value="size_500">⚡ Auto-split at ~500 MB limit (ZIP bundle)</option>
+                    <option value="size_250" selected>⚡ Auto-split at ~250 MB (Kindle Paperwhite/Oasis Optimal)</option>
+                    <option value="size_200">⚡ Auto-split at ~200 MB (Send-to-Kindle Web Max)</option>
+                    <option value="size_100">⚡ Auto-split at ~100 MB (Send-to-Kindle Email Safe)</option>
+                    <option value="size_350">⚡ Auto-split at ~350 MB (Colorsoft / Kobo Optimal)</option>
+                    <option value="size_500">⚡ Auto-split at ~500 MB (Large Tablets / iPad)</option>
+                    <option value="size_custom">⚙️ Auto-split at Custom MB Size...</option>
+                    <option value="volumes_1">📖 1 Volume per Part (Single volumes ZIP)</option>
+                    <option value="volumes_2">📚 2-in-1 Omnibus Edition (2-vol parts)</option>
+                    <option value="volumes_3">📚 3-in-1 Omnibus Edition (3-vol parts)</option>
+                    <option value="volumes_5">📦 5-in-1 Omnibus Edition (5-vol parts)</option>
+                    <option value="none">📜 Single Continuous File (No splitting - All merged)</option>
                   </select>
+                </div>
+                <div id="combined-custom-size-box" class="omnibus-field hidden" style="margin-top:0.35rem;">
+                  <label for="combined-custom-size-input" class="omnibus-field-label">
+                    <i class="ri-ruler-line"></i> Custom Auto-Split Target:
+                  </label>
+                  <div style="display:flex;align-items:center;gap:0.4rem;">
+                    <input type="number" id="combined-custom-size-input" class="form-input form-input-sm"
+                           min="30" max="2000" step="10" value="200" style="font-size:0.8rem;padding:4px 8px;width:100px;" />
+                    <span style="font-size:0.78rem;color:var(--text-secondary);">MB limit per part</span>
+                  </div>
                 </div>
                 <div class="omnibus-field">
                   <label for="combined-preset-select" class="omnibus-field-label">

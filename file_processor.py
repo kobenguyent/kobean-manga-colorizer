@@ -1388,17 +1388,71 @@ class MangaFileProcessor:
             c_size = max(1, int(chunk_size))
             chunks = [sessions_data[i : i + c_size] for i in range(0, n, c_size)]
         elif chunk_by in ["size_mb", "size"] and chunk_size and chunk_size > 0:
-            budget_kb = max(50, int(chunk_size)) * 1024
-            # Realistic colorized JPEG at 1600px quality 80 is ~320-380 KB; grayscale is ~120 KB
-            avg_page_kb = 120 if grayscale else 350
-            # Safety limit: Kindle e-readers struggle or crash with >600 pages per book file
-            max_pages_per_chunk = 600
+            budget_kb = max(20, int(chunk_size)) * 1024
+            # Realistic per-page size estimation based on format/settings
+            if grayscale:
+                base_page_kb = 160
+            elif max_dimension == 0 or max_dimension is None or max_dimension >= 1920:
+                base_page_kb = 750
+            else:
+                base_page_kb = 480
+
+            # Safe page threshold: Kindle/Kobo indexers choke when a single volume exceeds 400-500 pages
+            max_pages_per_chunk = min(450, max(80, int(budget_kb / base_page_kb)))
+
+            def _estimate_session_kb(sess: dict) -> int:
+                pages = sess.get("pages", [])
+                p_cnt = len(pages)
+                if p_cnt == 0:
+                    return 0
+                sample_bytes = []
+                sess_id = sess.get("session_id", "")
+                colorized_dir = self.storage_dir / sess_id / "colorized"
+                for p in pages[:4]:
+                    p_path = None
+                    if export_original:
+                        p_path = Path(p.get("original_path", ""))
+                    else:
+                        p_path = colorized_dir / p.get("filename", "")
+                        if not p_path.exists():
+                            p_path = Path(p.get("original_path", ""))
+                    if p_path and p_path.exists():
+                        sample_bytes.append(p_path.stat().st_size)
+                if sample_bytes:
+                    avg_b = sum(sample_bytes) / len(sample_bytes)
+                    factor = 1.0
+                    if max_dimension and max_dimension > 0 and max_dimension <= 1600:
+                        factor = 0.70
+                    if grayscale:
+                        factor *= 0.50
+                    return int((avg_b * factor * p_cnt) / 1024)
+                return int(p_cnt * base_page_kb)
+
+            # Subdivide any huge single session that exceeds budget or max pages
+            normalized_sessions = []
+            for s in sessions_data:
+                pages = s.get("pages", [])
+                s_est_kb = _estimate_session_kb(s)
+                if (len(pages) > max_pages_per_chunk or s_est_kb > budget_kb) and len(pages) > 1:
+                    per_page_kb = max(1, s_est_kb // len(pages))
+                    slice_size = min(max_pages_per_chunk, max(30, budget_kb // per_page_kb))
+                    stem = Path(s.get("filename", "Volume")).stem
+                    for slice_idx, start_i in enumerate(range(0, len(pages), slice_size), start=1):
+                        slice_pages = pages[start_i : start_i + slice_size]
+                        end_i = start_i + len(slice_pages)
+                        sub_sess = dict(s)
+                        sub_sess["pages"] = slice_pages
+                        sub_sess["filename"] = f"{stem} (p.{start_i + 1:03d}-{end_i:03d})"
+                        normalized_sessions.append(sub_sess)
+                else:
+                    normalized_sessions.append(s)
+
             curr_chunk = []
             curr_kb = 0
             curr_pages = 0
-            for s in sessions_data:
+            for s in normalized_sessions:
                 p_cnt = len(s.get("pages", []))
-                s_kb = p_cnt * avg_page_kb
+                s_kb = _estimate_session_kb(s)
                 if curr_chunk and (
                     (curr_kb + s_kb > budget_kb) or (curr_pages + p_cnt > max_pages_per_chunk)
                 ):

@@ -1627,8 +1627,11 @@ async def export_combined_volume(req: CombinedExportRequest):
     if chunk_by == "volumes" and n > chunk_size:
         will_chunk = True
     elif chunk_by in ["size_mb", "size"]:
-        avg_kb = 120 if is_gray else 350
-        if (total_pages * avg_kb) > (max(50, chunk_size) * 1024) or total_pages > 600:
+        budget_mb = max(20, chunk_size)
+        avg_kb = 160 if is_gray else (480 if (max_dim and max_dim <= 1600) else 750)
+        total_est_mb = (total_pages * avg_kb) / 1024
+        max_safe_pages = min(450, max(80, int((budget_mb * 1024) / avg_kb)))
+        if total_est_mb > budget_mb or total_pages > max_safe_pages or (n > 1 and total_pages > 220):
             will_chunk = True
 
     if will_chunk:
