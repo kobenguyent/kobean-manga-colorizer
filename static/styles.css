@@ -536,7 +536,9 @@ select option {
    ========================================================================== */
 
 /* Visually hide native select while keeping it in DOM for forms/accessibility */
-.form-select.custom-select-hidden {
+select.custom-select-hidden,
+.form-select.custom-select-hidden,
+.custom-select-hidden {
   position: absolute !important;
   width: 1px !important;
   height: 1px !important;
@@ -548,6 +550,24 @@ select option {
   border: 0 !important;
   opacity: 0 !important;
   pointer-events: none !important;
+}
+
+.custom-select-group-header {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted, #94a3b8);
+  padding: 0.45rem 0.75rem 0.2rem;
+  pointer-events: none;
+  user-select: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 4px;
+}
+
+.custom-select-group-header:first-child {
+  border-top: none;
+  margin-top: 0;
 }
 
 .custom-select-container {

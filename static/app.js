@@ -64,6 +64,9 @@ function initCustomSelect(selectElement) {
   if (selectElement.classList.contains("form-select-sm") || selectElement.classList.contains("custom-select-sm")) {
     container.classList.add("custom-select-sm");
   }
+  if (selectElement.style.flex) {
+    container.style.flex = selectElement.style.flex;
+  }
   container.id = `custom-select-${selectElement.id}`;
 
   // Create trigger button
@@ -112,7 +115,17 @@ function initCustomSelect(selectElement) {
       labelSpan.innerText = "";
     }
 
+    let lastGroup = null;
     options.forEach((opt, idx) => {
+      const groupLabel = opt.parentElement && opt.parentElement.tagName === "OPTGROUP" ? opt.parentElement.label : null;
+      if (groupLabel && groupLabel !== lastGroup) {
+        lastGroup = groupLabel;
+        const grpHdr = document.createElement("div");
+        grpHdr.className = "custom-select-group-header";
+        grpHdr.textContent = groupLabel;
+        optionsContainer.appendChild(grpHdr);
+      }
+
       const isSelected = opt.selected || opt.value === selectElement.value;
       const optElem = document.createElement("div");
       optElem.className = `custom-select-option ${isSelected ? "selected" : ""}`;
@@ -3938,6 +3951,9 @@ function populatePresetDropdown() {
 
   select.appendChild(group);
   if (currentVal) select.value = currentVal;
+  if (select.refreshCustomSelect) {
+    select.refreshCustomSelect();
+  }
 }
 
 /**
@@ -3964,6 +3980,9 @@ async function paletteLoadFromServer() {
         select.appendChild(opt);
       }
       select.value = currentPresetId || "";
+      if (select.refreshCustomSelect) {
+        select.refreshCustomSelect();
+      }
     }
 
     // Auto-detected badge
@@ -4003,6 +4022,11 @@ async function onMangaPresetSelected(presetId) {
   if (!currentSession) {
     showToast("No active session selected.", "warning");
     return;
+  }
+
+  const select = document.getElementById("palette-preset-select");
+  if (select && select.refreshCustomSelect) {
+    select.refreshCustomSelect();
   }
 
   if (!presetId) {
