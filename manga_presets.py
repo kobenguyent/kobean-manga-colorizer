@@ -28,6 +28,56 @@ class PresetCharacter:
     costume_hex: str = ""
     extra_hex: str = ""
     notes: str = ""
+    visual_traits: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.visual_traits:
+            self.visual_traits = self._infer_visual_traits()
+        if not self.keywords:
+            self.keywords = self._infer_keywords()
+
+    def _infer_visual_traits(self) -> list[str]:
+        traits = []
+        if self.hair_hex:
+            hx = self.hair_hex.strip().lstrip("#")
+            if len(hx) >= 6:
+                try:
+                    r, g, b = int(hx[:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+                    brightness = (r + g + b) / 3.0
+                    if brightness < 55:
+                        traits.append("black_hair")
+                    elif brightness > 175:
+                        traits.append("light_hair")
+                    else:
+                        traits.append("screentone_hair")
+                except Exception:
+                    pass
+        n_lower = (self.notes + " " + self.name).lower()
+        if "straw hat" in n_lower:
+            traits.append("straw_hat")
+        elif "hat" in n_lower or "cap" in n_lower:
+            traits.append("hat")
+        if "glasses" in n_lower:
+            traits.append("glasses")
+        if "winged" in n_lower or "wing" in n_lower:
+            traits.append("winged_cap")
+        if "antler" in n_lower or "fur" in n_lower:
+            traits.append("antlers")
+        if "whiskers" in n_lower or "bell" in n_lower or "doraemon" in n_lower:
+            traits.append("round_head")
+        if "chibi" in n_lower or "small" in n_lower or "kid" in n_lower or "child" in n_lower:
+            traits.append("chibi")
+        else:
+            traits.append("standard_body")
+        return traits
+
+    def _infer_keywords(self) -> list[str]:
+        kw = [self.name.lower()]
+        for part in re.split(r"[\s\(\)\-\.]+", self.name):
+            if len(part) >= 3 and part.lower() not in kw:
+                kw.append(part.lower())
+        return kw
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +87,8 @@ class PresetCharacter:
             "costume_hex": self.costume_hex,
             "extra_hex": self.extra_hex,
             "notes": self.notes,
+            "visual_traits": self.visual_traits,
+            "keywords": self.keywords,
         }
 
     @classmethod
@@ -48,6 +100,8 @@ class PresetCharacter:
             costume_hex=d.get("costume_hex", ""),
             extra_hex=d.get("extra_hex", ""),
             notes=d.get("notes", ""),
+            visual_traits=d.get("visual_traits", []),
+            keywords=d.get("keywords", []),
         )
 
 

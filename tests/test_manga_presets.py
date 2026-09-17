@@ -709,3 +709,316 @@ def test_colorize_page_denoise_screentone_flags(tmp_path):
     )
     assert res2["status"] == "success"
 
+
+def test_character_entry_traits_and_serialization():
+    """Verifies automatic trait and keyword inference for CharacterEntry."""
+    from colorizer_engine import CharacterEntry, RecognizedCharacter
+
+    # Luffy: black hair + straw hat
+    c1 = CharacterEntry(
+        name="Monkey D. Luffy",
+        hair_hex="#111111",
+        costume_hex="#D62828",
+        notes="Red vest, blue shorts, yellow straw hat",
+    )
+    assert "black_hair" in c1.visual_traits
+    assert "straw_hat" in c1.visual_traits
+    assert "luffy" in c1.keywords
+
+    # Arale: screentone hair + round glasses + chibi
+    c2 = CharacterEntry(
+        name="Arale Norimaki",
+        hair_hex="#8B2BE2",
+        costume_hex="#E63946",
+        notes="Purple hair, large round glasses, winged cap, chibi",
+    )
+    assert "screentone_hair" in c2.visual_traits
+    assert "glasses" in c2.visual_traits
+    assert "chibi" in c2.visual_traits
+    assert "arale" in c2.keywords
+
+    # Serialization with bounding_box
+    c1.bounding_box = (0.1, 0.2, 0.8, 0.9)
+    d1 = c1.to_dict()
+    assert d1["bounding_box"] == [0.1, 0.2, 0.8, 0.9]
+    c1_restored = CharacterEntry.from_dict(d1)
+    assert c1_restored.bounding_box == (0.1, 0.2, 0.8, 0.9)
+
+    # RecognizedCharacter serialization
+    rc = RecognizedCharacter(
+        name="Zoro",
+        confidence=0.85,
+        bounding_box=(0.15, 0.25, 0.75, 0.85),
+        detection_method="visual_heuristic",
+        matched_features=["screentone_hair", "standard_body"],
+    )
+    rc_dict = rc.to_dict()
+    assert rc_dict["confidence"] == 0.85
+    rc_restored = RecognizedCharacter.from_dict(rc_dict)
+    assert rc_restored.name == "Zoro"
+    assert rc_restored.bounding_box == (0.15, 0.25, 0.75, 0.85)
+
+
+def test_character_palette_optimize_for_page():
+    """Verifies that CharacterPalette.optimize_for_page isolates the active character."""
+    from colorizer_engine import CharacterEntry, CharacterPalette, RecognizedCharacter
+
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(name="Monkey D. Luffy", costume_hex="#D62828"),
+            CharacterEntry(name="Roronoa Zoro", costume_hex="#1C4428"),
+            CharacterEntry(name="Nami", costume_hex="#264653"),
+        ],
+        preset_id="one_piece",
+        preset_title="One Piece",
+    )
+
+    # Zoro is recognized on this specific page
+    recognized = [
+        RecognizedCharacter(
+            name="Roronoa Zoro",
+            confidence=0.88,
+            bounding_box=(0.1, 0.2, 0.8, 0.9),
+            detection_method="visual_heuristic",
+        )
+    ]
+
+    opt_pal = palette.optimize_for_page(recognized)
+    assert len(opt_pal.characters) == 1
+    assert opt_pal.characters[0].name == "Roronoa Zoro"
+    assert opt_pal.characters[0].bounding_box == (0.1, 0.2, 0.8, 0.9)
+    # Luffy and Nami are omitted so their red/orange/blue colors do not bleed onto Zoro
+    assert not any(c.name == "Monkey D. Luffy" for c in opt_pal.characters)
+
+    # Fallback when recognition is empty or below threshold
+    opt_fallback = palette.optimize_for_page([])
+    assert len(opt_fallback.characters) == 3
+    assert opt_fallback.characters[0].name == "Monkey D. Luffy"
+    assert opt_fallback.characters[0].bounding_box is None
+
+
+def test_hint_tensor_with_bounding_box():
+    """Verifies that hint seeds are strictly constrained to the character's bounding box."""
+    import torch
+    from colorizer_engine import CharacterEntry, CharacterPalette
+
+    # Palette with Zoro constrained to top-left quadrant [0.0, 0.0, 0.5, 0.5]
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Roronoa Zoro",
+                costume_hex="#1C4428",
+                bounding_box=(0.0, 0.0, 0.5, 0.5),
+            )
+        ]
+    )
+
+    h, w = 200, 200
+    # Sketch with screentone patches in both top-left (Zoro) and bottom-right (other panel)
+    sketch = np.ones((h, w), dtype=np.float32)
+    sketch[20:60, 20:60] = 0.50     # Candidate in top-left
+    sketch[120:160, 120:160] = 0.50 # Candidate in bottom-right
+
+    hint = palette.build_hint_tensor(h, w, device="cpu", sketch_gray=sketch)
+    mask = hint[0, 3].numpy()
+
+    # Seeds should exist in top-left quadrant
+    top_left_seeds = np.sum(mask[:100, :100] > 0)
+    # No seeds should exist in bottom-right quadrant
+    bottom_right_seeds = np.sum(mask[100:, 100:] > 0)
+
+    assert top_left_seeds > 0, "Expected seed in top-left region"
+    assert bottom_right_seeds == 0, "Seed incorrectly leaked outside bounding box into bottom-right"
+
+
+def test_harmonization_with_bounding_box():
+    """Verifies that color harmonization only snaps hues within the character's bounding box."""
+    import cv2
+    from colorizer_engine import CharacterEntry, CharacterPalette, apply_character_palette_harmonization
+
+    # Zoro: canonical green (#1C4428) constrained to left half of image
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Roronoa Zoro",
+                costume_hex="#1C4428",
+                bounding_box=(0.0, 0.0, 1.0, 0.5),  # left half
+            )
+        ]
+    )
+
+    # Create image with muted green-teal pixels everywhere
+    img = np.full((100, 100, 3), [40, 110, 50], dtype=np.uint8)
+
+    harmonized = apply_character_palette_harmonization(img, palette)
+
+    # Left half (inside Zoro's box) should be harmonized towards Zoro's hue
+    left_sample = harmonized[50, 25]
+    # Right half (outside Zoro's box) should remain untouched
+    right_sample = harmonized[50, 75]
+
+    assert not np.array_equal(left_sample, [40, 110, 50]), "Expected left half to be harmonized"
+    assert np.max(np.abs(right_sample.astype(int) - np.array([40, 110, 50]))) <= 1, "Right half outside bounding box should remain untouched"
+    assert not np.array_equal(left_sample, right_sample), "Harmonized left half should differ from unharmonized right half"
+
+
+def test_manga_character_recognizer_heuristics(tmp_path):
+    """Verifies visual heuristic recognition differentiates characters by features."""
+    import cv2
+    from colorizer_engine import CharacterEntry, CharacterPalette, MangaCharacterRecognizer
+
+    recognizer = MangaCharacterRecognizer()
+
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Monkey D. Luffy",
+                hair_hex="#111111",
+                costume_hex="#D62828",
+                notes="Red vest, yellow straw hat",
+            ),
+            CharacterEntry(
+                name="Roronoa Zoro",
+                hair_hex="#4E8A3C",
+                costume_hex="#1C4428",
+                notes="Green haramaki and coat",
+            ),
+        ]
+    )
+
+    # Create a synthetic image of a figure with screentone hair (Zoro's characteristic)
+    test_img = np.full((400, 300), 245, dtype=np.uint8)
+    # Figure panel
+    test_img[50:350, 40:260] = 235
+    # Screentone hair in top of figure: gray ~120
+    test_img[60:110, 80:220] = 120
+    # Lineart body
+    cv2.rectangle(test_img, (60, 120), (240, 340), 0, 2)
+
+    img_path = tmp_path / "zoro_test.png"
+    cv2.imwrite(str(img_path), test_img)
+
+    results = recognizer.recognize_page_characters(str(img_path), palette)
+    assert len(results) >= 1
+    # Zoro should be recognized due to screentone hair matching
+    names = [r.name for r in results]
+    assert "Roronoa Zoro" in names
+    top_result = results[0]
+    assert top_result.bounding_box is not None
+
+
+def test_api_recognize_characters_endpoint(tmp_path):
+    """Verifies POST /api/session/{session_id}/page/{page_index}/recognize."""
+    from main import SESSIONS, SESSION_PALETTES, STORAGE_DIR, save_session_meta
+    from colorizer_engine import CharacterEntry, CharacterPalette
+
+    session_id = "test_recog_" + str(uuid.uuid4())[:8]
+    sess_dir = STORAGE_DIR / session_id
+    orig_dir = sess_dir / "original"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+
+    img_path = orig_dir / "page_0001.png"
+    Image.new("L", (200, 200), color=230).save(img_path)
+
+    SESSIONS[session_id] = {
+        "session_id": session_id,
+        "filename": "onepiece.cbz",
+        "total_pages": 1,
+        "processed_count": 0,
+        "status": "idle",
+        "pages": [
+            {
+                "page_index": 0,
+                "filename": "page_0001.png",
+                "original_path": str(img_path),
+                "status": "pending",
+            }
+        ],
+    }
+    SESSION_PALETTES[session_id] = CharacterPalette(
+        characters=[
+            CharacterEntry(name="Monkey D. Luffy", hair_hex="#111111", costume_hex="#D62828", notes="Straw hat"),
+            CharacterEntry(name="Roronoa Zoro", hair_hex="#4E8A3C", costume_hex="#1C4428"),
+        ],
+        preset_id="one_piece",
+    )
+    save_session_meta(session_id)
+
+    try:
+        resp = client.post(f"/api/session/{session_id}/page/0/recognize")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "recognized" in data
+        assert "palette" in data
+        assert len(data["recognized"]) >= 1
+
+        # Check that page metadata saved recognized characters
+        sess = SESSIONS[session_id]
+        page = sess["pages"][0]
+        assert "recognized_characters" in page
+        assert len(page["recognized_characters"]) >= 1
+    finally:
+        shutil.rmtree(sess_dir, ignore_errors=True)
+        SESSIONS.pop(session_id, None)
+        SESSION_PALETTES.pop(session_id, None)
+
+
+def test_preview_with_active_character_names_override(tmp_path):
+    """Verifies that /api/colorize/preview respects active_character_names override."""
+    from main import SESSIONS, SESSION_PALETTES, STORAGE_DIR, save_session_meta
+    from colorizer_engine import CharacterEntry, CharacterPalette
+
+    session_id = "test_prev_override_" + str(uuid.uuid4())[:8]
+    sess_dir = STORAGE_DIR / session_id
+    orig_dir = sess_dir / "original"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+
+    img_path = orig_dir / "page_0001.png"
+    Image.new("L", (100, 100), color=230).save(img_path)
+
+    SESSIONS[session_id] = {
+        "session_id": session_id,
+        "filename": "onepiece.cbz",
+        "total_pages": 1,
+        "processed_count": 0,
+        "status": "idle",
+        "pages": [
+            {
+                "page_index": 0,
+                "display_name": "Page 1",
+                "filename": "page_0001.png",
+                "original_path": str(img_path),
+                "status": "pending",
+            }
+        ],
+    }
+    SESSION_PALETTES[session_id] = CharacterPalette(
+        characters=[
+            CharacterEntry(name="Monkey D. Luffy", costume_hex="#D62828"),
+            CharacterEntry(name="Roronoa Zoro", costume_hex="#1C4428"),
+        ]
+    )
+    save_session_meta(session_id)
+
+    try:
+        # Request preview with only Zoro active
+        resp = client.post(
+            "/api/colorize/preview",
+            json={
+                "session_id": session_id,
+                "page_index": 0,
+                "model_provider": "local_smart",
+                "active_character_names": ["Roronoa Zoro"],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert "recognized_characters" in data
+    finally:
+        shutil.rmtree(sess_dir, ignore_errors=True)
+        SESSIONS.pop(session_id, None)
+        SESSION_PALETTES.pop(session_id, None)
+
+

@@ -1967,7 +1967,8 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     saturation: saturation,
     contrast: 1.1,
     line_preserve: linePreserve,
-    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
+    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
+    active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null
   };
 
   try {
@@ -1981,6 +1982,12 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
+      if (data.recognized_characters) {
+        page.recognized_characters = data.recognized_characters;
+        if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
+          renderPageCharacterChips(data.recognized_characters);
+        }
+      }
       const ts = Date.now();
       
       const imgElem = document.getElementById(`page-img-${pageIdx}`);
@@ -2186,6 +2193,10 @@ function openSplitPreview(pageIdx, preventScroll = false) {
 
   // Reset handle with container dimensions applied
   requestAnimationFrame(() => setSplitPosition(currentSplitPct));
+
+  if (typeof updatePageCharacterChips === "function") {
+    updatePageCharacterChips(pageIdx);
+  }
 }
 
 // --- Comparator Zoom & Pan Engine ---
@@ -4215,6 +4226,10 @@ function paletteRender() {
         </button>
       </div>`;
   }).join("");
+
+  if (typeof updatePageCharacterChips === "function") {
+    updatePageCharacterChips(currentPreviewPageIndex);
+  }
 }
 
 /**
@@ -4288,6 +4303,148 @@ window.paletteLoadFromServer         = paletteLoadFromServer;
 
 
 // ─────────────────────────────────────────────────────────────────────
+//  Page Character Recognition & Optimization UI
+// ─────────────────────────────────────────────────────────────────────
+
+let activePageCharacterNames = new Set();
+
+/**
+ * Scans the current page with character recognition and renders active chips.
+ */
+async function recognizeCurrentPageCharacters() {
+  if (!currentSession || !currentSession.pages || currentPreviewPageIndex < 0) {
+    showToast("No active page selected to scan.", "warning");
+    return;
+  }
+
+  const page = currentSession.pages[currentPreviewPageIndex];
+  const btn = document.getElementById("btn-recognize-page");
+  const origBtnHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line spinner"></i> Scanning…';
+  }
+
+  try {
+    const apiKey = typeof getActiveApiKey === "function" ? getActiveApiKey() : (document.getElementById("api-key-input")?.value || "");
+    const resp = await fetch(`/api/session/${currentSession.session_id}/page/${currentPreviewPageIndex}/recognize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey || "",
+        model_name: "gemini-2.5-flash"
+      })
+    });
+
+    if (!resp.ok) {
+      throw new Error((await resp.json()).detail || "Recognition request failed");
+    }
+
+    const data = await resp.json();
+    const recognized = data.recognized || [];
+    page.recognized_characters = recognized;
+    renderPageCharacterChips(recognized);
+
+    if (recognized.length > 0) {
+      const names = recognized.map(r => r.name).join(", ");
+      showToast(`🎯 Detected: ${names}`, "success");
+    } else {
+      showToast("No specific character recognized on this page.", "info");
+    }
+  } catch (err) {
+    console.warn("[MangaColorizer] Character scan error:", err);
+    showToast(`Scan error: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origBtnHtml || '<i class="ri-scan-line"></i> Scan Page';
+    }
+  }
+}
+
+/**
+ * Updates chips display when switching pages in preview.
+ */
+function updatePageCharacterChips(pageIdx) {
+  if (!currentSession || !currentSession.pages) return;
+  const page = currentSession.pages[pageIdx];
+  if (page && page.recognized_characters && page.recognized_characters.length > 0) {
+    renderPageCharacterChips(page.recognized_characters);
+  } else if (paletteCharacters && paletteCharacters.length > 0) {
+    renderPageCharacterChips(null);
+  } else {
+    renderPageCharacterChips([]);
+  }
+}
+
+/**
+ * Renders interactive character chips for current page.
+ */
+function renderPageCharacterChips(recognizedList) {
+  const container = document.getElementById("palette-page-characters-chips");
+  if (!container) return;
+
+  if (!paletteCharacters || paletteCharacters.length === 0) {
+    container.innerHTML = '<span style="font-size:0.72rem;color:var(--text-secondary);font-style:italic;">No characters in palette</span>';
+    activePageCharacterNames.clear();
+    return;
+  }
+
+  if (recognizedList && recognizedList.length > 0) {
+    activePageCharacterNames.clear();
+    recognizedList.forEach(r => {
+      activePageCharacterNames.add(r.name);
+    });
+  } else if (recognizedList === null) {
+    activePageCharacterNames = new Set(paletteCharacters.map(c => c.name));
+  }
+
+  const recMap = {};
+  if (recognizedList) {
+    recognizedList.forEach(r => {
+      recMap[r.name.toLowerCase()] = r;
+    });
+  }
+
+  container.innerHTML = paletteCharacters.map(ch => {
+    const isSelected = activePageCharacterNames.has(ch.name);
+    const rec = recMap[ch.name.toLowerCase()];
+    const dotColor = ch.costume_hex || ch.hair_hex || "#a855f7";
+    const confBadge = rec && rec.confidence ? `<span class="chip-conf">${Math.round(rec.confidence * 100)}%</span>` : "";
+
+    return `
+      <div class="page-char-chip ${isSelected ? 'active' : ''}" 
+           title="${isSelected ? 'Active on this page (click to exclude)' : 'Excluded from this page (click to include)'}"
+           onclick="togglePageCharacterChip('${encodeURIComponent(ch.name)}')">
+        <span class="chip-dot" style="background:${dotColor};"></span>
+        <span>${escapeHtml(ch.name)}</span>
+        ${confBadge}
+      </div>
+    `;
+  }).join("");
+}
+
+/**
+ * Toggles a character on or off for the active page.
+ */
+function togglePageCharacterChip(encodedName) {
+  const name = decodeURIComponent(encodedName);
+  if (activePageCharacterNames.has(name)) {
+    activePageCharacterNames.delete(name);
+  } else {
+    activePageCharacterNames.add(name);
+  }
+  const page = currentSession?.pages?.[currentPreviewPageIndex];
+  renderPageCharacterChips(page?.recognized_characters || null);
+}
+
+window.recognizeCurrentPageCharacters = recognizeCurrentPageCharacters;
+window.togglePageCharacterChip        = togglePageCharacterChip;
+window.updatePageCharacterChips       = updatePageCharacterChips;
+window.renderPageCharacterChips       = renderPageCharacterChips;
+
+
+// ─────────────────────────────────────────────────────────────────────
 //  Recolorize — force re-run colorization on already-done pages
 // ─────────────────────────────────────────────────────────────────────
 
@@ -4337,6 +4494,7 @@ async function recolorizePage(pageIdx) {
         line_preserve:   linePreserve,
         force_recolorize: true,
         denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
+        active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null,
       })
     });
 
@@ -4344,6 +4502,12 @@ async function recolorizePage(pageIdx) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
+      if (data.recognized_characters) {
+        page.recognized_characters = data.recognized_characters;
+        if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
+          renderPageCharacterChips(data.recognized_characters);
+        }
+      }
       const ts = Date.now();
 
       // Update gallery thumbnail

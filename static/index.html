@@ -329,6 +329,23 @@
           <!-- Character list -->
           <div id="palette-character-list" style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:0.75rem;"></div>
 
+          <!-- Page Recognition & Active Character Chips -->
+          <div id="palette-page-recognition-section" style="margin-bottom:0.75rem;padding:0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
+              <span style="font-size:0.75rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:4px;">
+                <i class="ri-user-search-line" style="color:var(--accent-purple,#a855f7);"></i> Page Characters
+              </span>
+              <button class="btn btn-secondary btn-sm" id="btn-recognize-page" onclick="recognizeCurrentPageCharacters()" title="Scan this page to recognize characters" style="padding:2px 8px;font-size:0.72rem;height:24px;">
+                <i class="ri-scan-line"></i> Scan Page
+              </button>
+            </div>
+            <div id="palette-page-characters-chips" style="display:flex;flex-wrap:wrap;gap:0.35rem;min-height:22px;align-items:center;">
+              <span id="palette-page-chips-placeholder" style="font-size:0.72rem;color:var(--text-secondary);font-style:italic;">
+                Select a page or click Scan to optimize palette
+              </span>
+            </div>
+          </div>
+
           <!-- Add character form -->
           <div style="border-top:1px solid var(--border-color);padding-top:0.75rem;">
             <div class="form-group" style="margin-bottom:0.5rem;">

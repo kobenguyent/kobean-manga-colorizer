@@ -18,6 +18,7 @@ if __name__ == "__main__":
 
 
 import asyncio
+import copy
 import json
 import re
 import shutil
@@ -293,6 +294,7 @@ class PreviewRequest(BaseModel):
     force_recolorize: bool = False
     denoise_screentone: bool = True
     denoise_sigma: int = 25
+    active_character_names: Optional[list[str]] = None
 
 
 # ── Character Palette models ─────────────────────────────────────────
@@ -304,6 +306,15 @@ class CharacterEntryModel(BaseModel):
     skin_hex: str = ""
     costume_hex: str = ""
     extra_hex: str = ""
+    notes: str = ""
+    visual_traits: Optional[list[str]] = None
+    keywords: Optional[list[str]] = None
+    bounding_box: Optional[list[float]] = None
+
+
+class CharacterRecognizeRequest(BaseModel):
+    api_key: Optional[str] = ""
+    model_name: Optional[str] = ""
 
 
 class PaletteUpsertRequest(BaseModel):
@@ -1163,6 +1174,12 @@ async def preview_single_page(req: PreviewRequest):
         if palette and not palette.characters:
             palette = None
 
+        if palette and getattr(req, "active_character_names", None):
+            palette = copy.deepcopy(palette)
+            palette.characters = [
+                c for c in palette.characters if c.name in req.active_character_names
+            ]
+
         res = await asyncio.to_thread(
             colorizer_engine.colorize_page,
             image_path=orig_path,
@@ -1185,6 +1202,8 @@ async def preview_single_page(req: PreviewRequest):
         page_info["engine_used"] = res.get("engine", req.model_provider)
         if res.get("status") == "skipped_colored":
             page_info["skipped_colored"] = True
+        if "recognized_characters" in res:
+            page_info["recognized_characters"] = res["recognized_characters"]
 
         # Update processed_count and status
         sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
@@ -1213,6 +1232,7 @@ async def preview_single_page(req: PreviewRequest):
                 "colorized_url": page_info["colorized_url"],
                 "engine": page_info["engine_used"],
                 "page_info": page_info,
+                "recognized_characters": res.get("recognized_characters", []),
                 "processed_count": sess["processed_count"],
                 "total_pages": sess.get("total_pages", len(pages)),
             }
@@ -1352,6 +1372,10 @@ async def upsert_palette_character(req: PaletteUpsertRequest):
         skin_hex=req.character.skin_hex,
         costume_hex=req.character.costume_hex,
         extra_hex=req.character.extra_hex,
+        notes=req.character.notes or "",
+        visual_traits=req.character.visual_traits or [],
+        keywords=req.character.keywords or [],
+        bounding_box=tuple(req.character.bounding_box) if req.character.bounding_box else None,
     )
     # Replace existing entry by name, or append
     palette.characters = [c for c in palette.characters if c.name.lower() != new_entry.name.lower()]
@@ -1396,6 +1420,62 @@ async def clear_palette(session_id: str):
     save_session_meta(session_id)
 
     return JSONResponse({"status": "ok", "session_id": session_id, "palette": {"characters": []}})
+
+
+@app.post("/api/session/{session_id}/page/{page_index}/recognize")
+async def recognize_characters_for_page(
+    session_id: str,
+    page_index: int,
+    req: Optional[CharacterRecognizeRequest] = None,
+):
+    """
+    Analyzes the specified manga page against the session's active character palette
+    and returns detected characters with confidences and bounding boxes.
+    """
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    pages = sess.get("pages", [])
+    if page_index < 0 or page_index >= len(pages):
+        raise HTTPException(status_code=400, detail="Invalid page index")
+
+    page_info = pages[page_index]
+    orig_path = page_info.get("original_path", "")
+    if not orig_path or not os.path.exists(orig_path):
+        raise HTTPException(status_code=404, detail="Original page image not found")
+
+    palette = _get_palette(session_id)
+    if not palette or not palette.characters:
+        return JSONResponse({
+            "status": "no_palette",
+            "message": "No active character palette for this session",
+            "recognized": [],
+            "palette": palette.to_dict() if palette else {"characters": []},
+        })
+
+    api_key = req.api_key if req else ""
+    model_name = req.model_name if req else ""
+
+    recognized = await asyncio.to_thread(
+        colorizer_engine.recognizer.recognize_page_characters,
+        image_path=orig_path,
+        palette=palette,
+        api_key=api_key,
+        model_name=model_name,
+    )
+
+    rec_dicts = [rc.to_dict() for rc in recognized]
+    page_info["recognized_characters"] = rec_dicts
+    save_session_meta(session_id)
+
+    return JSONResponse({
+        "status": "ok",
+        "session_id": session_id,
+        "page_index": page_index,
+        "recognized": rec_dicts,
+        "palette": palette.to_dict(),
+    })
 
 
 @app.post("/api/export/batch")
