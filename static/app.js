@@ -32,10 +32,12 @@ const MODEL_VARIANTS = {
     { value: "resnext-comicolor", label: "🎨 ResNeXt Comicolorization Pipeline" }
   ],
   google_nano: [
-    { value: "nano-banana", label: "🍌 Google Nano Banana (Multimodal Vision)" },
-    { value: "gemini-2.0-flash", label: "⚡ Gemini 2.0 Flash (Fast Vision)" },
-    { value: "gemini-1.5-flash", label: "✨ Gemini 1.5 Flash" },
-    { value: "imagen-3.0-generate-002", label: "🎨 Google Imagen 3 Colorizer" }
+    { value: "gemini-3.1-flash-image", label: "🍌 Gemini 3.1 Flash Image (Nano Banana - Recommended)" },
+    { value: "gemini-3-pro-image", label: "💎 Gemini 3 Pro Image (4K Studio Quality)" },
+    { value: "gemini-3.1-flash-lite-image", label: "⚡ Gemini 3.1 Flash Lite Image (Fast Vision)" },
+    { value: "gemini-2.5-flash-image", label: "✨ Gemini 2.5 Flash Image" },
+    { value: "imagen-3.0-generate-002", label: "🎨 Google Imagen 3 Colorizer" },
+    { value: "nano-banana", label: "🍌 Google Nano Banana (Default Alias)" }
   ],
   apple_foundation: [
     { value: "apple-foundation-v1", label: "🍏 Apple Foundation Model (Vision Neural Engine)" },

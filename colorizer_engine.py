@@ -832,14 +832,20 @@ class MangaColorizerEngine:
 
                 # Map frontend nicknames/selectors to actual Google Gemini / Imagen models
                 GOOGLE_MODEL_MAP = {
-                    "nano-banana": "gemini-2.0-flash-exp",
-                    "google_nano": "gemini-2.0-flash-exp",
-                    "gemini-2.0-flash": "gemini-2.0-flash-exp",
-                    "gemini-1.5-flash": "gemini-1.5-flash",
+                    # Gemini 3.x Image Generation & Multimodal Editing (Nano Banana)
+                    "gemini-3.1-flash-image": "gemini-3.1-flash-image",
+                    "gemini-3-pro-image": "gemini-3-pro-image",
+                    "gemini-3.1-flash-lite-image": "gemini-3.1-flash-lite-image",
+                    "gemini-2.5-flash-image": "gemini-2.5-flash-image",
+                    "nano-banana": "gemini-3.1-flash-image",
+                    "google_nano": "gemini-3.1-flash-image",
+                    "gemini-2.0-flash": "gemini-3.1-flash-image",
+                    "gemini-2.0-flash-exp": "gemini-2.0-flash-exp",
+                    "gemini-1.5-flash": "gemini-3.1-flash-image",
                     "imagen-3.0-generate-002": "imagen-3.0-generate-002",
                 }
                 target_model = GOOGLE_MODEL_MAP.get(
-                    model_name, model_name or "gemini-2.0-flash-exp"
+                    model_name, model_name or "gemini-3.1-flash-image"
                 )
 
                 if "imagen" in target_model.lower():
@@ -876,7 +882,6 @@ class MangaColorizerEngine:
                         api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
                         print(f"[Google Imagen API Error] {api_error_reason}")
                 else:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={key}"
                     prompt_text = (
                         "Colorize this black and white manga page in full vibrant anime style matching official Japanese color manga editions. "
                         "Guidelines: "
@@ -895,30 +900,46 @@ class MangaColorizerEngine:
                                 ]
                             }
                         ],
-                        "generationConfig": {"responseModalities": ["IMAGE"]},
+                        "generationConfig": {
+                            "responseModalities": ["TEXT", "IMAGE"],
+                            "temperature": 0.4,
+                        },
                     }
-                    resp = requests.post(
-                        url, json=body, headers={"Content-Type": "application/json"}, timeout=45
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            for part in parts:
-                                if "inlineData" in part and "data" in part["inlineData"]:
-                                    img_bytes = base64.b64decode(part["inlineData"]["data"])
-                                    self._blend_and_save_api_result(
-                                        img_bytes, image_path, output_path, line_preserve
-                                    )
-                                    return {
-                                        "status": "success",
-                                        "engine": f"Google Gemini Nano Banana ({target_model})",
-                                        "output_path": output_path,
-                                    }
-                    else:
-                        api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
-                        print(f"[Google Gemini API Error] {api_error_reason}")
+
+                    candidate_models = [target_model]
+                    if target_model == "gemini-3.1-flash-image":
+                        candidate_models.extend(["gemini-2.5-flash-image", "gemini-2.0-flash-exp"])
+                    elif target_model not in ["gemini-3.1-flash-image"]:
+                        candidate_models.append("gemini-3.1-flash-image")
+
+                    for model_candidate in candidate_models:
+                        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_candidate}:generateContent?key={key}"
+                        resp = requests.post(
+                            url, json=body, headers={"Content-Type": "application/json"}, timeout=45
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                parts = candidates[0].get("content", {}).get("parts", [])
+                                for part in parts:
+                                    inline = part.get("inlineData") or part.get("inline_data")
+                                    if inline and "data" in inline:
+                                        img_bytes = base64.b64decode(inline["data"])
+                                        self._blend_and_save_api_result(
+                                            img_bytes, image_path, output_path, line_preserve
+                                        )
+                                        return {
+                                            "status": "success",
+                                            "engine": f"Google Gemini ({model_candidate})",
+                                            "output_path": output_path,
+                                        }
+                        else:
+                            api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                            print(f"[Google Gemini API Error - {model_candidate}] {api_error_reason}")
+                            if resp.status_code != 404:
+                                # Stop cascade on authentication or quota errors
+                                break
             except Exception as e:
                 api_error_reason = str(e)
                 print(f"[Google Gemini API Error] {e}")
