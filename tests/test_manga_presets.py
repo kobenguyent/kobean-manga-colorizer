@@ -608,3 +608,104 @@ def test_colorizer_engine_neural_with_preset(tmp_path):
 
     assert result["status"] == "success"
     assert Path(out_img_path).exists()
+
+
+def test_character_palette_sparse_seed_hint_tensor():
+    """Verifies sparse seed hints are injected into candidate midtone regions."""
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Luffy",
+                hair_hex="#1C1B1F",
+                skin_hex="#FEDBC5",
+                costume_hex="#D62828",
+            )
+        ],
+        preset_id="one_piece",
+        preset_title="One Piece",
+    )
+    sketch = np.ones((256, 256), dtype=np.float32)
+    # Synthetic costume screentone area
+    sketch[60:120, 60:120] = 0.50
+
+    tensor = palette.build_hint_tensor(h=256, w=256, device="cpu", sketch_gray=sketch)
+    assert isinstance(tensor, torch.Tensor)
+    assert tensor.shape == (1, 4, 256, 256)
+
+    mask = tensor[0, 3] > 0
+    assert torch.any(mask), "Expected sparse seed hint to place at least one localized mask point"
+
+    # Verify scaled color in seeded region: (214/255 - 0.5) / 0.5 ~ 0.678
+    r_val = tensor[0, 0, mask][0].item()
+    assert 0.55 < r_val < 0.80, f"Expected red channel to be scaled in [-1, 1], got {r_val}"
+
+
+def test_denoiser_screentone_filtering():
+    """Verifies FFDNetDenoiser removes halftone dot screentone noise from image."""
+    engine = MangaColorizerEngine()
+    if engine.denoiser is None:
+        pytest.skip("FFDNetDenoiser weights not available in environment")
+
+    noisy = np.full((128, 128, 3), 200, dtype=np.uint8)
+    noisy[::2, ::2] = 40  # Regular screentone dot pattern
+
+    denoised = engine.denoiser.get_denoised_image(noisy, sigma=25)
+    assert denoised.shape == (128, 128, 3)
+    assert np.std(denoised) < np.std(noisy), "Expected standard deviation to decrease after denoising"
+
+
+def test_speech_bubble_and_margin_protection(tmp_path):
+    """Verifies enclosed speech bubble with text stays clean white and resists color wash."""
+    import cv2
+
+    engine = MangaColorizerEngine()
+
+    in_img_path = tmp_path / "bubble_in.png"
+    out_img_path = tmp_path / "bubble_out.jpg"
+
+    img_u = np.full((300, 300, 3), 250, dtype=np.uint8)
+    cv2.ellipse(img_u, (150, 100), (50, 35), 0, 0, 360, (0, 0, 0), 2)
+    cv2.putText(img_u, "HEY!", (130, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    cv2.imwrite(str(in_img_path), img_u)
+
+    res = engine.colorize_page(
+        image_path=str(in_img_path),
+        output_path=str(out_img_path),
+        denoise_screentone=True,
+    )
+    assert res["status"] == "success"
+    assert Path(out_img_path).exists()
+
+    out_img = cv2.imread(str(out_img_path))
+    # Interior of speech bubble away from text strokes should remain near white
+    bubble_interior = out_img[80, 150]
+    assert np.all(bubble_interior >= 210), f"Speech bubble interior was discolored: {bubble_interior}"
+
+
+def test_colorize_page_denoise_screentone_flags(tmp_path):
+    """Verifies colorize_page accepts denoise_screentone flag toggles cleanly."""
+    engine = MangaColorizerEngine()
+
+    in_img_path = tmp_path / "flag_test_in.png"
+    out_img_path = tmp_path / "flag_test_out.jpg"
+
+    img = Image.new("L", (128, 128), color=230)
+    img.save(in_img_path)
+
+    # Test with denoise_screentone=True
+    res1 = engine.colorize_page(
+        image_path=str(in_img_path),
+        output_path=str(out_img_path),
+        denoise_screentone=True,
+        denoise_sigma=25,
+    )
+    assert res1["status"] == "success"
+
+    # Test with denoise_screentone=False
+    res2 = engine.colorize_page(
+        image_path=str(in_img_path),
+        output_path=str(out_img_path),
+        denoise_screentone=False,
+    )
+    assert res2["status"] == "success"
+

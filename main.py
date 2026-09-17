@@ -219,6 +219,8 @@ class ColorizeRequest(BaseModel):
     selected_pages: Optional[list[int]] = None
     skip_if_colored: bool = False
     force_recolorize: bool = False  # when True, re-run even if page already has a colorized file
+    denoise_screentone: bool = True
+    denoise_sigma: int = 25
 
 
 class BatchColorizeRequest(BaseModel):
@@ -231,6 +233,8 @@ class BatchColorizeRequest(BaseModel):
     contrast: float = 1.1
     line_preserve: float = 0.85
     skip_if_colored: bool = False
+    denoise_screentone: bool = True
+    denoise_sigma: int = 25
 
 
 class BatchExportRequest(BaseModel):
@@ -287,6 +291,8 @@ class PreviewRequest(BaseModel):
     line_preserve: float = 0.85
     skip_if_colored: bool = False
     force_recolorize: bool = False
+    denoise_screentone: bool = True
+    denoise_sigma: int = 25
 
 
 # ── Character Palette models ─────────────────────────────────────────
@@ -1018,6 +1024,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 line_preserve=req.line_preserve,
                 skip_if_colored=req.skip_if_colored,
                 character_palette=palette,
+                denoise_screentone=getattr(req, "denoise_screentone", True),
+                denoise_sigma=getattr(req, "denoise_sigma", 25),
             )
 
             # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -1168,6 +1176,8 @@ async def preview_single_page(req: PreviewRequest):
             line_preserve=req.line_preserve,
             skip_if_colored=req.skip_if_colored,
             character_palette=palette,
+            denoise_screentone=getattr(req, "denoise_screentone", True),
+            denoise_sigma=getattr(req, "denoise_sigma", 25),
         )
 
         page_info["status"] = "colorized"

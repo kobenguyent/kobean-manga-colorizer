@@ -137,21 +137,124 @@ class CharacterPalette:
 
     # ── Hint tensor for neural colorizer ────────────────────────────
 
-    def build_hint_tensor(self, h: int, w: int, device: str) -> torch.Tensor:
+    def build_hint_tensor(
+        self,
+        h: int,
+        w: int,
+        device: str,
+        sketch_gray: Optional[np.ndarray] = None,
+    ) -> torch.Tensor:
         """
         Builds a (1, 4, H, W) hint tensor for the neural model.
 
         Channel layout expected by the Colorizer hint input:
-          ch 0-2 : R, G, B  (0–1 float)
-          ch 3   : confidence mask  (0 = unguided, >0 = strong hint)
+          ch 0-2 : R, G, B in [-1.0, 1.0] scaled as (RGB - 0.5) / 0.5 * mask
+          ch 3   : confidence mask in [0.0, 1.0]  (0 = unguided, 1.0 = guided seed)
 
-        Note: A global flat wash across all pixels destroys the neural model's
-        spatial priors, turning skies, oceans, and backgrounds into a flat muddy wash.
-        The neural model runs with all zeros so that its rich multi-color spatial
-        priors remain pristine, while canonical colors are applied via semantic
-        harmonization.
+        Uses sparse localized seed points within candidate character midtone regions
+        so the neural model's dilated convolutions propagate canonical character colors
+        along lineart boundaries without flat-tinting backgrounds, speech bubbles, or scenery.
         """
-        return torch.zeros(1, 4, h, w, dtype=torch.float32, device=device)
+        hint = torch.zeros(1, 4, h, w, dtype=torch.float32, device=device)
+        if sketch_gray is None or not self.characters:
+            return hint
+
+        def hex_to_rgb01(hex_code: Optional[str]) -> Optional[list[float]]:
+            if not hex_code or len(hex_code.strip().lstrip("#")) < 6:
+                return None
+            hx = hex_code.strip().lstrip("#")
+            try:
+                return [
+                    int(hx[0:2], 16) / 255.0,
+                    int(hx[2:4], 16) / 255.0,
+                    int(hx[4:6], 16) / 255.0,
+                ]
+            except Exception:
+                return None
+
+        # Ensure sketch_gray is 2D float32 [0.0, 1.0]
+        if sketch_gray.ndim == 3:
+            sketch_gray = sketch_gray[:, :, 0]
+        if sketch_gray.dtype != np.float32:
+            sketch_gray = sketch_gray.astype(np.float32)
+        if sketch_gray.max() > 1.0:
+            sketch_gray = sketch_gray / 255.0
+
+        y_coords, x_coords = np.ogrid[:h, :w]
+        seeds_placed = 0
+
+        for ch in self.characters[:3]:
+            costume_rgb = hex_to_rgb01(ch.costume_hex)
+            skin_rgb = hex_to_rgb01(ch.skin_hex)
+            hair_rgb = hex_to_rgb01(ch.hair_hex)
+
+            # 1. Costume / clothing components: medium screentones [0.28, 0.72]
+            if costume_rgb is not None and seeds_placed < 6:
+                costume_mask = ((sketch_gray >= 0.28) & (sketch_gray <= 0.72)).astype(np.uint8)
+                num_c, _, stats_c, centroids_c = cv2.connectedComponentsWithStats(costume_mask)
+                if num_c > 1:
+                    indices = np.argsort(-stats_c[1:, cv2.CC_STAT_AREA]) + 1
+                    for idx in indices:
+                        area = stats_c[idx, cv2.CC_STAT_AREA]
+                        if 350 <= area <= 0.20 * h * w and seeds_placed < 6:
+                            cx, cy = int(centroids_c[idx][0]), int(centroids_c[idx][1])
+                            if 15 < cx < w - 15 and 15 < cy < h - 15:
+                                if 0.25 <= sketch_gray[cy, cx] <= 0.85:
+                                    radius = min(12, max(5, int(np.sqrt(area) / 6)))
+                                    dist_sq = (y_coords - cy) ** 2 + (x_coords - cx) ** 2
+                                    mask = dist_sq <= radius ** 2
+                                    hint[0, 0, mask] = (costume_rgb[0] - 0.5) / 0.5
+                                    hint[0, 1, mask] = (costume_rgb[1] - 0.5) / 0.5
+                                    hint[0, 2, mask] = (costume_rgb[2] - 0.5) / 0.5
+                                    hint[0, 3, mask] = 1.0
+                                    seeds_placed += 1
+                                    break
+
+            # 2. Skin components: light screentones [0.72, 0.90]
+            if skin_rgb is not None and seeds_placed < 8:
+                skin_mask = ((sketch_gray >= 0.72) & (sketch_gray <= 0.90)).astype(np.uint8)
+                num_s, _, stats_s, centroids_s = cv2.connectedComponentsWithStats(skin_mask)
+                if num_s > 1:
+                    indices = np.argsort(-stats_s[1:, cv2.CC_STAT_AREA]) + 1
+                    for idx in indices:
+                        area = stats_s[idx, cv2.CC_STAT_AREA]
+                        if 250 <= area <= 0.15 * h * w and seeds_placed < 8:
+                            cx, cy = int(centroids_s[idx][0]), int(centroids_s[idx][1])
+                            if 15 < cx < w - 15 and 15 < cy < h - 15:
+                                if 0.65 <= sketch_gray[cy, cx] <= 0.92:
+                                    radius = min(10, max(4, int(np.sqrt(area) / 8)))
+                                    dist_sq = (y_coords - cy) ** 2 + (x_coords - cx) ** 2
+                                    mask = dist_sq <= radius ** 2
+                                    hint[0, 0, mask] = (skin_rgb[0] - 0.5) / 0.5
+                                    hint[0, 1, mask] = (skin_rgb[1] - 0.5) / 0.5
+                                    hint[0, 2, mask] = (skin_rgb[2] - 0.5) / 0.5
+                                    hint[0, 3, mask] = 1.0
+                                    seeds_placed += 1
+                                    break
+
+            # 3. Hair components: darker screentones [0.18, 0.45]
+            if hair_rgb is not None and seeds_placed < 9:
+                hair_mask = ((sketch_gray >= 0.18) & (sketch_gray <= 0.45)).astype(np.uint8)
+                num_h, _, stats_h, centroids_h = cv2.connectedComponentsWithStats(hair_mask)
+                if num_h > 1:
+                    indices = np.argsort(-stats_h[1:, cv2.CC_STAT_AREA]) + 1
+                    for idx in indices:
+                        area = stats_h[idx, cv2.CC_STAT_AREA]
+                        if 300 <= area <= 0.15 * h * w and seeds_placed < 9:
+                            cx, cy = int(centroids_h[idx][0]), int(centroids_h[idx][1])
+                            if 15 < cx < w - 15 and 15 < cy < h - 15:
+                                if 0.18 <= sketch_gray[cy, cx] <= 0.50:
+                                    radius = min(10, max(4, int(np.sqrt(area) / 8)))
+                                    dist_sq = (y_coords - cy) ** 2 + (x_coords - cx) ** 2
+                                    mask = dist_sq <= radius ** 2
+                                    hint[0, 0, mask] = (hair_rgb[0] - 0.5) / 0.5
+                                    hint[0, 1, mask] = (hair_rgb[1] - 0.5) / 0.5
+                                    hint[0, 2, mask] = (hair_rgb[2] - 0.5) / 0.5
+                                    hint[0, 3, mask] = 1.0
+                                    seeds_placed += 1
+                                    break
+
+        return hint
 
 
 def apply_character_palette_harmonization(
@@ -506,6 +609,8 @@ class MangaColorizerEngine:
         line_preserve: float = 0.85,
         skip_if_colored: bool = False,
         character_palette: Optional["CharacterPalette"] = None,
+        denoise_screentone: bool = True,
+        denoise_sigma: int = 25,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -517,6 +622,10 @@ class MangaColorizerEngine:
             character_palette:  Optional CharacterPalette whose color hints are
                                 injected into the neural hint tensor to keep hair /
                                 costume colors consistent across panels.
+            denoise_screentone: When True, applies FFDNet screentone denoising to
+                                remove halftone dots before neural colorization while
+                                preserving 100% native ink lines downstream.
+            denoise_sigma:      Denoising noise level (default 25).
         """
         # ── Early exit: page already has colors ─────────────────────
         if skip_if_colored and is_colored_page(image_path):
@@ -554,6 +663,8 @@ class MangaColorizerEngine:
                 contrast=contrast,
                 line_preserve=line_preserve,
                 character_palette=character_palette,
+                denoise_screentone=denoise_screentone,
+                denoise_sigma=denoise_sigma,
             )
         elif provider in ("google_nano", "google"):
             return self._colorize_google(
@@ -578,6 +689,8 @@ class MangaColorizerEngine:
                 contrast=contrast,
                 line_preserve=line_preserve,
                 character_palette=character_palette,
+                denoise_screentone=denoise_screentone,
+                denoise_sigma=denoise_sigma,
             )
 
     # ── Neural ResNeXt Colorizer Engine ─────────────────────────────
@@ -593,6 +706,8 @@ class MangaColorizerEngine:
         contrast: float = 1.1,
         line_preserve: float = 0.85,
         character_palette: Optional["CharacterPalette"] = None,
+        denoise_screentone: bool = True,
+        denoise_sigma: int = 25,
     ) -> dict:
         """
         High-Vibrancy Deep Neural Manga Colorization:
@@ -602,6 +717,7 @@ class MangaColorizerEngine:
         4. Native Line Art Multiply Blending (zero gamut clipping distortion).
         5. Clean white paper & speech bubble protection.
         6. Optional CharacterPalette hint injection for cross-panel color consistency.
+        7. FFDNet Screentone / Halftone dot noise preprocessing.
         """
         if self.colorizer_model is None:
             print("[MangaColorizer] Neural model not loaded, running local fallback.")
@@ -614,19 +730,36 @@ class MangaColorizerEngine:
         orig_np = np.array(orig_pil).astype(np.float32) / 255.0
         h_orig, w_orig = orig_np.shape[:2]
 
+        # 1b. Screentone & halftone denoising preprocessor (FFDNet)
+        # Removes dot screentones and compression noise from neural input sketch,
+        # while keeping orig_np untouched for 100% native lineart multiply blending downstream.
+        denoised_sketch = orig_np
+        if denoise_screentone and self.denoiser is not None:
+            try:
+                denoised_bgr = self.denoiser.get_denoised_image(
+                    (orig_np * 255.0).astype(np.uint8), sigma=denoise_sigma
+                )
+                denoised_rgb = cv2.cvtColor(denoised_bgr, cv2.COLOR_BGR2RGB)
+                denoised_sketch = denoised_rgb.astype(np.float32) / 255.0
+            except Exception as e:
+                print(f"[MangaColorizer WARNING] Screentone denoising failed: {e}")
+                denoised_sketch = orig_np
+
         # 2. Optimal inference size (768px for standard, 896px for chroma-hd)
         if "chroma-hd" in (model_name or ""):
             inference_size = 896
         else:
             inference_size = 768
 
-        img_pad, pad = resize_pad_manga(orig_np, size=inference_size)
+        img_pad, pad = resize_pad_manga(denoised_sketch, size=inference_size)
         tens_in = ToTensor()(img_pad).unsqueeze(0).to(self.device)
 
         # 3. Build hint tensor — inject character palette when provided
         _, _, pad_h, pad_w = tens_in.shape
         if character_palette is not None:
-            hint = character_palette.build_hint_tensor(pad_h, pad_w, self.device)
+            hint = character_palette.build_hint_tensor(
+                pad_h, pad_w, self.device, sketch_gray=img_pad[:, :, 0]
+            )
             print(
                 f"[MangaColorizer] Palette hint injected ({len(character_palette.characters)} characters)"
             )
@@ -736,13 +869,40 @@ class MangaColorizerEngine:
         ).astype(np.uint8)
 
         # 9. Clean White Margin & Speech Bubble Protection
-        # Protect page borders, gutters, and speech bubbles from any color wash (near white paper >= 242)
-        paper_fade = np.clip((gray_orig * 255.0 - 240.0) / 14.0, 0.0, 1.0)
+        # Protect page borders, gutters, and speech bubbles from any color wash (near white paper >= 218)
+        paper_fade = np.clip((gray_orig * 255.0 - 218.0) / 26.0, 0.0, 1.0)
         for c in range(3):
             final_rgb[:, :, c] = (
                 final_rgb[:, :, c].astype(np.float32) * (1.0 - paper_fade)
                 + orig_rgb[:, :, c].astype(np.float32) * paper_fade
             ).astype(np.uint8)
+
+        # Enclosed speech bubble detection: protect dialogue bubbles so they stay pure crisp white
+        try:
+            paper_u = (gray_orig * 255.0 >= 205.0).astype(np.uint8) * 255
+            contours, hierarchy = cv2.findContours(paper_u, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            if hierarchy is not None and len(hierarchy[0]) > 0:
+                bubble_mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
+                for cnt, hier in zip(contours, hierarchy[0]):
+                    if hier[2] != -1:  # Contour has inner child strokes (text in dialogue bubble)
+                        area = cv2.contourArea(cnt)
+                        if 600 < area < 0.35 * h_orig * w_orig:
+                            bx, by, bw, bh = cv2.boundingRect(cnt)
+                            aspect = bw / float(max(1, bh))
+                            if 0.25 <= aspect <= 3.2 and bw < 0.7 * w_orig and bh < 0.6 * h_orig:
+                                child_idx = hier[2]
+                                child_count = 0
+                                while child_idx != -1:
+                                    child_count += 1
+                                    child_idx = hierarchy[0][child_idx][0]
+                                if child_count >= 2:
+                                    cv2.drawContours(bubble_mask, [cnt], -1, 255, -1)
+                if np.any(bubble_mask > 0):
+                    mask_idx = (bubble_mask > 0) & (gray_orig >= 0.80)
+                    for c in range(3):
+                        final_rgb[mask_idx, c] = orig_rgb[mask_idx, c]
+        except Exception as e:
+            print(f"[MangaColorizer WARNING] Speech bubble protection: {e}")
 
         # 10. Convert RGB to BGR for cv2.imwrite output
         final_bgr = cv2.cvtColor(final_rgb, cv2.COLOR_RGB2BGR)
@@ -770,6 +930,8 @@ class MangaColorizerEngine:
         contrast: float,
         line_preserve: float,
         character_palette: Optional["CharacterPalette"] = None,
+        denoise_screentone: bool = True,
+        denoise_sigma: int = 25,
     ) -> dict:
         """
         Apple Silicon Foundation Engine with P3 Wide Color Gamut & Neural Engine vibrance.
@@ -795,6 +957,8 @@ class MangaColorizerEngine:
             contrast=contrast * cont_boost,
             line_preserve=line_preserve,
             character_palette=character_palette,
+            denoise_screentone=denoise_screentone,
+            denoise_sigma=denoise_sigma,
         )
         res["engine"] = f"Apple Foundation Model (MPS Neural Engine - {model_name or 'CoreML'})"
         return res

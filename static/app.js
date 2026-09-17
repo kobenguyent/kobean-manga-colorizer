@@ -1669,7 +1669,8 @@ async function startColorization() {
     contrast: 1.1,
     line_preserve: linePreserve,
     selected_pages: pagesToColorize,
-    skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
+    skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
+    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
   };
 
   // UI state updates
@@ -1965,7 +1966,8 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     style: style,
     saturation: saturation,
     contrast: 1.1,
-    line_preserve: linePreserve
+    line_preserve: linePreserve,
+    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
   };
 
   try {
@@ -2774,7 +2776,8 @@ async function startBatchColorization() {
         saturation: saturation,
         contrast: 1.1,
         line_preserve: linePreserve,
-        skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
+        skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
+        denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
       })
     });
 
@@ -4333,6 +4336,7 @@ async function recolorizePage(pageIdx) {
         contrast:        1.1,
         line_preserve:   linePreserve,
         force_recolorize: true,
+        denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
       })
     });
 

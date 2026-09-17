@@ -266,6 +266,17 @@
             </label>
           </div>
 
+          <!-- Screentone Denoising (FFDNet) Toggle -->
+          <div class="form-group" style="margin-top: 0.25rem;">
+            <label class="toggle-label" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" title="Removes halftone screentone dots and compression noise before neural colorization while preserving 100% native ink lines.">
+              <input type="checkbox" id="chk-denoise-screentone" checked style="width:16px;height:16px;accent-color:var(--accent-purple);" />
+              <span style="font-size:0.85rem;color:var(--text-secondary);">
+                <i class="ri-contrast-drop-line" style="color:var(--accent-purple);"></i>
+                Screentone Denoising (FFDNet)
+              </span>
+            </label>
+          </div>
+
           <!-- Action Buttons -->
           <div class="action-btn-group">
             <button class="btn btn-secondary btn-block" id="btn-preview-page" onclick="previewCurrentPage()">
