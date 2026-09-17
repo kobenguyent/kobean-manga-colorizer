@@ -2,11 +2,8 @@
 tests/test_manga_presets.py - Unit & Integration tests for Manga Color Presets & Auto-Detection.
 """
 
-import io
 import json
-import os
 import shutil
-import tempfile
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -24,18 +21,15 @@ from main import (
     SESSIONS,
     STORAGE_DIR,
     app,
-    get_or_restore_session,
     save_session_meta,
 )
 from manga_presets import (
-    BUILTIN_PRESETS,
     PRESET_REGISTRY,
     MangaPreset,
     PresetCharacter,
     detect_manga_preset,
     get_all_presets,
     get_preset_by_id,
-    normalize_text_for_matching,
     search_online_manga_preset,
 )
 
@@ -184,9 +178,9 @@ def test_detect_manga_preset_matches(filename, expected_preset_id):
     """Verifies that all popular manga titles and variations match their canonical preset."""
     detected = detect_manga_preset(filename)
     assert detected is not None, f"Failed to detect preset for '{filename}'"
-    assert (
-        detected.id == expected_preset_id
-    ), f"Expected '{expected_preset_id}' but got '{detected.id}' for '{filename}'"
+    assert detected.id == expected_preset_id, (
+        f"Expected '{expected_preset_id}' but got '{detected.id}' for '{filename}'"
+    )
 
 
 def test_detect_manga_preset_unknown_and_edge_cases():
@@ -277,7 +271,7 @@ def test_api_apply_preset(tmp_path):
         # Check on-disk persistence
         pal_path = sess_dir / "palette.json"
         assert pal_path.exists()
-        with open(pal_path, "r", encoding="utf-8") as f:
+        with open(pal_path, encoding="utf-8") as f:
             disk_pal = json.load(f)
             assert disk_pal["preset_id"] == "slam_dunk"
 
@@ -518,7 +512,7 @@ def test_character_palette_harmonization():
 
     # Test image with red vest area (RGB: 200, 30, 30) and blue sky (RGB: 100, 150, 240)
     img_rgb = np.zeros((100, 100, 3), dtype=np.uint8)
-    img_rgb[:50, :] = [200, 30, 30]    # red vest
+    img_rgb[:50, :] = [200, 30, 30]  # red vest
     img_rgb[50:, :] = [100, 150, 240]  # blue sky
 
     harmonized = apply_character_palette_harmonization(img_rgb, palette)
@@ -651,7 +645,9 @@ def test_denoiser_screentone_filtering():
 
     denoised = engine.denoiser.get_denoised_image(noisy, sigma=25)
     assert denoised.shape == (128, 128, 3)
-    assert np.std(denoised) < np.std(noisy), "Expected standard deviation to decrease after denoising"
+    assert np.std(denoised) < np.std(noisy), (
+        "Expected standard deviation to decrease after denoising"
+    )
 
 
 def test_speech_bubble_and_margin_protection(tmp_path):
@@ -679,7 +675,9 @@ def test_speech_bubble_and_margin_protection(tmp_path):
     out_img = cv2.imread(str(out_img_path))
     # Interior of speech bubble away from text strokes should remain near white
     bubble_interior = out_img[80, 150]
-    assert np.all(bubble_interior >= 210), f"Speech bubble interior was discolored: {bubble_interior}"
+    assert np.all(bubble_interior >= 210), (
+        f"Speech bubble interior was discolored: {bubble_interior}"
+    )
 
 
 def test_colorize_page_denoise_screentone_flags(tmp_path):
@@ -799,7 +797,6 @@ def test_character_palette_optimize_for_page():
 
 def test_hint_tensor_with_bounding_box():
     """Verifies that hint seeds are strictly constrained to the character's bounding box."""
-    import torch
     from colorizer_engine import CharacterEntry, CharacterPalette
 
     # Palette with Zoro constrained to top-left quadrant [0.0, 0.0, 0.5, 0.5]
@@ -816,8 +813,8 @@ def test_hint_tensor_with_bounding_box():
     h, w = 200, 200
     # Sketch with screentone patches in both top-left (Zoro) and bottom-right (other panel)
     sketch = np.ones((h, w), dtype=np.float32)
-    sketch[20:60, 20:60] = 0.50     # Candidate in top-left
-    sketch[120:160, 120:160] = 0.50 # Candidate in bottom-right
+    sketch[20:60, 20:60] = 0.50  # Candidate in top-left
+    sketch[120:160, 120:160] = 0.50  # Candidate in bottom-right
 
     hint = palette.build_hint_tensor(h, w, device="cpu", sketch_gray=sketch)
     mask = hint[0, 3].numpy()
@@ -833,8 +830,11 @@ def test_hint_tensor_with_bounding_box():
 
 def test_harmonization_with_bounding_box():
     """Verifies that color harmonization only snaps hues within the character's bounding box."""
-    import cv2
-    from colorizer_engine import CharacterEntry, CharacterPalette, apply_character_palette_harmonization
+    from colorizer_engine import (
+        CharacterEntry,
+        CharacterPalette,
+        apply_character_palette_harmonization,
+    )
 
     # Zoro: canonical green (#1C4428) constrained to left half of image
     palette = CharacterPalette(
@@ -858,13 +858,18 @@ def test_harmonization_with_bounding_box():
     right_sample = harmonized[50, 75]
 
     assert not np.array_equal(left_sample, [40, 110, 50]), "Expected left half to be harmonized"
-    assert np.max(np.abs(right_sample.astype(int) - np.array([40, 110, 50]))) <= 1, "Right half outside bounding box should remain untouched"
-    assert not np.array_equal(left_sample, right_sample), "Harmonized left half should differ from unharmonized right half"
+    assert np.max(np.abs(right_sample.astype(int) - np.array([40, 110, 50]))) <= 1, (
+        "Right half outside bounding box should remain untouched"
+    )
+    assert not np.array_equal(left_sample, right_sample), (
+        "Harmonized left half should differ from unharmonized right half"
+    )
 
 
 def test_manga_character_recognizer_heuristics(tmp_path):
     """Verifies visual heuristic recognition differentiates characters by features."""
     import cv2
+
     from colorizer_engine import CharacterEntry, CharacterPalette, MangaCharacterRecognizer
 
     recognizer = MangaCharacterRecognizer()
@@ -909,8 +914,8 @@ def test_manga_character_recognizer_heuristics(tmp_path):
 
 def test_api_recognize_characters_endpoint(tmp_path):
     """Verifies POST /api/session/{session_id}/page/{page_index}/recognize."""
-    from main import SESSIONS, SESSION_PALETTES, STORAGE_DIR, save_session_meta
     from colorizer_engine import CharacterEntry, CharacterPalette
+    from main import SESSION_PALETTES, SESSIONS, STORAGE_DIR, save_session_meta
 
     session_id = "test_recog_" + str(uuid.uuid4())[:8]
     sess_dir = STORAGE_DIR / session_id
@@ -937,7 +942,9 @@ def test_api_recognize_characters_endpoint(tmp_path):
     }
     SESSION_PALETTES[session_id] = CharacterPalette(
         characters=[
-            CharacterEntry(name="Monkey D. Luffy", hair_hex="#111111", costume_hex="#D62828", notes="Straw hat"),
+            CharacterEntry(
+                name="Monkey D. Luffy", hair_hex="#111111", costume_hex="#D62828", notes="Straw hat"
+            ),
             CharacterEntry(name="Roronoa Zoro", hair_hex="#4E8A3C", costume_hex="#1C4428"),
         ],
         preset_id="one_piece",
@@ -966,8 +973,8 @@ def test_api_recognize_characters_endpoint(tmp_path):
 
 def test_preview_with_active_character_names_override(tmp_path):
     """Verifies that /api/colorize/preview respects active_character_names override."""
-    from main import SESSIONS, SESSION_PALETTES, STORAGE_DIR, save_session_meta
     from colorizer_engine import CharacterEntry, CharacterPalette
+    from main import SESSION_PALETTES, SESSIONS, STORAGE_DIR, save_session_meta
 
     session_id = "test_prev_override_" + str(uuid.uuid4())[:8]
     sess_dir = STORAGE_DIR / session_id
@@ -1024,10 +1031,15 @@ def test_preview_with_active_character_names_override(tmp_path):
 
 def test_offline_clip_character_recognition():
     """Verifies that offline pre-trained CLIP model accurately detects manga characters."""
-    from colorizer_engine import MangaCharacterRecognizer, CharacterPalette, CharacterEntry
+    pytest.importorskip("transformers")
+    from colorizer_engine import CharacterEntry, CharacterPalette, MangaCharacterRecognizer
     from manga_presets import get_preset_by_id
 
     recognizer = MangaCharacterRecognizer()
+    model, processor, _ = recognizer._ensure_clip()
+    if model is None or processor is None:
+        pytest.skip("Offline CLIP model could not be loaded")
+
     preset = get_preset_by_id("one_piece")
     assert preset is not None
 
@@ -1062,7 +1074,7 @@ def test_offline_clip_character_recognition():
 
 def test_manga_character_recognizer_mode_routing_and_fallbacks(tmp_path):
     """Verifies mode selection routing and error fallback behavior."""
-    from colorizer_engine import MangaCharacterRecognizer, CharacterPalette, CharacterEntry
+    from colorizer_engine import CharacterEntry, CharacterPalette, MangaCharacterRecognizer
 
     img_path = tmp_path / "panel.png"
     # Create test image with ink figure
@@ -1102,8 +1114,8 @@ def test_manga_character_recognizer_mode_routing_and_fallbacks(tmp_path):
 
 def test_api_recognize_characters_with_mode_selection(tmp_path):
     """Verifies /api/session/.../recognize endpoint with recognition_mode payload."""
-    from main import SESSIONS, SESSION_PALETTES, STORAGE_DIR, save_session_meta
     from colorizer_engine import CharacterEntry, CharacterPalette
+    from main import SESSION_PALETTES, SESSIONS, STORAGE_DIR, save_session_meta
 
     session_id = "test_rec_mode_" + str(uuid.uuid4())[:8]
     sess_dir = STORAGE_DIR / session_id
@@ -1164,6 +1176,3 @@ def test_api_recognize_characters_with_mode_selection(tmp_path):
         shutil.rmtree(sess_dir, ignore_errors=True)
         SESSIONS.pop(session_id, None)
         SESSION_PALETTES.pop(session_id, None)
-
-
-
