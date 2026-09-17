@@ -468,7 +468,7 @@ def test_api_search_online_endpoint(tmp_path):
 
 
 def test_character_palette_hint_tensor():
-    """Verifies CharacterPalette generates correct 4-channel hint tensor for neural colorizer."""
+    """Verifies CharacterPalette generates clean (1, 4, H, W) hint tensor for neural colorizer."""
     palette = CharacterPalette(
         characters=[
             CharacterEntry(
@@ -491,17 +491,45 @@ def test_character_palette_hint_tensor():
     tensor = palette.build_hint_tensor(h=256, w=256, device="cpu")
     assert isinstance(tensor, torch.Tensor)
     assert tensor.shape == (1, 4, 256, 256)
+    assert (tensor == 0).all()
 
-    # Channel 3 is confidence mask (0.30)
-    assert torch.isclose(tensor[0, 3, 0, 0], torch.tensor(0.30))
-    # Channels 0-2 (RGB) must be non-zero and between 0 and 1
-    assert (tensor[0, :3, :, :] > 0.0).any()
-    assert (tensor[0, :3, :, :] <= 1.0).all()
-
-    # Empty palette should return all-zeros
+    # Empty palette should also return all-zeros
     empty_pal = CharacterPalette()
     empty_tensor = empty_pal.build_hint_tensor(h=128, w=128, device="cpu")
     assert (empty_tensor == 0).all()
+
+
+def test_character_palette_harmonization():
+    """Verifies apply_character_palette_harmonization aligns character colors without flat-washing backgrounds."""
+    from colorizer_engine import apply_character_palette_harmonization
+
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Luffy",
+                hair_hex="#1C1B1F",
+                skin_hex="#FCD0A1",
+                costume_hex="#E62C39",
+            ),
+        ],
+        preset_id="one_piece",
+        preset_title="One Piece",
+    )
+
+    # Test image with red vest area (RGB: 200, 30, 30) and blue sky (RGB: 100, 150, 240)
+    img_rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+    img_rgb[:50, :] = [200, 30, 30]    # red vest
+    img_rgb[50:, :] = [100, 150, 240]  # blue sky
+
+    harmonized = apply_character_palette_harmonization(img_rgb, palette)
+
+    # Blue sky should remain blue (dominant B channel, not contaminated by red vest palette)
+    assert harmonized[75, 50, 2] > harmonized[75, 50, 0]
+    assert harmonized[75, 50, 2] > 200
+
+    # Red vest should remain vibrant red (dominant R channel)
+    assert harmonized[25, 50, 0] > 200
+    assert harmonized[25, 50, 1] < 100
 
 
 def test_colorizer_engine_local_smart_with_preset(tmp_path):

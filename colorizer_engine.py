@@ -143,48 +143,131 @@ class CharacterPalette:
 
         Channel layout expected by the Colorizer hint input:
           ch 0-2 : R, G, B  (0–1 float)
-          ch 3   : confidence mask  (0 = no hint, 1 = strong hint)
+          ch 3   : confidence mask  (0 = unguided, >0 = strong hint)
 
-        Applies a global tint derived by averaging all provided character colors.
-        This gives the model a "preferred palette" nudge without pixel-precise
-        segmentation.  The low confidence (0.30) allows the model to override
-        the hint wherever the local context provides stronger evidence.
+        Note: A global flat wash across all pixels destroys the neural model's
+        spatial priors, turning skies, oceans, and backgrounds into a flat muddy wash.
+        The neural model runs with all zeros so that its rich multi-color spatial
+        priors remain pristine, while canonical colors are applied via semantic
+        harmonization.
         """
-        hint = torch.zeros(1, 4, h, w, dtype=torch.float32, device=device)
+        return torch.zeros(1, 4, h, w, dtype=torch.float32, device=device)
 
-        hex_colors: list[str] = []
-        for ch in self.characters:
-            for hex_val in [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]:
-                if hex_val and len(hex_val) >= 6:
-                    hex_colors.append(hex_val.strip().lstrip("#"))
 
-        if not hex_colors:
-            return hint  # all-zero → model runs unguided
+def apply_character_palette_harmonization(
+    img_rgb: np.ndarray, palette: Optional["CharacterPalette"]
+) -> np.ndarray:
+    """
+    Harmonizes generated manga colors to canonical preset hues and saturations.
+    Targeted semantic snapping prevents color drift across panels without flat-tinting.
+    """
+    if not palette or not palette.characters:
+        return img_rgb
 
-        rgb_vals = []
-        for hx in hex_colors:
+    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+    # 1. Skin tone harmonization: anchor skin midtones to canonical anime peach
+    for ch in palette.characters:
+        if ch.skin_hex and len(ch.skin_hex.strip().lstrip("#")) >= 6:
+            hx = ch.skin_hex.strip().lstrip("#")
             try:
-                r = int(hx[0:2], 16) / 255.0
-                g = int(hx[2:4], 16) / 255.0
-                b = int(hx[4:6], 16) / 255.0
-                rgb_vals.append((r, g, b))
-            except ValueError:
+                cr = int(hx[0:2], 16)
+                cg = int(hx[2:4], 16)
+                cb = int(hx[4:6], 16)
+                skin_px = np.uint8([[[cr, cg, cb]]])
+                skin_hsv = cv2.cvtColor(skin_px, cv2.COLOR_RGB2HSV)[0, 0]
+                target_skin_h = float(skin_hsv[0])
+                target_skin_s = float(skin_hsv[1])
+                target_skin_v = float(skin_hsv[2])
+
+                # Anime skin tone detector: warm peach hue (0-24 or 172-180), moderate saturation (18-125), bright midtone (110-245)
+                skin_mask = (
+                    ((h <= 24.0) | (h >= 172.0))
+                    & (s >= 18.0)
+                    & (s <= 125.0)
+                    & (v >= 110.0)
+                    & (v <= 245.0)
+                )
+                if np.any(skin_mask):
+                    h[skin_mask] = 0.60 * h[skin_mask] + 0.40 * target_skin_h
+                    s[skin_mask] = np.clip(
+                        0.60 * s[skin_mask] + 0.40 * target_skin_s, 25.0, 140.0
+                    )
+                    v[skin_mask] = np.clip(
+                        0.80 * v[skin_mask] + 0.20 * target_skin_v, 110.0, 255.0
+                    )
+                break  # Harmonize skin from principal character
+            except Exception:
+                pass
+
+    # 2. Costume, Hair & Accessory Anchors
+    color_mask_base = (s >= 25.0) & (v >= 30.0) & (v <= 245.0)
+    for ch in palette.characters:
+        for hex_code in [ch.costume_hex, ch.hair_hex, ch.extra_hex]:
+            if not hex_code or len(hex_code.strip().lstrip("#")) < 6:
+                continue
+            hx = hex_code.strip().lstrip("#")
+            try:
+                cr = int(hx[0:2], 16)
+                cg = int(hx[2:4], 16)
+                cb = int(hx[4:6], 16)
+                px = np.uint8([[[cr, cg, cb]]])
+                ch_hsv = cv2.cvtColor(px, cv2.COLOR_RGB2HSV)[0, 0]
+                target_h = float(ch_hsv[0])
+                target_s = float(ch_hsv[1])
+                target_v = float(ch_hsv[2])
+
+                if target_s < 25.0:
+                    continue  # skip neutral grays/whites/blacks
+
+                # Angular hue distance (0-180 scale in OpenCV)
+                diff = np.abs(h - target_h)
+                diff = np.minimum(diff, 180.0 - diff)
+
+                # Match pixels within ±28 degrees of the canonical hue
+                matched = (diff <= 28.0) & color_mask_base
+
+                # Also handle magenta/purple-red to canonical red (e.g. Luffy vest or Sakuragi red)
+                if (target_h <= 10.0 or target_h >= 170.0):
+                    matched = matched | (
+                        (h >= 140.0) & (h <= 170.0) & (s >= 40.0) & (v >= 30.0) & (v <= 230.0)
+                    )
+
+                if np.any(matched):
+                    influence = np.clip((28.0 - diff) / 28.0, 0.0, 1.0)
+                    pull = 0.65 * influence
+
+                    # Red wrap-around safe blending
+                    if target_h <= 15.0 or target_h >= 165.0:
+                        h_unwrapped = np.where(h > 90.0, h - 180.0, h)
+                        t_unwrapped = target_h - 180.0 if target_h > 90.0 else target_h
+                        new_h = (1.0 - pull) * h_unwrapped + pull * t_unwrapped
+                        h[matched] = np.where(
+                            new_h[matched] < 0, new_h[matched] + 180.0, new_h[matched]
+                        )
+                    else:
+                        h[matched] = (1.0 - pull[matched]) * h[matched] + pull[matched] * target_h
+
+                    s[matched] = np.clip(
+                        (1.0 - pull[matched]) * s[matched] + pull[matched] * max(target_s, 130.0),
+                        0.0,
+                        255.0,
+                    )
+                    v[matched] = np.clip(
+                        (1.0 - pull[matched] * 0.4) * v[matched] + pull[matched] * 0.4 * target_v,
+                        0.0,
+                        255.0,
+                    )
+            except Exception:
                 continue
 
-        if not rgb_vals:
-            return hint
-
-        avg_r = sum(c[0] for c in rgb_vals) / len(rgb_vals)
-        avg_g = sum(c[1] for c in rgb_vals) / len(rgb_vals)
-        avg_b = sum(c[2] for c in rgb_vals) / len(rgb_vals)
-
-        confidence = 0.30  # low enough for model to override locally
-        hint[0, 0, :, :] = avg_r
-        hint[0, 1, :, :] = avg_g
-        hint[0, 2, :, :] = avg_b
-        hint[0, 3, :, :] = confidence
-
-        return hint
+    h = np.clip(h, 0.0, 179.0)
+    s = np.clip(s, 0.0, 255.0)
+    v = np.clip(v, 0.0, 255.0)
+    return cv2.cvtColor(
+        cv2.merge([h.astype(np.uint8), s.astype(np.uint8), v.astype(np.uint8)]), cv2.COLOR_HSV2RGB
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -636,14 +719,23 @@ class MangaColorizerEngine:
             b = np.clip(b * 1.28, 0, 255)
             color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
 
-        # 7. Native Line Art Multiply Blending (100% crisp ink, no gamut clipping)
+        # 7. Apply Canonical Character Palette Harmonization
+        if character_palette is not None:
+            color_vivid_rgb = apply_character_palette_harmonization(
+                color_vivid_rgb, character_palette
+            )
+
+        # 8. Native Line Art Multiply Blending (100% crisp ink, no midtone crushing)
         gray_orig = cv2.cvtColor(orig_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-        line_multiplier = np.clip(gray_orig / max(0.60, line_preserve), 0.0, 1.0)
+        # Line art multiply blending: preserve 100% ink sharpness on pure black/dark ink lines,
+        # while keeping vibrant midtones uncrushed.
+        ink_threshold = max(0.18, 0.35 * line_preserve)
+        line_multiplier = np.clip((gray_orig - 0.04) / ink_threshold, 0.0, 1.0)
         final_rgb = np.clip(
             color_vivid_rgb.astype(np.float32) * line_multiplier[:, :, np.newaxis], 0, 255
         ).astype(np.uint8)
 
-        # 8. Clean White Margin & Speech Bubble Protection
+        # 9. Clean White Margin & Speech Bubble Protection
         # Protect page borders, gutters, and speech bubbles from any color wash (near white paper >= 242)
         paper_fade = np.clip((gray_orig * 255.0 - 240.0) / 14.0, 0.0, 1.0)
         for c in range(3):
@@ -652,7 +744,7 @@ class MangaColorizerEngine:
                 + orig_rgb[:, :, c].astype(np.float32) * paper_fade
             ).astype(np.uint8)
 
-        # 9. Convert RGB to BGR for cv2.imwrite output
+        # 10. Convert RGB to BGR for cv2.imwrite output
         final_bgr = cv2.cvtColor(final_rgb, cv2.COLOR_RGB2BGR)
 
         # Save to output file
@@ -1020,28 +1112,6 @@ class MangaColorizerEngine:
             a_shift = 28.0
             b_shift = 32.0
 
-        # When a character palette is active, bias the chromatic shifts toward its canonical palette
-        if character_palette and character_palette.characters:
-            hex_candidates = []
-            for ch in character_palette.characters:
-                for hx in [ch.costume_hex, ch.skin_hex]:
-                    if hx and len(hx.strip().lstrip("#")) >= 6:
-                        hex_candidates.append(hx.strip().lstrip("#"))
-            if hex_candidates:
-                try:
-                    c_hx = hex_candidates[0]
-                    cr = int(c_hx[0:2], 16)
-                    cg = int(c_hx[2:4], 16)
-                    cb = int(c_hx[4:6], 16)
-                    pixel = np.uint8([[[cb, cg, cr]]])
-                    px_lab = cv2.cvtColor(pixel, cv2.COLOR_BGR2LAB)[0, 0]
-                    target_a = float(px_lab[1]) - 128.0
-                    target_b = float(px_lab[2]) - 128.0
-                    a_shift = float(np.clip(0.35 * a_shift + 0.65 * target_a, -60.0, 60.0))
-                    b_shift = float(np.clip(0.35 * b_shift + 0.65 * target_b, -60.0, 60.0))
-                except Exception:
-                    pass
-
         # Apply chromatic synthesis
         lab[:, :, 1] = np.clip(128.0 + midtone_mask * a_shift, 0, 255).astype(np.uint8)
         lab[:, :, 2] = np.clip(128.0 + midtone_mask * b_shift, 0, 255).astype(np.uint8)
@@ -1061,6 +1131,12 @@ class MangaColorizerEngine:
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
         hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation * 1.3, 0, 255)
         bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+        # Harmonize with character palette presets if active
+        if character_palette is not None and character_palette.characters:
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rgb = apply_character_palette_harmonization(rgb, character_palette)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
         self._write_optimized_image(output_path, bgr, quality=88)
 
