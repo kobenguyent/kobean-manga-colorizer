@@ -107,16 +107,16 @@
 
         <!-- File Info & Documents Queue Card -->
         <div class="card file-info-card">
-          <div class="card-header space-between">
+          <div class="card-header space-between file-info-header">
             <div class="header-left">
-              <i class="ri-folders-line"></i>
-              <h3>Documents Queue</h3>
+              <i class="ri-folders-line queue-header-icon"></i>
+              <h3 class="queue-header-title">Document Queue</h3>
+              <span class="badge badge-accent doc-queue-count-badge" id="doc-queue-badge" title="1 document in queue">1 doc</span>
             </div>
-            <div class="header-right" style="display: flex; gap: 8px; align-items: center;">
-              <button class="btn btn-secondary btn-xs" onclick="openHistoryModal()" title="View full document history" style="font-size: 0.72rem; padding: 2px 7px;">
+            <div class="header-right">
+              <button class="btn-queue-history" onclick="openHistoryModal()" title="View full document history">
                 <i class="ri-history-line"></i> History
               </button>
-              <span class="badge badge-accent" id="doc-queue-badge">1 Document</span>
             </div>
           </div>
 
@@ -389,32 +389,32 @@
                      value="Colorized Manga Collection" />
 
               <!-- E-Reader Optimization & Omnibus Controls -->
-              <div style="display:flex;flex-direction:column;gap:0.4rem;margin-bottom:0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:6px;padding:0.5rem;">
-                <div>
-                  <label for="combined-chunk-select" style="font-size:0.72rem;color:var(--text-secondary);display:block;margin-bottom:0.2rem;">
+              <div class="omnibus-controls-box">
+                <div class="omnibus-field">
+                  <label for="combined-chunk-select" class="omnibus-field-label">
                     <i class="ri-split-cells-vertical"></i> Series Splitting (Kindle Indexing Safe):
                   </label>
-                  <select id="combined-chunk-select" class="form-input" style="font-size:0.75rem;padding:3px 6px;width:100%;">
-                    <option value="none" selected>Single Continuous File (All volumes merged)</option>
-                    <option value="volumes_3">3-in-1 Omnibus Edition (ZIP bundle of 3-vol parts)</option>
-                    <option value="volumes_5">5-in-1 Omnibus Edition (ZIP bundle of 5-vol parts)</option>
-                    <option value="size_500">Auto-split at ~500 MB limit (ZIP bundle)</option>
+                  <select id="combined-chunk-select" class="form-select form-select-sm">
+                    <option value="none" selected>📜 Single Continuous File (All volumes merged)</option>
+                    <option value="volumes_3">📚 3-in-1 Omnibus Edition (ZIP bundle of 3-vol parts)</option>
+                    <option value="volumes_5">📦 5-in-1 Omnibus Edition (ZIP bundle of 5-vol parts)</option>
+                    <option value="size_500">⚡ Auto-split at ~500 MB limit (ZIP bundle)</option>
                   </select>
                 </div>
-                <div>
-                  <label for="combined-preset-select" style="font-size:0.72rem;color:var(--text-secondary);display:block;margin-bottom:0.2rem;">
+                <div class="omnibus-field">
+                  <label for="combined-preset-select" class="omnibus-field-label">
                     <i class="ri-aspect-ratio-line"></i> Resolution &amp; Compression:
                   </label>
-                  <select id="combined-preset-select" class="form-input" style="font-size:0.75rem;padding:3px 6px;width:100%;">
-                    <option value="colorsoft" selected>Kindle Colorsoft / Color E-Ink (1600px, Vibrancy Boost)</option>
-                    <option value="kindle">Kindle B&amp;W Paperwhite/Oasis (1600px, 80%)</option>
-                    <option value="tablet">Tablet / iPad HD (1920px, 85% quality)</option>
-                    <option value="original">Original Scan Resolution (90% quality)</option>
+                  <select id="combined-preset-select" class="form-select form-select-sm">
+                    <option value="colorsoft" selected>🌈 Kindle Colorsoft / Color E-Ink (1600px, Vibrancy Boost)</option>
+                    <option value="kindle">📖 Kindle B&amp;W Paperwhite/Oasis (1600px, 80%)</option>
+                    <option value="tablet">📱 Tablet / iPad HD (1920px, 85% quality)</option>
+                    <option value="original">🔍 Original Scan Resolution (90% quality)</option>
                   </select>
                 </div>
-                <div style="display:flex;align-items:center;gap:0.35rem;margin-top:0.15rem;">
-                  <input type="checkbox" id="combined-grayscale-check" style="cursor:pointer;accent-color:var(--accent-purple,#a855f7);" />
-                  <label for="combined-grayscale-check" style="font-size:0.72rem;color:var(--text-secondary);cursor:pointer;user-select:none;">
+                <div class="omnibus-check-row">
+                  <input type="checkbox" id="combined-grayscale-check" class="omnibus-checkbox" />
+                  <label for="combined-grayscale-check" class="omnibus-check-label">
                     16-level Grayscale (Kindle Paperwhite/Oasis)
                   </label>
                 </div>
@@ -504,6 +504,28 @@
               <button class="btn-icon btn-nav-preview" id="btn-next-page" title="Next Page (Right Arrow)" onclick="navigatePreviewPage(1)">
                 <i class="ri-arrow-right-s-line"></i>
               </button>
+
+              <!-- Zoom Controls Group -->
+              <div class="comparator-zoom-group" title="Zoom image (Double-click, Pinch, or +/-)">
+                <button class="btn-zoom" id="btn-zoom-out" onclick="changeComparatorZoom(-0.25)" title="Zoom Out (-)">
+                  <i class="ri-subtract-line"></i>
+                </button>
+                <div class="zoom-dropdown-wrapper" id="header-zoom-wrapper">
+                  <button class="btn-zoom-level" id="btn-zoom-reset" onclick="toggleZoomMenu('header', event)" title="Choose Zoom Level (Click for presets)">
+                    <span id="header-zoom-text">100%</span>
+                  </button>
+                  <div class="zoom-presets-menu" id="header-zoom-menu"></div>
+                </div>
+                <button class="btn-zoom" id="btn-zoom-in" onclick="changeComparatorZoom(0.25)" title="Zoom In (+)">
+                  <i class="ri-add-line"></i>
+                </button>
+              </div>
+
+              <!-- Fullscreen Toggle Button -->
+              <button class="btn-icon btn-fullscreen-toggle" id="btn-toggle-fullscreen" onclick="toggleComparatorFullscreen()" title="Toggle Full Screen (F)">
+                <i class="ri-fullscreen-line" id="fullscreen-icon"></i>
+              </button>
+
               <button class="btn btn-sm" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
                       style="background:var(--accent-orange,#f97316);border-color:var(--accent-orange,#f97316);color:#fff;"
                       title="Force re-colorize this page from scratch">
@@ -524,6 +546,26 @@
             <button class="preview-nav-chevron preview-nav-next" onclick="navigatePreviewPage(1)" title="Next Page (Right Arrow)">
               <i class="ri-arrow-right-s-line"></i>
             </button>
+
+            <!-- Floating Viewer Quick Controls Pill -->
+            <div class="comparator-floating-toolbar" id="comparator-floating-toolbar">
+              <button class="float-btn" onclick="changeComparatorZoom(-0.25)" title="Zoom Out (-)">
+                <i class="ri-subtract-line"></i>
+              </button>
+              <div class="zoom-dropdown-wrapper" id="float-zoom-wrapper">
+                <button class="float-btn float-zoom-text" id="float-zoom-text" onclick="toggleZoomMenu('float', event)" title="Choose Zoom Level (Click for presets)">
+                  <span id="float-zoom-label">100%</span>
+                </button>
+                <div class="zoom-presets-menu zoom-menu-upwards" id="float-zoom-menu"></div>
+              </div>
+              <button class="float-btn" onclick="changeComparatorZoom(0.25)" title="Zoom In (+)">
+                <i class="ri-add-line"></i>
+              </button>
+              <div class="float-divider"></div>
+              <button class="float-btn" onclick="toggleComparatorFullscreen()" title="Toggle Full Screen (F)">
+                <i class="ri-fullscreen-line" id="float-fullscreen-icon"></i>
+              </button>
+            </div>
 
             <div class="split-image-container" id="split-container">
               <!-- Colorized Base Image (Bottom/Right) -->
@@ -555,6 +597,9 @@
 
         <!-- Export & Download Banner (Visible when completed) -->
         <div class="card export-card hidden" id="export-card">
+          <button class="export-close-btn" onclick="closeExportBanner()" title="Close notification" aria-label="Close notification">
+            <i class="ri-close-line"></i>
+          </button>
           <div class="export-content">
             <div class="export-icon">
               <i class="ri-checkbox-circle-fill"></i>
@@ -588,43 +633,49 @@
 
         <!-- Pages Thumbnail Grid -->
         <div class="card gallery-card">
-          <div class="card-header space-between gallery-header-bar">
-            <div class="header-left">
-              <i class="ri-gallery-grid-line"></i>
-              <h3>Manga Page Gallery</h3>
+          <div class="card-header gallery-header-bar">
+            <div class="header-left gallery-header-left">
+              <div class="gallery-title-wrapper">
+                <i class="ri-gallery-grid-line gallery-title-icon"></i>
+                <h3 class="gallery-title">Manga Page Gallery</h3>
+              </div>
               <div class="gallery-selection-controls">
-                <label class="select-all-label" title="Select or Deselect All Pages">
-                  <input type="checkbox" id="select-all-pages-checkbox" checked onchange="toggleSelectAllPages(this.checked)">
+                <label class="select-all-label gallery-select-pill" title="Select or Deselect All Pages">
+                  <input type="checkbox" id="select-all-pages-checkbox" onchange="toggleSelectAllPages(this.checked)">
                   <span class="custom-checkbox"><i class="ri-check-line"></i></span>
-                  <span id="selected-pages-text">All Selected</span>
+                  <span id="selected-pages-text">Select All</span>
                 </label>
+              </div>
+              <div class="gallery-counter gallery-counter-pill" title="Colorization Progress">
+                <span class="counter-dot"></span>
+                <span class="counter-text"><strong id="colorized-count">0</strong> of <span id="gallery-total-count">0</span> Colorized</span>
               </div>
             </div>
 
-            <div class="header-right">
-              <!-- Count of Colorized Pages -->
-              <span class="gallery-counter"><strong id="colorized-count">0</strong>&nbsp;of&nbsp;<span id="gallery-total-count">0</span>&nbsp;Colorized</span>
+            <div class="header-right gallery-header-right">
+              <button class="btn btn-warning btn-sm btn-recolorize-pill hidden" id="btn-recolorize-selected"
+                      title="Force re-colorize selected pages"
+                      onclick="recolorizeSelected()">
+                <i class="ri-refresh-line"></i>
+                <span>Recolorize Selected</span>
+              </button>
               
-              <!-- 3 Quick Export Buttons -->
-              <div class="gallery-quick-exports">
-                <button class="btn btn-warning btn-sm hidden" id="btn-recolorize-selected"
-                        title="Force re-colorize selected pages even if already colorized"
-                        onclick="recolorizeSelected()"
-                        style="background:var(--accent-orange,#f97316);border-color:var(--accent-orange,#f97316);color:#fff;">
-                  <i class="ri-refresh-line"></i> Recolorize Selected
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="exportDocument('pdf')" title="Export as PDF">
-                  <i class="ri-file-pdf-2-line"></i> PDF
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="exportDocument('epub')" title="Export as EPUB">
-                  <i class="ri-book-open-line"></i> EPUB
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="exportDocument('mobi')" title="Export as Amazon Kindle (MOBI)">
-                  <i class="ri-amazon-line"></i> MOBI
-                </button>
-                <button class="btn btn-secondary btn-sm" onclick="exportDocument('zip')" title="Export as ZIP">
-                  <i class="ri-file-zip-line"></i> ZIP
-                </button>
+              <div class="gallery-quick-exports gallery-export-segmented" role="group" aria-label="Export Formats">
+                <span class="export-segmented-label"><i class="ri-download-2-line"></i> Export</span>
+                <div class="export-segmented-buttons">
+                  <button class="btn btn-secondary btn-sm export-format-btn" onclick="exportDocument('pdf')" title="Export as PDF">
+                    <i class="ri-file-pdf-2-line"></i> PDF
+                  </button>
+                  <button class="btn btn-secondary btn-sm export-format-btn" onclick="exportDocument('epub')" title="Export as EPUB">
+                    <i class="ri-book-open-line"></i> EPUB
+                  </button>
+                  <button class="btn btn-secondary btn-sm export-format-btn" onclick="exportDocument('mobi')" title="Export as Amazon Kindle (MOBI)">
+                    <i class="ri-amazon-line"></i> MOBI
+                  </button>
+                  <button class="btn btn-secondary btn-sm export-format-btn" onclick="exportDocument('zip')" title="Export as ZIP">
+                    <i class="ri-file-zip-line"></i> ZIP
+                  </button>
+                </div>
               </div>
             </div>
           </div>

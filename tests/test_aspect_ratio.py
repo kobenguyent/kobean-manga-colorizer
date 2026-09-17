@@ -1,19 +1,22 @@
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import unittest
 import os
 import shutil
 import tempfile
+import unittest
 import zipfile
-import numpy as np
-import cv2
-from PIL import Image
 from pathlib import Path
 
-from file_processor import MangaFileProcessor
+import cv2
+import numpy as np
+from PIL import Image
+
 from colorizer_engine import MangaColorizerEngine, resize_pad_manga
+from file_processor import MangaFileProcessor
+
 
 class TestAspectRatioPreservation(unittest.TestCase):
     def setUp(self):
@@ -29,8 +32,8 @@ class TestAspectRatioPreservation(unittest.TestCase):
         test_cases = [
             (800, 1200),  # Standard portrait (2:3)
             (1200, 800),  # Standard landscape (3:2)
-            (1482, 2196), # Real manga cover ratio
-            (982, 763),   # Real manga credits landscape
+            (1482, 2196),  # Real manga cover ratio
+            (982, 763),  # Real manga credits landscape
             (1272, 486),  # Real manga wide banner
         ]
 
@@ -71,7 +74,9 @@ class TestAspectRatioPreservation(unittest.TestCase):
         self.assertEqual(len(pages_meta), len(pages_specs))
         # Verify natural sorting: image_0003 must precede image_0010
         filenames = [p["filename"] for p in pages_meta]
-        self.assertEqual(filenames, ["image_0001.jpg", "image_0002.jpg", "image_0003.jpg", "image_0004.jpg"])
+        self.assertEqual(
+            filenames, ["image_0001.jpg", "image_0002.jpg", "image_0003.jpg", "image_0004.jpg"]
+        )
 
         # Check dimensions
         expected_dims = [(1482, 2196), (982, 763), (1500, 2250), (1272, 486)]
@@ -87,8 +92,8 @@ class TestAspectRatioPreservation(unittest.TestCase):
         engine = MangaColorizerEngine()
 
         test_sizes = [
-            (600, 900),   # 2:3
-            (900, 600),   # 3:2
+            (600, 900),  # 2:3
+            (900, 600),  # 3:2
             (1024, 768),  # 4:3
             (700, 1100),  # non-multiple of 32
         ]
@@ -110,14 +115,19 @@ class TestAspectRatioPreservation(unittest.TestCase):
                 output_path=out_path,
                 model_provider="resnext_generator",
                 model_name="resnext_deep_gen",
-                style="shonen_vivid"
+                style="shonen_vivid",
             )
             self.assertEqual(res["status"], "success")
 
             # Check output image exact dimensions
             out_img = cv2.imread(out_path)
-            self.assertEqual(out_img.shape[1], w, f"Width mismatch: expected {w}, got {out_img.shape[1]}")
-            self.assertEqual(out_img.shape[0], h, f"Height mismatch: expected {h}, got {out_img.shape[0]}")
+            self.assertEqual(
+                out_img.shape[1], w, f"Width mismatch: expected {w}, got {out_img.shape[1]}"
+            )
+            self.assertEqual(
+                out_img.shape[0], h, f"Height mismatch: expected {h}, got {out_img.shape[0]}"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

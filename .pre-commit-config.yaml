@@ -1,0 +1,14 @@
+# ==============================================================================
+# 🎨 Kobean Manga Colorizer - Pre-Commit Configuration
+# See https://pre-commit.com for more information
+# ==============================================================================
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.10
+    hooks:
+      # Run the Ruff linter with auto-fix
+      - id: ruff
+        args: [--fix]
+      # Run the Ruff formatter
+      - id: ruff-format

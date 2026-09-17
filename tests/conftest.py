@@ -8,12 +8,12 @@ Pass --keep-test-data to pytest to retain test artifacts for debugging:
   pytest --keep-test-data
 """
 
-import os
-import sys
 import glob
-import shutil
 import json
+import os
+import shutil
 from pathlib import Path
+
 import pytest
 
 try:
@@ -83,7 +83,7 @@ def purge_test_data():
             requests.post(
                 f"{BASE_URL}/api/test/cleanup",
                 json={"purge_all": False, "clean_orphans": True},
-                timeout=5
+                timeout=5,
             )
         except Exception:
             pass
@@ -98,7 +98,7 @@ def purge_test_data():
             fn, title = "", ""
             if meta_path.exists():
                 try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
+                    with open(meta_path, encoding="utf-8") as f:
                         data = json.load(f)
                         fn = (data.get("filename") or "").lower()
                         title = (data.get("title") or "").lower()
