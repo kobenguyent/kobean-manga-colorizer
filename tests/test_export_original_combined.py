@@ -328,6 +328,8 @@ def test_api_export_combined_original_sync():
     finally:
         shutil.rmtree(sess_dir, ignore_errors=True)
         SESSIONS.pop(sid, None)
+        if "data" in locals() and "filename" in data:
+            (OUTPUT_DIR / f"combined_{data['filename']}").unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────

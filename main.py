@@ -1948,10 +1948,15 @@ async def download_file(session_id: str, filename: str):
 @app.get("/api/sessions")
 async def list_sessions(batch_id: Optional[str] = None):
     """Returns list of active/cached sessions, optionally filtered by batch_id, naturally sorted by filename."""
-    dirs = [d for d in STORAGE_DIR.iterdir() if d.is_dir()]
-    for d in dirs:
-        if d.name not in SESSIONS:
-            get_or_restore_session(d.name)
+    existing_dirs = {d.name for d in STORAGE_DIR.iterdir() if d.is_dir()}
+    for sid in list(SESSIONS.keys()):
+        if sid not in existing_dirs:
+            SESSIONS.pop(sid, None)
+            EVENT_QUEUES.pop(sid, None)
+
+    for d_name in existing_dirs:
+        if d_name not in SESSIONS:
+            get_or_restore_session(d_name)
 
     results = []
     for sess in SESSIONS.values():
@@ -2221,6 +2226,30 @@ async def bulk_delete_sessions(req: BulkDeleteSessionsRequest):
     )
 
 
+def is_authentic_user_manga(name: str = "", title: str = "", sid: str = "") -> bool:
+    """Identifies authentic user manga collections (such as Dr. Slump or One Piece)
+    that must be preserved unless purge_all is explicitly specified."""
+    text = f"{name} {title} {sid}".lower()
+    test_markers = [
+        "test",
+        "sample",
+        "dummy",
+        "api_orig_sync",
+        "api_split",
+        "import_test",
+        "split_test",
+        "custom_size",
+    ]
+    if any(m in text for m in test_markers):
+        return False
+
+    if "slump" in text:
+        return True
+    if "one piece" in text or "onepiece" in text or "eiichiro oda" in text:
+        return True
+    return False
+
+
 @app.post("/api/test/cleanup")
 async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
     """
@@ -2244,6 +2273,45 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
             pass
         return 0
 
+    test_keywords = [
+        "test",
+        "sample",
+        "dummy",
+        "cancel",
+        "switch",
+        "kindle",
+        "batch",
+        "preview",
+        "exp_page",
+        "manga_vol",
+        "manga_volume",
+        "vol_01",
+        "vol_02",
+        "vol_03",
+        "api_split",
+        "api_orig_sync",
+        "sess_epub",
+        "sess_pdf",
+        "sess_mobi",
+        "import_test",
+        "split_test",
+        "custom_size",
+        "huge_omnibus",
+        "omnibus_200mb",
+        "huge_manga",
+        "single_original",
+        "multi_original",
+        "epic_manga",
+        "amazon_kindle",
+        "progress_test",
+        "single_image_test",
+        "ranma",
+        "inuyasha",
+        "resnext",
+        "multicolor",
+        "skip_colored",
+    ]
+
     # 1. Determine target session IDs
     target_sids = set()
     if session_ids:
@@ -2259,13 +2327,12 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
             if d.is_dir():
                 all_sids.add(d.name)
 
-        test_keywords = ["test", "sample", "cancel", "switch", "kindle_test", "batch_test"]
         for sid in all_sids:
             sess = SESSIONS.get(sid) or get_or_restore_session(sid)
             fn = (sess.get("filename") or "").lower() if sess else ""
             title = (sess.get("title") or "").lower() if sess else ""
-            # Preserve user volumes like Dr. Slump unless purge_all is explicitly requested
-            if "slump" in fn or "slump" in title:
+            # Preserve authentic user volumes unless purge_all is explicitly requested
+            if is_authentic_user_manga(name=fn, title=title, sid=sid):
                 continue
             is_test = False
             for kw in test_keywords:
@@ -2294,26 +2361,32 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
     # 3. Clean orphan or test output files if requested
     cleaned_output_files = 0
     if clean_orphans or purge_all:
-        active_sids = set(SESSIONS.keys())
-        for d in STORAGE_DIR.iterdir():
-            if d.is_dir():
-                active_sids.add(d.name)
+        disk_sids = {d.name for d in STORAGE_DIR.iterdir() if d.is_dir()}
+        for sid in list(SESSIONS.keys()):
+            if sid not in disk_sids:
+                SESSIONS.pop(sid, None)
+                EVENT_QUEUES.pop(sid, None)
+        active_sids = set(SESSIONS.keys()) | disk_sids
 
-        test_out_keywords = ["test", "sample", "cancel", "switch", "progress", "kindle"]
         for f in OUTPUT_DIR.iterdir():
             if not f.is_file():
                 continue
             name_lower = f.name.lower()
+            is_user = is_authentic_user_manga(name=name_lower)
+            if is_user and not purge_all:
+                continue
+
             should_delete = False
             if purge_all:
                 should_delete = True
-            elif any(k in name_lower for k in test_out_keywords):
+            elif any(k in name_lower for k in test_keywords):
                 should_delete = True
+            elif name_lower.startswith("combined_") or name_lower.startswith("batch_"):
+                if not is_user:
+                    should_delete = True
             else:
                 prefix = f.name.split("_")[0]
-                if prefix not in active_sids and (
-                    f.name.startswith("combined_") or f.name.startswith("batch_")
-                ):
+                if prefix not in active_sids:
                     should_delete = True
 
             if should_delete:
@@ -2325,10 +2398,12 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
             if not f.is_file():
                 continue
             name_lower = f.name.lower()
+            if is_authentic_user_manga(name=name_lower) and not purge_all:
+                continue
             should_delete = False
             if purge_all:
                 should_delete = True
-            elif any(k in name_lower for k in test_out_keywords):
+            elif any(k in name_lower for k in test_keywords):
                 should_delete = True
             else:
                 prefix = f.name.split("_")[0]

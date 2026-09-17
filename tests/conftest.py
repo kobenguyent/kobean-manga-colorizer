@@ -29,10 +29,9 @@ BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 TMP_TEST_PATTERNS = [
     "/tmp/sample_*",
-    "/tmp/*test*.png",
-    "/tmp/*test*.pdf",
-    "/tmp/*test*.epub",
-    "/tmp/*test*.mobi",
+    "/tmp/dummy.*",
+    "/tmp/dummy_*",
+    "/tmp/import_test*",
     "/tmp/manga_test*",
     "/tmp/cancel_test*",
     "/tmp/switch_test*",
@@ -42,13 +41,91 @@ TMP_TEST_PATTERNS = [
     "/tmp/test_export*",
     "/tmp/single_image_test*",
     "/tmp/progress_test*",
-    "/tmp/import_test*"
+    "/tmp/colorized_manga_output.*",
+    "/tmp/colorized_out.*",
+    "/tmp/colorized_test_*",
+    "/tmp/original_test_*",
+    "/tmp/combined_test_*",
+    "/tmp/pure_resnext_*",
+    "/tmp/resnext_*",
+    "/tmp/verified_*",
+    "/tmp/multicolor_test*",
+    "/tmp/huge_*",
+    "/tmp/omnibus_*",
+    "/tmp/test_*",
+    "/tmp/*test*.png",
+    "/tmp/*test*.jpg",
+    "/tmp/*test*.jpeg",
+    "/tmp/*test*.webp",
+    "/tmp/*test*.pdf",
+    "/tmp/*test*.epub",
+    "/tmp/*test*.mobi",
+    "/tmp/*test*.zip",
+    "/tmp/*test*.cbz",
 ]
 
 TEST_KEYWORDS = [
-    "test", "sample", "cancel", "switch", "kindle_test", "batch_test",
-    "preview_manga", "exp_page", "test_export", "test_vol", "import_test"
+    "test",
+    "sample",
+    "dummy",
+    "cancel",
+    "switch",
+    "kindle",
+    "batch",
+    "preview",
+    "exp_page",
+    "manga_vol",
+    "manga_volume",
+    "vol_01",
+    "vol_02",
+    "vol_03",
+    "api_split",
+    "api_orig_sync",
+    "sess_epub",
+    "sess_pdf",
+    "sess_mobi",
+    "import_test",
+    "split_test",
+    "custom_size",
+    "huge_omnibus",
+    "omnibus_200mb",
+    "huge_manga",
+    "single_original",
+    "multi_original",
+    "epic_manga",
+    "amazon_kindle",
+    "progress_test",
+    "single_image_test",
+    "ranma",
+    "inuyasha",
+    "resnext",
+    "multicolor",
+    "skip_colored",
 ]
+
+
+def is_authentic_user_manga(name: str = "", title: str = "", sid: str = "") -> bool:
+    """Identifies authentic user manga collections (such as Dr. Slump or One Piece)
+    that must be preserved."""
+    text = f"{name} {title} {sid}".lower()
+    test_markers = [
+        "test",
+        "sample",
+        "dummy",
+        "api_orig_sync",
+        "api_split",
+        "import_test",
+        "split_test",
+        "custom_size",
+    ]
+    if any(m in text for m in test_markers):
+        return False
+
+    if "slump" in text:
+        return True
+    if "one piece" in text or "onepiece" in text or "eiichiro oda" in text:
+        return True
+    return False
 
 
 def pytest_addoption(parser):
@@ -63,8 +140,12 @@ def pytest_addoption(parser):
 
 def clean_tmp_files():
     """Removes test files created in /tmp."""
+    seen = set()
     for pattern in TMP_TEST_PATTERNS:
         for fpath in glob.glob(pattern):
+            if fpath in seen:
+                continue
+            seen.add(fpath)
             try:
                 p = Path(fpath)
                 if p.is_file() or p.is_symlink():
@@ -105,8 +186,8 @@ def purge_test_data():
                 except Exception:
                     pass
 
-            # Never delete user manga like Dr. Slump
-            if "slump" in fn or "slump" in title or "slump" in sid.lower():
+            # Never delete authentic user manga
+            if is_authentic_user_manga(name=fn, title=title, sid=sid):
                 continue
 
             is_test = False
@@ -130,7 +211,7 @@ def purge_test_data():
             if not f.is_file():
                 continue
             name_lower = f.name.lower()
-            if "slump" in name_lower:
+            if is_authentic_user_manga(name=name_lower):
                 continue
             prefix = f.name.split("_")[0]
             if any(kw in name_lower for kw in TEST_KEYWORDS) or prefix not in active_sids:
@@ -144,7 +225,7 @@ def purge_test_data():
             if not f.is_file():
                 continue
             name_lower = f.name.lower()
-            if "slump" in name_lower:
+            if is_authentic_user_manga(name=name_lower):
                 continue
             prefix = f.name.split("_")[0]
             if any(kw in name_lower for kw in TEST_KEYWORDS) or prefix not in active_sids:

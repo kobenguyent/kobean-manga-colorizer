@@ -154,6 +154,16 @@ class TestLargeImport(unittest.TestCase):
                 self.assertGreater(sessions_map[sid]["total_pages"], 0)
         finally:
             shutil.rmtree(str(sub_dir), ignore_errors=True)
+            if final_status and final_status.get("created_session_ids"):
+                for sid in final_status["created_session_ids"]:
+                    try:
+                        requests.post(
+                            f"{SERVER_URL}/api/test/cleanup",
+                            json={"session_ids": [sid], "clean_orphans": True},
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
 
     def test_06_directory_import_cancel(self):
         """Test cancelling a directory import task via POST /api/import/cancel/{import_id}."""
