@@ -651,6 +651,30 @@ class MangaCharacterRecognizer:
             print(f"[MangaCharacterRecognizer WARNING] Could not load offline CLIP model: {e}")
             return None, None, None
 
+    @staticmethod
+    def _canonicalize_name(raw_name: str, palette: CharacterPalette) -> str:
+        """
+        Maps a detected raw name (e.g. 'Luffy', 'Monkey D Luffy', 'Straw Hat')
+        to the exact canonical name defined in palette.characters ('Monkey D. Luffy').
+        """
+        if not palette or not palette.characters or not raw_name:
+            return raw_name
+        r_clean = raw_name.lower().strip()
+        # 1. Exact match
+        for c in palette.characters:
+            if c.name.lower().strip() == r_clean:
+                return c.name
+        # 2. Substring match
+        for c in palette.characters:
+            c_clean = c.name.lower().strip()
+            if r_clean in c_clean or c_clean in r_clean:
+                return c.name
+        # 3. Keyword / alias match
+        for c in palette.characters:
+            if any(kw in r_clean or r_clean in kw for kw in c.keywords):
+                return c.name
+        return raw_name
+
     def recognize_page_characters(
         self,
         image_path: str,
@@ -665,6 +689,8 @@ class MangaCharacterRecognizer:
             return []
 
         mode = (recognition_mode or "auto").lower()
+
+        results: list[RecognizedCharacter] = []
 
         # 1. Explicit Google Gemini cloud vision mode
         if mode in ("gemini", "cloud", "gemini_multimodal"):
@@ -682,21 +708,22 @@ class MangaCharacterRecognizer:
                         model_name=model_name,
                     )
                     if res:
-                        return res
+                        results = res
                 except Exception as e:
                     print(f"[MangaCharacterRecognizer] Gemini recognition error: {e}")
-            # Fallback to offline CLIP or heuristics if gemini had no results
-            clip_res = self._recognize_with_clip(image_path, palette, min_confidence)
-            if clip_res:
-                return clip_res
-            return self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+            if not results:
+                clip_res = self._recognize_with_clip(image_path, palette, min_confidence)
+                if clip_res:
+                    results = clip_res
+                else:
+                    results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
 
         # 2. Explicit Fast Visual Heuristics mode
-        if mode in ("heuristics", "fast", "visual_heuristic"):
-            return self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+        elif mode in ("heuristics", "fast", "visual_heuristic"):
+            results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
 
         # 3. Explicit Offline Pre-trained Neural AI (CLIP) mode
-        if mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai"):
+        elif mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai"):
             try:
                 res = self._recognize_with_clip(
                     image_path=image_path,
@@ -704,49 +731,57 @@ class MangaCharacterRecognizer:
                     min_confidence=min_confidence,
                 )
                 if res:
-                    return res
+                    results = res
             except Exception as e:
                 print(f"[MangaCharacterRecognizer WARNING] Offline CLIP error: {e}")
-            return self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+            if not results:
+                results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
 
         # 4. Auto mode (Best Available: Gemini -> Offline CLIP -> Fast Heuristics)
-        gemini_key = (
-            api_key
-            or os.environ.get("GOOGLE_API_KEY", "")
-            or os.environ.get("GEMINI_API_KEY", "")
-        )
-        if gemini_key:
-            try:
-                gemini_results = self._recognize_with_gemini(
+        else:
+            gemini_key = (
+                api_key
+                or os.environ.get("GOOGLE_API_KEY", "")
+                or os.environ.get("GEMINI_API_KEY", "")
+            )
+            if gemini_key:
+                try:
+                    gemini_results = self._recognize_with_gemini(
+                        image_path=image_path,
+                        palette=palette,
+                        api_key=gemini_key,
+                        model_name=model_name,
+                    )
+                    if gemini_results:
+                        results = gemini_results
+                except Exception as e:
+                    print(f"[MangaCharacterRecognizer] Gemini recognition fallback: {e}")
+
+            if not results:
+                try:
+                    clip_results = self._recognize_with_clip(
+                        image_path=image_path,
+                        palette=palette,
+                        min_confidence=min_confidence,
+                    )
+                    if clip_results:
+                        results = clip_results
+                except Exception as e:
+                    print(f"[MangaCharacterRecognizer] Offline CLIP fallback: {e}")
+
+            if not results:
+                results = self._recognize_heuristics(
                     image_path=image_path,
                     palette=palette,
-                    api_key=gemini_key,
-                    model_name=model_name,
+                    page_text=page_text,
+                    min_confidence=min_confidence,
                 )
-                if gemini_results:
-                    return gemini_results
-            except Exception as e:
-                print(f"[MangaCharacterRecognizer] Gemini recognition fallback: {e}")
 
-        # Try offline pre-trained CLIP neural network
-        try:
-            clip_results = self._recognize_with_clip(
-                image_path=image_path,
-                palette=palette,
-                min_confidence=min_confidence,
-            )
-            if clip_results:
-                return clip_results
-        except Exception as e:
-            print(f"[MangaCharacterRecognizer] Offline CLIP fallback: {e}")
+        # Ensure all recognized names are strictly canonicalized against palette
+        for r in results:
+            r.name = self._canonicalize_name(r.name, palette)
 
-        # Fallback to visual heuristics
-        return self._recognize_heuristics(
-            image_path=image_path,
-            palette=palette,
-            page_text=page_text,
-            min_confidence=min_confidence,
-        )
+        return results
 
     def _recognize_with_gemini(
         self,
@@ -844,7 +879,7 @@ class MangaCharacterRecognizer:
             if name:
                 results.append(
                     RecognizedCharacter(
-                        name=name,
+                        name=self._canonicalize_name(name, palette),
                         confidence=conf,
                         bounding_box=bb_tuple,
                         detection_method="gemini_multimodal",
@@ -1438,6 +1473,7 @@ class MangaColorizerEngine:
         denoise_screentone: bool = True,
         denoise_sigma: int = 25,
         recognition_mode: str = "auto",
+        skip_recognition: bool = False,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -1454,6 +1490,9 @@ class MangaColorizerEngine:
                                 preserving 100% native ink lines downstream.
             denoise_sigma:      Denoising noise level (default 25).
             recognition_mode:   Character recognition mode ("auto", "offline_ai", "heuristics", "gemini").
+            skip_recognition:   When True, skip in-process character recognition entirely.
+                                Use when the caller has already pre-filtered the palette
+                                via active_character_names, avoiding a redundant CLIP scan.
         """
         # ── Early exit: page already has colors ─────────────────────
         if skip_if_colored and is_colored_page(image_path):
@@ -1470,7 +1509,7 @@ class MangaColorizerEngine:
         # ── Page-specific Character Recognition & Palette Optimization ──
         active_palette = character_palette
         recognized_chars: list[dict] = []
-        if character_palette is not None and character_palette.characters:
+        if character_palette is not None and character_palette.characters and not skip_recognition:
             if any(c.bounding_box is not None for c in character_palette.characters):
                 active_palette = character_palette
                 recognized_chars = [
@@ -1492,6 +1531,17 @@ class MangaColorizerEngine:
                 except Exception as e:
                     print(f"[MangaColorizer WARNING] Character recognition error: {e}")
                     active_palette = character_palette
+        elif skip_recognition and character_palette is not None:
+            # Caller pre-filtered the palette — treat all passed characters as recognized
+            active_palette = character_palette
+            recognized_chars = [
+                {"name": c.name, "confidence": 1.0, "detection_method": "pre_filtered"}
+                for c in character_palette.characters
+            ]
+            print(
+                f"[MangaColorizer] Skipping recognition (pre-filtered palette: "
+                f"{[c.name for c in character_palette.characters]})"
+            )
 
         provider = (model_provider or "resnext_generator").lower()
 

@@ -1179,7 +1179,11 @@ async def preview_single_page(req: PreviewRequest):
         if palette and not palette.characters:
             palette = None
 
-        if palette and getattr(req, "active_character_names", None):
+        # Track whether the caller has already declared active characters,
+        # so we can skip the redundant in-engine recognition pass.
+        has_active_names = bool(getattr(req, "active_character_names", None))
+
+        if palette and has_active_names:
             palette = copy.deepcopy(palette)
             palette.characters = [
                 c for c in palette.characters if c.name in req.active_character_names
@@ -1201,6 +1205,8 @@ async def preview_single_page(req: PreviewRequest):
             denoise_screentone=getattr(req, "denoise_screentone", True),
             denoise_sigma=getattr(req, "denoise_sigma", 25),
             recognition_mode=getattr(req, "recognition_mode", "auto"),
+            # Skip re-running recognition when caller already pre-filtered palette
+            skip_recognition=has_active_names,
         )
 
         page_info["status"] = "colorized"

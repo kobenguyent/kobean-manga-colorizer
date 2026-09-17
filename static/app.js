@@ -1991,6 +1991,7 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
       }
       const ts = Date.now();
       
+      // Update gallery thumbnail
       const imgElem = document.getElementById(`page-img-${pageIdx}`);
       if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
 
@@ -2003,24 +2004,14 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
       updateColorizedCount();
       updateSelectionUI();
 
-      // Update split comparator images directly
-      const origImg = document.getElementById("split-img-original");
-      const colorImg = document.getElementById("split-img-colorized");
-      const origUrl = `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
-      
-      if (origImg) origImg.src = origUrl;
-      if (colorImg) {
-        colorImg.style.opacity = "1.0";
-        colorImg.src = `${data.colorized_url}?t=${ts}`;
-      }
-
       const styleSelect = document.getElementById("style-select");
       const selectedStyleText = styleSelect.options[styleSelect.selectedIndex]?.text?.split(" ")[1] || style;
       if (titleBadge) {
         titleBadge.innerText = `${page.display_name} • ${selectedStyleText}`;
       }
 
-      // Open in Before / After Comparator and switch to split view so color is visible
+      // Open split comparator — openSplitPreview owns loading colorImg.src
+      // to ensure the onload callback fires after the container is fully set up.
       openSplitPreview(pageIdx, !showToastFeedback);
       setComparatorView("split", true);
 
@@ -2033,6 +2024,7 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     } else {
       showToast(data.detail || "Preview failed.", "error");
     }
+
   } catch (err) {
     showToast(`Preview error: ${err.message}`, "error");
   } finally {
@@ -4234,6 +4226,42 @@ function paletteRender() {
 }
 
 /**
+ * Updates ONLY the palette character list UI (badge + rows) without touching the chips section.
+ * Use this when you need to sync paletteCharacters without triggering updatePageCharacterChips.
+ */
+function paletteRenderListOnly() {
+  const list = document.getElementById("palette-character-list");
+  const badge = document.getElementById("palette-badge-count");
+  if (!list) return;
+
+  if (badge) badge.innerText = `${paletteCharacters.length} Character${paletteCharacters.length !== 1 ? "s" : ""}`;
+
+  if (paletteCharacters.length === 0) {
+    list.innerHTML = `<p style="font-size:0.78rem;color:var(--text-secondary);text-align:center;padding:0.5rem 0;">
+      No characters yet. Pick a preset above or add one below.
+    </p>`;
+    return;
+  }
+
+  list.innerHTML = paletteCharacters.map((ch, i) => {
+    const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+      .filter(Boolean)
+      .map(hx => `<span title="${hx}" style="display:inline-block;width:14px;height:14px;border-radius:3px;background:${hx};border:1px solid rgba(255,255,255,0.2);vertical-align:middle;"></span>`)
+      .join(" ");
+
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;background:var(--card-bg,#1e1e2e);border:1px solid var(--border-color);border-radius:6px;padding:6px 10px;gap:6px;">
+        <span style="font-size:0.82rem;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${ch.name}">${ch.name}</span>
+        <span style="display:flex;gap:3px;align-items:center;">${swatches}</span>
+        <button class="btn-icon" title="Remove ${ch.name}" onclick="paletteDeleteCharacter(${i})" style="padding:2px 5px;opacity:0.6;flex-shrink:0;">
+          <i class="ri-delete-bin-line" style="font-size:0.85rem;"></i>
+        </button>
+      </div>`;
+  }).join("");
+}
+
+
+/**
  * Reads the add-character form, calls POST /api/palette/upsert, and refreshes.
  */
 async function paletteAddCharacter() {
@@ -4310,6 +4338,43 @@ window.paletteLoadFromServer         = paletteLoadFromServer;
 let activePageCharacterNames = new Set();
 
 /**
+ * Finds the canonical character from the palette using exact, substring, or keyword matching.
+ */
+function findCanonicalPaletteCharacter(name) {
+  if (!name || !paletteCharacters || !paletteCharacters.length) return null;
+  const nLow = name.trim().toLowerCase();
+  // 1. Exact match
+  let found = paletteCharacters.find(c => c.name.trim().toLowerCase() === nLow);
+  if (found) return found;
+  // 2. Substring match
+  found = paletteCharacters.find(c => {
+    const cLow = c.name.trim().toLowerCase();
+    return cLow.includes(nLow) || nLow.includes(cLow);
+  });
+  if (found) return found;
+  // 3. Keyword / alias match
+  found = paletteCharacters.find(c => {
+    if (!c.keywords) return false;
+    return c.keywords.some(kw => nLow.includes(kw.toLowerCase()) || kw.toLowerCase().includes(nLow));
+  });
+  return found || null;
+}
+
+/**
+ * Finds if a character was matched in the recognized list.
+ */
+function findMatchingRecognized(ch, recognizedList) {
+  if (!recognizedList || !recognizedList.length) return null;
+  const chLow = ch.name.trim().toLowerCase();
+  for (const r of recognizedList) {
+    const rLow = (r.name || "").trim().toLowerCase();
+    if (rLow === chLow || chLow.includes(rLow) || rLow.includes(chLow)) return r;
+    if (ch.keywords && ch.keywords.some(kw => rLow.includes(kw.toLowerCase()))) return r;
+  }
+  return null;
+}
+
+/**
  * Scans the current page with character recognition and renders active chips.
  */
 async function recognizeCurrentPageCharacters() {
@@ -4321,9 +4386,11 @@ async function recognizeCurrentPageCharacters() {
   const page = currentSession.pages[currentPreviewPageIndex];
   const btn = document.getElementById("btn-recognize-page");
   const origBtnHtml = btn ? btn.innerHTML : "";
+  const pageNum = currentPreviewPageIndex + 1;
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = '<i class="ri-loader-4-line spinner"></i> Scanning…';
+    btn.title = `Scanning page ${pageNum}…`;
+    btn.innerHTML = `<i class="ri-loader-4-line spinner"></i><span class="btn-label-scan">Scanning…</span>`;
   }
 
   try {
@@ -4346,14 +4413,45 @@ async function recognizeCurrentPageCharacters() {
 
     const data = await resp.json();
     const recognized = data.recognized || [];
+
+    console.log("[MangaColorizer] Recognition response:", {
+      recognized,
+      paletteFromServer: data.palette?.characters?.map(c => c.name),
+      currentPaletteChars: paletteCharacters.map(c => c.name)
+    });
+
+    // Store recognized characters on the page object
     page.recognized_characters = recognized;
+
+    // Synchronize paletteCharacters FIRST if returned by server — update in-memory state only.
+    // Do NOT call paletteRender() here to avoid a double-render race condition where
+    // updatePageCharacterChips() inside paletteRender() fires before we set activePageCharacterNames.
+    if (data.palette && data.palette.characters && data.palette.characters.length > 0) {
+      paletteCharacters = data.palette.characters;
+      // Refresh just the character list UI without touching the chips section
+      if (typeof paletteRenderListOnly === "function") {
+        paletteRenderListOnly();
+      } else if (typeof paletteRender === "function") {
+        // Safe fallback: paletteRender calls updatePageCharacterChips which uses page.recognized_characters
+        paletteRender();
+      }
+    }
+
+    console.log("[MangaColorizer] About to renderPageCharacterChips with:", {
+      recognizedNames: recognized.map(r => r.name),
+      paletteNames: paletteCharacters.map(c => c.name)
+    });
+
+    // Render chips — single authoritative call after palette is synced
     renderPageCharacterChips(recognized);
+
+    console.log("[MangaColorizer] After renderPageCharacterChips, activePageCharacterNames:", Array.from(activePageCharacterNames));
 
     if (recognized.length > 0) {
       const names = recognized.map(r => r.name).join(", ");
-      showToast(`🎯 Detected: ${names}`, "success");
+      showToast(`🎯 Page ${pageNum}: Detected ${names}`, "success");
     } else {
-      showToast("No specific character recognized on this page.", "info");
+      showToast(`Page ${pageNum}: No specific character detected (all palette colors active).`, "info");
     }
   } catch (err) {
     console.warn("[MangaColorizer] Character scan error:", err);
@@ -4361,7 +4459,8 @@ async function recognizeCurrentPageCharacters() {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.innerHTML = origBtnHtml || '<i class="ri-scan-line"></i> Scan Page';
+      btn.title = `Auto-scan page ${pageNum} to detect characters`;
+      btn.innerHTML = `<i class="ri-scan-line"></i><span class="btn-label-scan">Scan</span>`;
     }
   }
 }
@@ -4372,6 +4471,21 @@ async function recognizeCurrentPageCharacters() {
 function updatePageCharacterChips(pageIdx) {
   if (!currentSession || !currentSession.pages) return;
   const page = currentSession.pages[pageIdx];
+  const pageNum = pageIdx + 1;
+
+  // Update header title and button tooltips with current page number
+  const titleText = document.getElementById("palette-page-title-text");
+  if (titleText) titleText.textContent = `Page ${pageNum} Characters`;
+  const btn = document.getElementById("btn-recognize-page");
+  if (btn && !btn.disabled) {
+    btn.title = `Auto-scan page ${pageNum} to detect characters`;
+    // Keep button label compact — just icon + "Scan"
+    btn.innerHTML = `<i class="ri-scan-line"></i><span class="btn-label-scan">Scan</span>`;
+  }
+  const specBtn = document.getElementById("btn-specify-page-chars");
+  if (specBtn) specBtn.title = `Manually pick characters for page ${pageNum}`;
+
+
   if (page && page.recognized_characters && page.recognized_characters.length > 0) {
     renderPageCharacterChips(page.recognized_characters);
   } else if (paletteCharacters && paletteCharacters.length > 0) {
@@ -4388,31 +4502,49 @@ function renderPageCharacterChips(recognizedList) {
   const container = document.getElementById("palette-page-characters-chips");
   if (!container) return;
 
+  if ((!paletteCharacters || paletteCharacters.length === 0) && currentSession?.preset_characters) {
+    paletteCharacters = currentSession.preset_characters;
+  }
+
   if (!paletteCharacters || paletteCharacters.length === 0) {
-    container.innerHTML = '<span style="font-size:0.72rem;color:var(--text-secondary);font-style:italic;">No characters in palette</span>';
+    container.innerHTML = '<span style="font-size:0.72rem;color:var(--text-secondary);font-style:italic;">No characters in palette yet</span>';
     activePageCharacterNames.clear();
     return;
   }
 
-  if (recognizedList && recognizedList.length > 0) {
+  // Update activePageCharacterNames with canonical names if recognizedList is provided
+  if (recognizedList !== undefined && recognizedList !== null) {
     activePageCharacterNames.clear();
-    recognizedList.forEach(r => {
-      activePageCharacterNames.add(r.name);
-    });
-  } else if (recognizedList === null) {
+    if (recognizedList.length > 0) {
+      recognizedList.forEach(r => {
+        const canonical = findCanonicalPaletteCharacter(r.name);
+        if (canonical) {
+          activePageCharacterNames.add(canonical.name);
+        } else if (r.name) {
+          activePageCharacterNames.add(r.name);
+        }
+      });
+    } else {
+      // Empty recognizedList means scanned with no specific characters found
+      activePageCharacterNames = new Set(paletteCharacters.map(c => c.name));
+    }
+  } else if (recognizedList === null && activePageCharacterNames.size === 0) {
     activePageCharacterNames = new Set(paletteCharacters.map(c => c.name));
   }
 
+  // Build lookup map for confidence badges
   const recMap = {};
-  if (recognizedList) {
+  if (recognizedList && recognizedList.length > 0) {
     recognizedList.forEach(r => {
-      recMap[r.name.toLowerCase()] = r;
+      const canonical = findCanonicalPaletteCharacter(r.name);
+      const key = (canonical ? canonical.name : r.name).trim().toLowerCase();
+      recMap[key] = r;
     });
   }
 
-  container.innerHTML = paletteCharacters.map(ch => {
+  const chipsHtml = paletteCharacters.map(ch => {
     const isSelected = activePageCharacterNames.has(ch.name);
-    const rec = recMap[ch.name.toLowerCase()];
+    const rec = recMap[ch.name.trim().toLowerCase()] || findMatchingRecognized(ch, recognizedList);
     const dotColor = ch.costume_hex || ch.hair_hex || "#a855f7";
     const confBadge = rec && rec.confidence ? `<span class="chip-conf">${Math.round(rec.confidence * 100)}%</span>` : "";
 
@@ -4426,6 +4558,13 @@ function renderPageCharacterChips(recognizedList) {
       </div>
     `;
   }).join("");
+
+  const pageNum = (currentPreviewPageIndex >= 0 ? currentPreviewPageIndex + 1 : 1);
+  const statusNote = (recognizedList && recognizedList.length > 0)
+    ? `<span style="font-size:0.68rem;color:#22c55e;width:100%;margin-top:2px;display:flex;align-items:center;gap:3px;"><i class="ri-check-line"></i> ${recognizedList.length} character${recognizedList.length > 1 ? 's' : ''} detected on page ${pageNum}. Click to toggle.</span>`
+    : `<span style="font-size:0.68rem;color:var(--text-secondary);width:100%;margin-top:2px;display:block;">All palette characters active on page ${pageNum}. Click any to exclude.</span>`;
+
+  container.innerHTML = chipsHtml + statusNote;
 }
 
 /**
@@ -4433,13 +4572,23 @@ function renderPageCharacterChips(recognizedList) {
  */
 function togglePageCharacterChip(encodedName) {
   const name = decodeURIComponent(encodedName);
-  if (activePageCharacterNames.has(name)) {
-    activePageCharacterNames.delete(name);
+  const canonical = findCanonicalPaletteCharacter(name);
+  const targetName = canonical ? canonical.name : name;
+
+  if (activePageCharacterNames.has(targetName)) {
+    activePageCharacterNames.delete(targetName);
   } else {
-    activePageCharacterNames.add(name);
+    activePageCharacterNames.add(targetName);
   }
   const page = currentSession?.pages?.[currentPreviewPageIndex];
-  renderPageCharacterChips(page?.recognized_characters || null);
+  if (page) {
+    page.recognized_characters = Array.from(activePageCharacterNames).map(n => {
+      const existing = (page.recognized_characters || []).find(r => r.name === n);
+      return existing || { name: n, confidence: 1.0, detection_method: "manual" };
+    });
+  }
+  // Re-render chips preserving current manual selection (passing undefined)
+  renderPageCharacterChips(undefined);
 }
 
 window.recognizeCurrentPageCharacters = recognizeCurrentPageCharacters;
@@ -4449,8 +4598,223 @@ window.renderPageCharacterChips       = renderPageCharacterChips;
 
 
 // ─────────────────────────────────────────────────────────────────────
-//  Recolorize — force re-run colorization on already-done pages
+//  Character Picker Modal — manually specify page characters
 // ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Escapes a string for safe insertion into HTML content / attributes.
+ */
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/**
+ * Opens the character picker modal pre-populated with all palette characters.
+ * Currently active characters are pre-checked.
+ */
+function openCharacterPickerModal() {
+  if (!currentSession) {
+    showToast("No active session. Load a document first.", "warning");
+    return;
+  }
+
+  // Fallback 1: pull from session.preset_characters if paletteCharacters is empty
+  if ((!paletteCharacters || paletteCharacters.length === 0) && currentSession.preset_characters) {
+    paletteCharacters = currentSession.preset_characters;
+  }
+
+  // Fallback 2: if still empty, fetch palette from server then re-open
+  if (!paletteCharacters || paletteCharacters.length === 0) {
+    fetch(`/api/palette/${currentSession.session_id}`)
+      .then(r => r.json())
+      .then(data => {
+        paletteCharacters = data.palette?.characters || [];
+        if (paletteCharacters.length > 0) {
+          openCharacterPickerModal(); // retry after palette is loaded
+        } else {
+          showToast("No characters in palette yet. Add characters or load a preset first.", "warning");
+        }
+      })
+      .catch(() => showToast("Could not load palette. Try again.", "error"));
+    return;
+  }
+
+  const modal = document.getElementById("char-picker-modal");
+  const subtitle = document.getElementById("char-picker-subtitle");
+  const list = document.getElementById("char-picker-list");
+  const empty = document.getElementById("char-picker-empty");
+  if (!modal || !list) {
+    console.error("[MangaColorizer] char-picker-modal or char-picker-list element not found in DOM");
+    showToast("UI error: character picker not found. Try refreshing the page.", "error");
+    return;
+  }
+
+  // Update subtitle with current page number
+  const pageNum = currentPreviewPageIndex >= 0 ? currentPreviewPageIndex + 1 : 1;
+  if (subtitle) subtitle.textContent = `Choose which characters appear on page ${pageNum}`;
+
+  list.innerHTML = "";
+  empty.style.display = "none";
+
+  if (paletteCharacters.length === 0) {
+    empty.style.display = "block";
+  } else {
+    paletteCharacters.forEach(ch => {
+      const isChecked = activePageCharacterNames.has(ch.name);
+      const dotColor = ch.costume_hex || ch.hair_hex || "#a855f7";
+      const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+        .filter(Boolean)
+        .map(hx => `<span title="${hx}" style="display:inline-block;width:12px;height:12px;border-radius:2px;background:${hx};border:1px solid rgba(255,255,255,0.2);flex-shrink:0;"></span>`)
+        .join("");
+
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:7px;cursor:pointer;border:1px solid transparent;transition:background 0.15s,border-color 0.15s;user-select:none;";
+      row.dataset.charName = ch.name;
+      row.innerHTML = `
+        <input type="checkbox" class="char-picker-cb" data-name="${escapeHtml(ch.name)}"
+               style="width:15px;height:15px;accent-color:var(--accent-purple,#a855f7);cursor:pointer;flex-shrink:0;"
+               ${isChecked ? "checked" : ""}>
+        <span class="chip-dot" style="background:${dotColor};width:10px;height:10px;border-radius:50%;flex-shrink:0;"></span>
+        <span style="font-size:0.82rem;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ch.name)}</span>
+        <span style="display:flex;gap:3px;align-items:center;flex-shrink:0;">${swatches}</span>
+      `;
+
+      // Highlight row on check change
+      const updateRowStyle = (checked) => {
+        row.style.background = checked ? "rgba(168,85,247,0.1)" : "";
+        row.style.borderColor = checked ? "rgba(168,85,247,0.3)" : "transparent";
+      };
+      updateRowStyle(isChecked);
+
+      row.querySelector(".char-picker-cb").addEventListener("change", (e) => {
+        updateRowStyle(e.target.checked);
+        _charPickerUpdateCount();
+      });
+
+      list.appendChild(row);
+    });
+  }
+
+  _charPickerUpdateCount();
+  modal.classList.remove("hidden");
+
+  // Escape key to close
+  document._charPickerEscHandler = (e) => { if (e.key === "Escape") closeCharacterPickerModal(); };
+  document.addEventListener("keydown", document._charPickerEscHandler);
+}
+
+/**
+ * Closes the character picker modal without applying.
+ */
+function closeCharacterPickerModal() {
+  const modal = document.getElementById("char-picker-modal");
+  if (modal) modal.classList.add("hidden");
+  if (document._charPickerEscHandler) {
+    document.removeEventListener("keydown", document._charPickerEscHandler);
+    delete document._charPickerEscHandler;
+  }
+}
+
+/**
+ * Closes modal when clicking the dark overlay behind the dialog.
+ */
+function handleCharPickerOverlayClick(e) {
+  const dialog = e.currentTarget.querySelector(".folder-import-dialog");
+  if (dialog && !dialog.contains(e.target)) closeCharacterPickerModal();
+}
+
+/**
+ * Checks all character checkboxes in the picker.
+ */
+function charPickerSelectAll() {
+  document.querySelectorAll(".char-picker-cb").forEach(cb => {
+    cb.checked = true;
+    const row = cb.closest("label");
+    if (row) {
+      row.style.background = "rgba(168,85,247,0.1)";
+      row.style.borderColor = "rgba(168,85,247,0.3)";
+    }
+  });
+  _charPickerUpdateCount();
+}
+
+/**
+ * Unchecks all character checkboxes in the picker.
+ */
+function charPickerSelectNone() {
+  document.querySelectorAll(".char-picker-cb").forEach(cb => {
+    cb.checked = false;
+    const row = cb.closest("label");
+    if (row) { row.style.background = ""; row.style.borderColor = "transparent"; }
+  });
+  _charPickerUpdateCount();
+}
+
+/**
+ * Updates the "X of N selected" counter in the picker header.
+ */
+function _charPickerUpdateCount() {
+  const total = document.querySelectorAll(".char-picker-cb").length;
+  const checked = document.querySelectorAll(".char-picker-cb:checked").length;
+  const label = document.getElementById("char-picker-count-label");
+  if (label) label.textContent = `${checked} of ${total} selected`;
+}
+
+/**
+ * Applies the checkbox selection to activePageCharacterNames and the current page's
+ * recognized_characters list (with detection_method = "manual"), then refreshes chips.
+ */
+function applyCharacterPickerSelection() {
+  const checkboxes = document.querySelectorAll(".char-picker-cb");
+  if (!checkboxes.length) { closeCharacterPickerModal(); return; }
+
+  // Build the new active set from checked boxes
+  const selectedNames = new Set();
+  checkboxes.forEach(cb => { if (cb.checked) selectedNames.add(cb.dataset.name); });
+
+  // Commit to global state
+  activePageCharacterNames = selectedNames;
+
+  // Update page object so it persists when switching pages
+  const page = currentSession?.pages?.[currentPreviewPageIndex];
+  if (page) {
+    page.recognized_characters = paletteCharacters
+      .filter(ch => selectedNames.has(ch.name))
+      .map(ch => {
+        const existing = (page.recognized_characters || []).find(r => r.name === ch.name);
+        return existing || { name: ch.name, confidence: 1.0, detection_method: "manual" };
+      });
+  }
+
+  // Refresh chips without resetting the selection (pass undefined = preserve activePageCharacterNames)
+  renderPageCharacterChips(undefined);
+
+  closeCharacterPickerModal();
+
+  const pageNum = currentPreviewPageIndex >= 0 ? currentPreviewPageIndex + 1 : 1;
+  const count = selectedNames.size;
+  if (count === 0) {
+    showToast(`Page ${pageNum}: No characters selected — all palette colors will be used.`, "info");
+  } else {
+    const names = Array.from(selectedNames).join(", ");
+    showToast(`✔ Page ${pageNum}: ${count} character${count > 1 ? "s" : ""} set (${names})`, "success");
+  }
+}
+
+window.openCharacterPickerModal      = openCharacterPickerModal;
+window.closeCharacterPickerModal     = closeCharacterPickerModal;
+window.handleCharPickerOverlayClick  = handleCharPickerOverlayClick;
+window.charPickerSelectAll           = charPickerSelectAll;
+window.charPickerSelectNone          = charPickerSelectNone;
+window.applyCharacterPickerSelection = applyCharacterPickerSelection;
+
+
 
 /**
  * Force-recolorizes a single page using the preview endpoint.

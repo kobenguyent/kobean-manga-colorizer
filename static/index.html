@@ -330,26 +330,46 @@
           <div id="palette-character-list" style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:0.75rem;"></div>
 
           <!-- Page Recognition & Active Character Chips -->
-          <div id="palette-page-recognition-section" style="margin-bottom:0.75rem;padding:0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;gap:6px;">
-              <span style="font-size:0.75rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:4px;">
-                <i class="ri-user-search-line" style="color:var(--accent-purple,#a855f7);"></i> Page Characters
+          <div id="palette-page-recognition-section" style="margin-bottom:0.75rem;padding:0.5rem 0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;">
+            <!-- Row 1: title + action buttons -->
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:4px;margin-bottom:0.3rem;">
+              <span style="font-size:0.72rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:3px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                <i class="ri-user-search-line" style="color:var(--accent-purple,#a855f7);flex-shrink:0;"></i>
+                <span id="palette-page-title-text">Page Characters</span>
               </span>
-              <div style="display:flex;align-items:center;gap:4px;">
-                <select id="recognition-mode-select" class="form-select" style="font-size:0.7rem;padding:1px 6px;height:24px;background:var(--card-bg, #1a1a24);color:var(--text-primary);border:1px solid var(--border-color);border-radius:4px;cursor:pointer;" title="Character Recognition Engine">
-                  <option value="auto" selected>Auto</option>
-                  <option value="offline_ai">Offline AI (CLIP)</option>
-                  <option value="heuristics">Fast Heuristics</option>
-                  <option value="gemini">Google Gemini</option>
-                </select>
-                <button class="btn btn-secondary btn-sm" id="btn-recognize-page" onclick="recognizeCurrentPageCharacters()" title="Scan this page to recognize characters" style="padding:2px 8px;font-size:0.72rem;height:24px;white-space:nowrap;">
-                  <i class="ri-scan-line"></i> Scan Page
+              <div style="display:flex;align-items:center;gap:3px;flex-shrink:0;">
+                <!-- Scan: icon + short label -->
+                <button class="btn btn-secondary btn-sm" id="btn-recognize-page"
+                        onclick="recognizeCurrentPageCharacters()"
+                        title="Auto-scan this page to detect characters"
+                        style="padding:2px 6px;font-size:0.7rem;height:22px;white-space:nowrap;display:flex;align-items:center;gap:3px;">
+                  <i class="ri-scan-line"></i><span class="btn-label-scan">Scan</span>
+                </button>
+                <!-- Specify: icon + short label, purple accent -->
+                <button class="btn btn-secondary btn-sm" id="btn-specify-page-chars"
+                        onclick="openCharacterPickerModal()"
+                        title="Manually pick which characters are on this page"
+                        style="padding:2px 6px;font-size:0.7rem;height:22px;white-space:nowrap;display:flex;align-items:center;gap:3px;border-color:var(--accent-purple,#a855f7);color:var(--accent-purple,#a855f7);">
+                  <i class="ri-edit-2-line"></i><span class="btn-label-specify">Pick</span>
                 </button>
               </div>
             </div>
-            <div id="palette-page-characters-chips" style="display:flex;flex-wrap:wrap;gap:0.35rem;min-height:22px;align-items:center;">
-              <span id="palette-page-chips-placeholder" style="font-size:0.72rem;color:var(--text-secondary);font-style:italic;">
-                Select a page or click Scan to optimize palette
+            <!-- Row 2: recognition engine selector (compact, secondary) -->
+            <div style="display:flex;align-items:center;gap:4px;margin-bottom:0.35rem;">
+              <i class="ri-cpu-line" style="font-size:0.68rem;color:var(--text-muted);flex-shrink:0;"></i>
+              <select id="recognition-mode-select"
+                      style="flex:1;font-size:0.68rem;padding:1px 4px;height:20px;background:transparent;color:var(--text-secondary);border:none;border-bottom:1px solid var(--border-color);border-radius:0;cursor:pointer;outline:none;"
+                      title="Recognition engine used when clicking Scan">
+                <option value="auto" selected>Auto detect</option>
+                <option value="offline_ai">Offline AI (CLIP)</option>
+                <option value="heuristics">Fast heuristics</option>
+                <option value="gemini">Google Gemini</option>
+              </select>
+            </div>
+            <!-- Character chips -->
+            <div id="palette-page-characters-chips" style="display:flex;flex-wrap:wrap;gap:0.3rem;min-height:20px;align-items:center;">
+              <span id="palette-page-chips-placeholder" style="font-size:0.7rem;color:var(--text-secondary);font-style:italic;">
+                Scan or pick characters to optimize palette
               </span>
             </div>
           </div>
@@ -1071,6 +1091,56 @@
     </div>
   </div>
 
+  <!-- Character Picker Modal — manually specify which characters appear on this page -->
+  <div class="modal-overlay hidden" id="char-picker-modal" onclick="handleCharPickerOverlayClick(event)">
+    <div class="folder-import-dialog" style="max-width:460px;" role="dialog" aria-modal="true" aria-labelledby="char-picker-title">
+      <div class="folder-import-header">
+        <div class="folder-import-header-left">
+          <div class="folder-import-icon" style="background:rgba(168,85,247,0.15);color:var(--accent-purple,#a855f7);">
+            <i class="ri-user-add-line"></i>
+          </div>
+          <div>
+            <h3 class="folder-import-title" id="char-picker-title">Specify Page Characters</h3>
+            <p class="folder-import-subtitle" id="char-picker-subtitle">Choose which characters appear on this page</p>
+          </div>
+        </div>
+        <button class="btn-icon history-close-btn" onclick="closeCharacterPickerModal()" title="Close (Esc)">
+          <i class="ri-close-line"></i>
+        </button>
+      </div>
+
+      <div class="folder-import-body" style="padding:1rem 1.25rem;max-height:360px;overflow-y:auto;">
+        <!-- Quick actions -->
+        <div style="display:flex;gap:6px;margin-bottom:0.75rem;align-items:center;">
+          <button class="btn btn-secondary btn-sm" onclick="charPickerSelectAll()" style="font-size:0.7rem;padding:2px 8px;height:24px;">
+            <i class="ri-check-double-line"></i> All
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="charPickerSelectNone()" style="font-size:0.7rem;padding:2px 8px;height:24px;">
+            <i class="ri-close-circle-line"></i> None
+          </button>
+          <span style="font-size:0.7rem;color:var(--text-muted);margin-left:4px;" id="char-picker-count-label"></span>
+        </div>
+        <!-- Character list with checkboxes -->
+        <div id="char-picker-list" style="display:flex;flex-direction:column;gap:0.4rem;"></div>
+        <p id="char-picker-empty" style="display:none;font-size:0.8rem;color:var(--text-secondary);text-align:center;padding:1rem 0;">
+          No characters in palette. Add characters to the palette first.
+        </p>
+      </div>
+
+      <div class="folder-import-footer" style="display:flex;justify-content:space-between;align-items:center;padding:0.85rem 1.25rem;border-top:1px solid var(--bg-card-border);gap:8px;">
+        <span style="font-size:0.72rem;color:var(--text-muted);">
+          <i class="ri-information-line"></i> Applied immediately — no scan needed.
+        </span>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-secondary btn-sm" onclick="closeCharacterPickerModal()">Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick="applyCharacterPickerSelection()" id="btn-apply-char-picker">
+            <i class="ri-check-line"></i> Apply to Page
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Notification Toast -->
   <div class="toast hidden" id="toast">
     <i class="ri-information-line" id="toast-icon"></i>
@@ -1078,6 +1148,6 @@
   </div>
 
   <!-- Main JavaScript File -->
-  <script src="app.js"></script>
+  <script src="app.js?v=20260917i"></script>
 </body>
 </html>
