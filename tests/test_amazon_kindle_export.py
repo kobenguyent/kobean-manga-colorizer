@@ -132,6 +132,73 @@ def test_pure_python_mobi_generator(tmp_path):
         assert f.read(3) == b"\xff\xd8\xff"
 
 
+def test_mobi_palmdoc_large_text_chunking(tmp_path):
+    """Verifies that MOBI generator slices text content exceeding 4096 bytes into compliant PalmDOC records."""
+    processor = MangaFileProcessor(str(tmp_path / "storage"))
+
+    # Create dummy JPEG image
+    img = Image.new("RGB", (100, 100), color="blue")
+    b = io.BytesIO()
+    img.save(b, format="JPEG")
+    img_bytes = b.getvalue()
+
+    # Create 80 pages with detailed volume headers and long descriptions to exceed 4096-byte PalmDOC limit
+    images_data = []
+    for i in range(1, 81):
+        images_data.append((
+            img_bytes,
+            f"Page {i:03d} - Detailed Chapter Section View With Explanatory Caption",
+            f"Volume {i // 10 + 1} Section Header" if i % 10 == 1 else None,
+        ))
+
+    out_mobi = str(tmp_path / "large_chunked.mobi")
+    processor.build_mobi_from_images(images_data, out_mobi, title="PalmDOC Chunking Test")
+    assert os.path.exists(out_mobi)
+
+    with open(out_mobi, "rb") as f:
+        header = f.read(78)
+        _, _, _, _, _, _, _, _, _, b_type, b_creator, _, _, n_records = struct.unpack(
+            ">32sHHIIIIII4s4sIIH", header
+        )
+        assert b_type == b"BOOK"
+        assert b_creator == b"MOBI"
+
+        rec_headers = [struct.unpack(">IB3s", f.read(8)) for _ in range(n_records)]
+        f.read(2)
+
+        # Record 0
+        rec0_offset = rec_headers[0][0]
+        rec1_offset = rec_headers[1][0]
+        f.seek(rec0_offset)
+        rec0_data = f.read(rec1_offset - rec0_offset)
+
+        # PalmDOC header: rcount must reflect chunked slices
+        comp, _, tlen, rcount, rsize, _ = struct.unpack(">HHIHHI", rec0_data[:16])
+        assert comp == 1
+        assert tlen > 4096
+        assert rcount > 1
+        assert rcount == (tlen + 4095) // 4096
+        assert rsize == 4096
+
+        # MOBI header
+        first_img = struct.unpack(">I", rec0_data[16 + 92 : 16 + 96])[0]
+        first_non_book = struct.unpack(">I", rec0_data[16 + 64 : 16 + 68])[0]
+        assert first_img == 1 + rcount
+        assert first_non_book == 1 + rcount
+
+        # Verify each text slice is <= 4096 bytes
+        for r_idx in range(1, 1 + rcount):
+            start_off = rec_headers[r_idx][0]
+            end_off = rec_headers[r_idx + 1][0]
+            slice_size = end_off - start_off
+            assert slice_size <= 4096
+
+        # Verify that record at first_img is the first JPEG image
+        first_img_off = rec_headers[first_img][0]
+        f.seek(first_img_off)
+        assert f.read(3) == b"\xff\xd8\xff"
+
+
 def test_kindle_epub_fixed_layout_metadata(tmp_path):
     """Verifies that EPUB archives built by MangaFileProcessor contain full Amazon Kindle comic fixed-layout metadata."""
     processor = MangaFileProcessor(str(tmp_path / "storage"))

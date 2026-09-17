@@ -621,7 +621,18 @@ class MangaFileProcessor:
         text_content = "\n".join(html_lines).encode("utf-8")
         text_len = len(text_content)
 
-        first_image_index = 2
+        # PalmDOC specification requires text content to be split into records of <= 4096 bytes.
+        # Kindle bookreader strictly rejects files where an uncompressed text record exceeds 4096 bytes.
+        CHUNK_SIZE = 4096
+        text_slices = [
+            text_content[i : i + CHUNK_SIZE]
+            for i in range(0, len(text_content), CHUNK_SIZE)
+        ]
+        if not text_slices:
+            text_slices = [b""]
+        num_text_records = len(text_slices)
+
+        first_image_index = 1 + num_text_records
         last_image_index = first_image_index + num_images - 1
         flis_index = last_image_index + 1
         fcis_index = flis_index + 1
@@ -661,7 +672,7 @@ class MangaFileProcessor:
             1,  # compression: 1 (none)
             0,  # unused
             text_len,  # text length
-            1,  # record count (1 text record)
+            num_text_records,  # record count
             4096,  # record size
             0,  # current position
         )
@@ -687,7 +698,7 @@ class MangaFileProcessor:
             ("extra_index_3", "I", 0xFFFFFFFF),
             ("extra_index_4", "I", 0xFFFFFFFF),
             ("extra_index_5", "I", 0xFFFFFFFF),
-            ("first_non_book_index", "I", 2),
+            ("first_non_book_index", "I", first_image_index),
             ("full_name_offset", "I", title_offset),
             ("full_name_length", "I", title_len),
             ("locale", "I", 1033),
@@ -724,7 +735,7 @@ class MangaFileProcessor:
         eof_record = b"\xe9\x8e\r\n"
 
         records = (
-            [record_0, text_content] + image_bytes_list + [flis_record, fcis_record, eof_record]
+            [record_0] + text_slices + image_bytes_list + [flis_record, fcis_record, eof_record]
         )
 
         header_size = 78 + (8 * total_records) + 2
@@ -1356,19 +1367,27 @@ class MangaFileProcessor:
             chunks = [sessions_data[i : i + c_size] for i in range(0, n, c_size)]
         elif chunk_by in ["size_mb", "size"] and chunk_size and chunk_size > 0:
             budget_kb = max(50, int(chunk_size)) * 1024
-            avg_page_kb = 85 if grayscale else 135
+            # Realistic colorized JPEG at 1600px quality 80 is ~320-380 KB; grayscale is ~120 KB
+            avg_page_kb = 120 if grayscale else 350
+            # Safety limit: Kindle e-readers struggle or crash with >600 pages per book file
+            max_pages_per_chunk = 600
             curr_chunk = []
             curr_kb = 0
+            curr_pages = 0
             for s in sessions_data:
                 p_cnt = len(s.get("pages", []))
                 s_kb = p_cnt * avg_page_kb
-                if curr_chunk and (curr_kb + s_kb > budget_kb):
+                if curr_chunk and (
+                    (curr_kb + s_kb > budget_kb) or (curr_pages + p_cnt > max_pages_per_chunk)
+                ):
                     chunks.append(curr_chunk)
                     curr_chunk = [s]
                     curr_kb = s_kb
+                    curr_pages = p_cnt
                 else:
                     curr_chunk.append(s)
                     curr_kb += s_kb
+                    curr_pages += p_cnt
             if curr_chunk:
                 chunks.append(curr_chunk)
         else:
