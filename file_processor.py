@@ -920,6 +920,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
     ) -> str:
         """
         Merges all queued volumes into one continuous EPUB3 file optimised for e-readers.
@@ -979,10 +980,15 @@ class MangaFileProcessor:
                             raise InterruptedError("Combined EPUB export cancelled")
 
                         color_filename = page_info["filename"]
-                        color_path = colorized_dir / color_filename
-                        if not color_path.exists():
-                            color_path = Path(page_info["original_path"])
-                        if not color_path.exists():
+                        if export_original:
+                            img_path = Path(page_info["original_path"])
+                            if not img_path.exists():
+                                img_path = colorized_dir / color_filename
+                        else:
+                            img_path = colorized_dir / color_filename
+                            if not img_path.exists():
+                                img_path = Path(page_info["original_path"])
+                        if not img_path.exists():
                             continue
 
                         gidx = global_page_idx
@@ -991,7 +997,7 @@ class MangaFileProcessor:
                         # Image - e-reader optimized
                         img_arc_name = f"images/vol_{vol_idx + 1:02d}_page_{gidx + 1:04d}.jpg"
                         img_bytes, w, h = self.optimize_image_data(
-                            color_path,
+                            img_path,
                             max_dimension=max_dimension,
                             quality=jpeg_quality,
                             grayscale=grayscale,
@@ -1140,6 +1146,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
     ) -> str:
         """
         Concatenates all volumes into a single PDF with PDF bookmarks (outlines)
@@ -1168,14 +1175,19 @@ class MangaFileProcessor:
                         raise InterruptedError("Combined PDF export cancelled")
 
                     color_filename = page_info["filename"]
-                    color_path = colorized_dir / color_filename
-                    if not color_path.exists():
-                        color_path = Path(page_info["original_path"])
-                    if not color_path.exists():
+                    if export_original:
+                        img_path = Path(page_info["original_path"])
+                        if not img_path.exists():
+                            img_path = colorized_dir / color_filename
+                    else:
+                        img_path = colorized_dir / color_filename
+                        if not img_path.exists():
+                            img_path = Path(page_info["original_path"])
+                    if not img_path.exists():
                         continue
 
                     img_bytes, width, height = self.optimize_image_data(
-                        color_path,
+                        img_path,
                         max_dimension=max_dimension,
                         quality=jpeg_quality,
                         grayscale=grayscale,
@@ -1233,6 +1245,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
     ) -> str:
         """
         Merges all queued volumes into a single Amazon Kindle MOBI file.
@@ -1261,6 +1274,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
                 if cancel_check and cancel_check():
                     raise InterruptedError("Combined MOBI export cancelled")
@@ -1290,17 +1304,22 @@ class MangaFileProcessor:
                     raise InterruptedError("Combined MOBI export cancelled")
 
                 color_filename = page_info["filename"]
-                color_path = colorized_dir / color_filename
-                if not color_path.exists():
-                    color_path = Path(page_info["original_path"])
-                if not color_path.exists():
+                if export_original:
+                    img_path = Path(page_info["original_path"])
+                    if not img_path.exists():
+                        img_path = colorized_dir / color_filename
+                else:
+                    img_path = colorized_dir / color_filename
+                    if not img_path.exists():
+                        img_path = Path(page_info["original_path"])
+                if not img_path.exists():
                     continue
 
                 gidx = global_page_idx
                 global_page_idx += 1
 
                 img_bytes, w, h = self.optimize_image_data(
-                    color_path,
+                    img_path,
                     max_dimension=max_dimension,
                     quality=jpeg_quality,
                     grayscale=grayscale,
@@ -1342,6 +1361,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
         progress_callback: Optional[Any] = None,
         cancel_check: Optional[Any] = None,
     ) -> str:
@@ -1352,7 +1372,9 @@ class MangaFileProcessor:
         containing the individual omnibus files (e.g. Part_01_Vol_01-03.mobi).
         """
 
-        clean_title = (title or "Colorized Manga Collection").strip()
+        clean_title = (title or ("Manga Collection" if export_original else "Colorized Manga Collection")).strip()
+        if clean_title == "Colorized Manga Collection" and export_original:
+            clean_title = "Manga Collection"
         safe_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", clean_title).strip().replace(" ", "_")
         if not safe_title:
             safe_title = "manga_collection"
@@ -1406,6 +1428,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
             elif export_format == "pdf":
                 return self.build_combined_pdf(
@@ -1418,6 +1441,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
             else:
                 return self.build_combined_epub(
@@ -1430,6 +1454,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
 
         # Multiple chunks: build each omnibus volume and bundle into ZIP
@@ -1487,6 +1512,7 @@ class MangaFileProcessor:
                         jpeg_quality=jpeg_quality,
                         grayscale=grayscale,
                         colorsoft_tune=colorsoft_tune,
+                        export_original=export_original,
                     )
                 elif export_format == "pdf":
                     self.build_combined_pdf(
@@ -1499,6 +1525,7 @@ class MangaFileProcessor:
                         jpeg_quality=jpeg_quality,
                         grayscale=grayscale,
                         colorsoft_tune=colorsoft_tune,
+                        export_original=export_original,
                     )
                 else:
                     self.build_combined_epub(
@@ -1511,6 +1538,7 @@ class MangaFileProcessor:
                         jpeg_quality=jpeg_quality,
                         grayscale=grayscale,
                         colorsoft_tune=colorsoft_tune,
+                        export_original=export_original,
                     )
 
                 created_files.append((part_file_path, part_filename))

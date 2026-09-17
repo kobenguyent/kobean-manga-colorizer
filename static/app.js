@@ -573,6 +573,27 @@ function setupEventListeners() {
     });
   }
 
+  // Combined Export Original Versions toggle
+  const combinedOriginal = document.getElementById("combined-original-check");
+  const combinedTitleInput = document.getElementById("combined-title-input");
+  if (combinedOriginal && combinedTitleInput) {
+    combinedOriginal.addEventListener("change", () => {
+      if (combinedOriginal.checked) {
+        if (combinedTitleInput.value === "Colorized Manga Collection") {
+          combinedTitleInput.value = "Manga Collection";
+        }
+        if (combinedPreset && combinedPreset.value === "colorsoft") {
+          combinedPreset.value = "original";
+          combinedPreset.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      } else {
+        if (combinedTitleInput.value === "Manga Collection") {
+          combinedTitleInput.value = "Colorized Manga Collection";
+        }
+      }
+    });
+  }
+
   // Setup Split Slider Dragging
   setupSplitSlider();
 }
@@ -2891,8 +2912,11 @@ async function exportCombined(format = "epub") {
   }
 
   const sessionIds = sessionList.map(s => s.session_id).filter(Boolean);
-  const title = document.getElementById("combined-title-input")?.value?.trim()
-    || "Colorized Manga Collection";
+  const isOriginal = Boolean(document.getElementById("combined-original-check")?.checked);
+  let title = document.getElementById("combined-title-input")?.value?.trim();
+  if (!title) {
+    title = isOriginal ? "Manga Collection" : "Colorized Manga Collection";
+  }
 
   const chunkVal = document.getElementById("combined-chunk-select")?.value || "none";
   let chunkBy = "none";
@@ -2915,7 +2939,7 @@ async function exportCombined(format = "epub") {
   if (presetVal === "colorsoft") {
     maxDim = 1600;
     jpegQual = 80;
-    colorsoftTune = true;
+    colorsoftTune = !isOriginal;
   } else if (presetVal === "kindle") {
     maxDim = 1600;
     jpegQual = 80;
@@ -2930,6 +2954,7 @@ async function exportCombined(format = "epub") {
   const isGrayscale = Boolean(document.getElementById("combined-grayscale-check")?.checked);
 
   const fmtLabel = format === "pdf" ? "Single PDF" : (format === "mobi" ? "Kindle MOBI" : "Single EPUB");
+  const origTag = isOriginal ? " (Original)" : "";
 
   const epubBtn = document.getElementById("btn-combined-epub");
   const mobiBtn = document.getElementById("btn-combined-mobi");
@@ -2947,7 +2972,7 @@ async function exportCombined(format = "epub") {
   const btnCancel = document.getElementById("btn-cancel-combined-export");
 
   if (progressBox) progressBox.classList.remove("hidden");
-  if (progressTitle) progressTitle.innerText = `Exporting ${fmtLabel}...`;
+  if (progressTitle) progressTitle.innerText = `Exporting ${fmtLabel}${origTag}...`;
   if (progressPct) progressPct.innerText = "0%";
   if (progressBarFill) progressBarFill.style.width = "0%";
   if (progressSubtext) progressSubtext.innerText = "Starting packager...";
@@ -2966,12 +2991,12 @@ async function exportCombined(format = "epub") {
     progCard.classList.remove("hidden");
     progCard.dataset.combinedExport = "true";
   }
-  if (progStatus) progStatus.innerText = `Assembling ${fmtLabel}...`;
+  if (progStatus) progStatus.innerText = `Assembling ${fmtLabel}${origTag}...`;
   if (progSub) progSub.innerText = `Preparing ${sessionIds.length || 'all'} volumes: "${title}"`;
   if (progCounter) progCounter.innerText = "0%";
   if (progFill) progFill.style.width = "0%";
 
-  showToast(`Preparing ${fmtLabel} (${sessionIds.length || 'all'} volumes)...`, "info");
+  showToast(`Preparing ${fmtLabel}${origTag} (${sessionIds.length || 'all'} volumes)...`, "info");
 
   try {
     const resp = await fetch("/api/export/combined", {
@@ -2986,7 +3011,8 @@ async function exportCombined(format = "epub") {
         max_dimension: maxDim,
         jpeg_quality: jpegQual,
         grayscale: isGrayscale,
-        colorsoft_tune: colorsoftTune
+        colorsoft_tune: colorsoftTune,
+        export_original: isOriginal
       })
     });
 

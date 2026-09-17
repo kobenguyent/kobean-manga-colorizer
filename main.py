@@ -251,6 +251,9 @@ class CombinedExportRequest(BaseModel):
     colorsoft_tune: Optional[bool] = (
         False  # true for Kindle Colorsoft / Color E-Ink vibrancy & contrast boost
     )
+    export_original: Optional[bool] = (
+        False  # true to export original manga pages directly without colorization
+    )
 
 
 class TestCleanupRequest(BaseModel):
@@ -1453,6 +1456,7 @@ async def _async_combined_export_worker(
     jpeg_quality: int = 80,
     grayscale: bool = False,
     colorsoft_tune: bool = False,
+    export_original: bool = False,
 ):
     job = COMBINED_EXPORTS.get(job_id)
     if not job:
@@ -1480,6 +1484,7 @@ async def _async_combined_export_worker(
             jpeg_quality=jpeg_quality,
             grayscale=grayscale,
             colorsoft_tune=colorsoft_tune,
+            export_original=export_original,
             progress_callback=on_progress,
             cancel_check=check_cancelled,
         )
@@ -1592,11 +1597,19 @@ async def export_combined_volume(req: CombinedExportRequest):
         pass
 
     fmt = (req.format or "epub").lower().strip()
-    title = (req.title or "Colorized Manga Collection").strip() or "Colorized Manga Collection"
+    export_original = bool(req.export_original)
+    default_title = "Manga Collection" if export_original else "Colorized Manga Collection"
+    title = (req.title or default_title).strip() or default_title
+    if title == "Colorized Manga Collection" and export_original:
+        title = "Manga Collection"
+
     # Sanitize title for filename
     clean_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", title).strip().replace(" ", "_")
     if not clean_title:
         clean_title = "manga_collection"
+    if export_original and not clean_title.lower().startswith("original"):
+        clean_title = f"Original_{clean_title}"
+
     token = str(uuid.uuid4())[:8]
     n = len(sessions_data)
     total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
@@ -1647,6 +1660,7 @@ async def export_combined_volume(req: CombinedExportRequest):
                 jpeg_quality=jpeg_qual,
                 grayscale=is_gray,
                 colorsoft_tune=colorsoft_tune,
+                export_original=export_original,
             )
             return JSONResponse(
                 {
@@ -1697,6 +1711,7 @@ async def export_combined_volume(req: CombinedExportRequest):
             jpeg_quality=jpeg_qual,
             grayscale=is_gray,
             colorsoft_tune=colorsoft_tune,
+            export_original=export_original,
         )
     )
 
