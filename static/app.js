@@ -14,6 +14,13 @@ let currentHistoryFilter = "all";
 let currentHistorySearch = "";
 let selectedHistorySessions = new Set();
 let selectedQueueSessions = new Set();
+let isImportCancelled = false;
+let currentImportId = null;
+let queueSearchQuery = "";
+let queueRenderLimit = 50;
+let currentHistoryPage = 1;
+const historyPageSize = 50;
+let folderImportPoller = null;
 
 
 // Sub-model options per provider
@@ -631,7 +638,7 @@ function toggleApiKeyVisibility() {
 }
 
 async function handleFileSelection(fileOrFiles) {
-  const allowed = ["pdf", "epub", "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "zip"];
+  const allowed = ["pdf", "epub", "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "zip", "cbz"];
   const fileList = Array.from(fileOrFiles instanceof FileList ? fileOrFiles : (Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles]));
 
   const validFiles = fileList.filter(f => {
@@ -640,7 +647,13 @@ async function handleFileSelection(fileOrFiles) {
   });
 
   if (validFiles.length === 0) {
-    showToast("Supported formats: .pdf, .epub, images (.png, .jpg, .webp) & .zip", "error");
+    showToast("Supported formats: .pdf, .epub, .cbz, images (.png, .jpg, .webp) & .zip", "error");
+    return;
+  }
+
+  // If selecting more than 5 files (or large batch up to +1076 files), use chunked batch uploader
+  if (validFiles.length > 5) {
+    await handleBulkChunkedUpload(validFiles);
     return;
   }
 
@@ -729,6 +742,367 @@ async function handleFileSelection(fileOrFiles) {
   }
 }
 
+// Optimized chunked uploader for importing large numbers of files (+1076 files)
+async function handleBulkChunkedUpload(files) {
+  isImportCancelled = false;
+  const totalFiles = files.length;
+  const chunkSize = 8; // Upload 8 files per chunk to avoid browser payload timeouts
+  const totalChunks = Math.ceil(totalFiles / chunkSize);
+  const startTime = Date.now();
+
+  openImportProgressModal(totalFiles);
+
+  let successCount = 0;
+  let failCount = 0;
+  let firstUploadedSessionId = null;
+
+  for (let i = 0; i < totalChunks; i++) {
+    if (isImportCancelled) {
+      showToast("Batch import cancelled by user.", "info");
+      break;
+    }
+
+    const chunk = files.slice(i * chunkSize, (i + 1) * chunkSize);
+    const chunkNames = chunk.map(f => f.name).join(", ");
+    updateImportProgressModal(
+      successCount + failCount,
+      totalFiles,
+      chunkNames,
+      i + 1,
+      totalChunks,
+      successCount,
+      failCount,
+      startTime
+    );
+
+    const formData = new FormData();
+    if (currentBatchId) {
+      formData.append("batch_id", currentBatchId);
+    }
+    chunk.forEach(f => formData.append("files", f));
+
+    try {
+      const resp = await fetch("/api/upload", {
+        method: "POST",
+        body: formData
+      });
+      const data = await resp.json();
+      if (resp.ok && data.status === "success") {
+        successCount += chunk.length;
+        if (!firstUploadedSessionId && data.session_id) {
+          firstUploadedSessionId = data.session_id;
+        }
+        if (data.batch_id) {
+          currentBatchId = data.batch_id;
+          sessionStorage.setItem("active_batch_id", currentBatchId);
+        }
+      } else {
+        failCount += chunk.length;
+        console.error("Chunk upload error:", data.detail);
+      }
+    } catch (err) {
+      failCount += chunk.length;
+      console.error("Chunk upload fetch error:", err);
+    }
+
+    updateImportProgressModal(
+      successCount + failCount,
+      totalFiles,
+      chunkNames,
+      i + 1,
+      totalChunks,
+      successCount,
+      failCount,
+      startTime
+    );
+  }
+
+  // Refresh sessions after upload finishes
+  try {
+    const sessRes = await fetch("/api/sessions");
+    if (sessRes.ok) {
+      const sessData = await sessRes.json();
+      if (sessData && sessData.sessions) {
+        activeSessions = sessData.sessions;
+      }
+    }
+
+    if (firstUploadedSessionId && (!currentSession || !activeSessions.some(s => s.session_id === currentSession.session_id))) {
+      const fullSessRes = await fetch(`/api/session/${firstUploadedSessionId}`);
+      if (fullSessRes.ok) {
+        currentSession = await fullSessRes.json();
+        sessionStorage.setItem("active_session_id", currentSession.session_id);
+      }
+    }
+  } catch (err) {
+    console.error("Error refreshing sessions after bulk upload:", err);
+  }
+
+  renderDashboard();
+  renderDocumentQueue();
+
+  setTimeout(() => {
+    closeImportProgressModal();
+    if (successCount > 0) {
+      showToast(`Successfully imported ${successCount} document(s)!${failCount > 0 ? ` (${failCount} failed)` : ""}`, "success");
+    } else {
+      showToast("Bulk import completed with errors.", "error");
+    }
+  }, 1000);
+
+  const addMore = document.getElementById("add-more-input");
+  if (addMore) addMore.value = "";
+  const fileInput = document.getElementById("file-input");
+  if (fileInput) fileInput.value = "";
+}
+
+// Bulk Import Progress Modal Controls
+function openImportProgressModal(totalCount) {
+  const overlay = document.getElementById("import-progress-modal-overlay");
+  const fill = document.getElementById("bulk-import-progress-fill");
+  const statusText = document.getElementById("bulk-import-status-text");
+  const etaText = document.getElementById("bulk-import-eta");
+  const curFile = document.getElementById("bulk-import-current-file");
+  const chunkText = document.getElementById("bulk-import-chunk");
+  const successText = document.getElementById("bulk-import-success-count");
+  const failText = document.getElementById("bulk-import-fail-count");
+  const cancelBtn = document.getElementById("btn-cancel-bulk-import");
+
+  if (fill) fill.style.width = "0%";
+  if (statusText) statusText.innerText = `Importing 0 of ${totalCount} files (0%)`;
+  if (etaText) etaText.innerText = "Calculating ETA...";
+  if (curFile) curFile.innerText = "Starting batch upload...";
+  if (chunkText) chunkText.innerText = "1 / 1";
+  if (successText) successText.innerText = "0";
+  if (failText) failText.innerText = "0";
+  if (cancelBtn) {
+    cancelBtn.disabled = false;
+    cancelBtn.innerHTML = '<i class="ri-close-circle-line"></i> Cancel Import';
+  }
+
+  if (overlay) overlay.classList.remove("hidden");
+}
+
+function updateImportProgressModal(processed, total, currentFile, chunkNum, totalChunks, successCount, failCount, startTime) {
+  const fill = document.getElementById("bulk-import-progress-fill");
+  const statusText = document.getElementById("bulk-import-status-text");
+  const etaText = document.getElementById("bulk-import-eta");
+  const curFile = document.getElementById("bulk-import-current-file");
+  const chunkText = document.getElementById("bulk-import-chunk");
+  const successText = document.getElementById("bulk-import-success-count");
+  const failText = document.getElementById("bulk-import-fail-count");
+
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  if (fill) fill.style.width = `${pct}%`;
+  if (statusText) statusText.innerText = `Importing ${processed} of ${total} files (${pct}%)`;
+
+  if (startTime && processed > 0 && processed < total) {
+    const elapsedSec = (Date.now() - startTime) / 1000;
+    const secPerItem = elapsedSec / processed;
+    const remSec = Math.round(secPerItem * (total - processed));
+    if (etaText) {
+      if (remSec > 60) {
+        etaText.innerText = `~${Math.ceil(remSec / 60)} min remaining`;
+      } else {
+        etaText.innerText = `~${remSec}s remaining`;
+      }
+    }
+  } else if (processed >= total && etaText) {
+    etaText.innerText = "Complete!";
+  }
+
+  if (curFile && currentFile) curFile.innerText = currentFile;
+  if (chunkText) chunkText.innerText = `${chunkNum} / ${totalChunks}`;
+  if (successText) successText.innerText = successCount;
+  if (failText) failText.innerText = failCount;
+}
+
+function closeImportProgressModal() {
+  const overlay = document.getElementById("import-progress-modal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+}
+
+function cancelBatchImport() {
+  isImportCancelled = true;
+  const cancelBtn = document.getElementById("btn-cancel-bulk-import");
+  if (cancelBtn) {
+    cancelBtn.disabled = true;
+    cancelBtn.innerHTML = '<i class="ri-loader-4-line spin"></i> Cancelling...';
+  }
+  showToast("Cancelling import...", "info");
+}
+
+// Local Folder Import Modal Controls
+function openFolderImportModal() {
+  const overlay = document.getElementById("folder-import-modal-overlay");
+  const progressArea = document.getElementById("folder-import-progress-area");
+  const runBtn = document.getElementById("btn-run-folder-import");
+  if (progressArea) progressArea.classList.add("hidden");
+  if (runBtn) {
+    runBtn.disabled = false;
+    runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+  }
+  if (overlay) overlay.classList.remove("hidden");
+  const pathInput = document.getElementById("folder-import-path");
+  if (pathInput) pathInput.focus();
+}
+
+function closeFolderImportModal() {
+  const overlay = document.getElementById("folder-import-modal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+  if (folderImportPoller) {
+    clearInterval(folderImportPoller);
+    folderImportPoller = null;
+  }
+}
+
+function handleFolderImportOverlayClick(event) {
+  if (event.target.id === "folder-import-modal-overlay") {
+    closeFolderImportModal();
+  }
+}
+
+async function startFolderImport() {
+  const pathInput = document.getElementById("folder-import-path");
+  const recursiveCb = document.getElementById("folder-import-recursive");
+  const maxInput = document.getElementById("folder-import-max");
+  const progressArea = document.getElementById("folder-import-progress-area");
+  const runBtn = document.getElementById("btn-run-folder-import");
+
+  const dirPath = pathInput ? pathInput.value.trim() : "";
+  if (!dirPath) {
+    showToast("Please enter a valid directory path.", "error");
+    if (pathInput) pathInput.focus();
+    return;
+  }
+
+  const recursive = recursiveCb ? recursiveCb.checked : true;
+  const maxFiles = maxInput ? parseInt(maxInput.value, 10) || 5000 : 5000;
+
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.innerHTML = '<i class="ri-loader-4-line spin"></i> Scanning...';
+  }
+  if (progressArea) progressArea.classList.remove("hidden");
+
+  try {
+    const resp = await fetch("/api/import/directory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        directory_path: dirPath,
+        recursive: recursive,
+        max_files: maxFiles
+      })
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      showToast(data.detail || "Folder import failed to start.", "error");
+      if (runBtn) {
+        runBtn.disabled = false;
+        runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+      }
+      return;
+    }
+
+    currentImportId = data.import_id;
+    showToast(`Scanning directory: found ${data.total_scanned_files} ebook file(s)...`, "info");
+    pollFolderImport(currentImportId);
+  } catch (err) {
+    showToast(`Failed to start folder import: ${err.message}`, "error");
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+    }
+  }
+}
+
+function pollFolderImport(importId) {
+  if (folderImportPoller) clearInterval(folderImportPoller);
+
+  const fill = document.getElementById("folder-progress-fill");
+  const progressText = document.getElementById("folder-progress-text");
+  const progressPct = document.getElementById("folder-progress-pct");
+  const progressFile = document.getElementById("folder-progress-file");
+  const runBtn = document.getElementById("btn-run-folder-import");
+
+  folderImportPoller = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/import/status/${importId}`);
+      if (!resp.ok) return;
+
+      const data = await resp.json();
+      const pct = data.progress_percent || 0;
+      if (fill) fill.style.width = `${pct}%`;
+      if (progressPct) progressPct.innerText = `${pct}%`;
+      if (progressText) {
+        progressText.innerText = `Imported ${data.processed_files} of ${data.total_scanned_files} files`;
+      }
+      if (progressFile) {
+        progressFile.innerText = data.current_file ? `Current: ${data.current_file}` : "";
+      }
+
+      if (data.status === "completed") {
+        clearInterval(folderImportPoller);
+        folderImportPoller = null;
+        showToast(`Imported ${data.processed_files} documents successfully!`, "success");
+
+        // Refresh sessions
+        const sessRes = await fetch("/api/sessions");
+        if (sessRes.ok) {
+          const sessData = await sessRes.json();
+          if (sessData && sessData.sessions) {
+            activeSessions = sessData.sessions;
+          }
+        }
+        if (data.created_session_ids && data.created_session_ids.length > 0 && !currentSession) {
+          const firstSess = await fetch(`/api/session/${data.created_session_ids[0]}`);
+          if (firstSess.ok) {
+            currentSession = await firstSess.json();
+            sessionStorage.setItem("active_session_id", currentSession.session_id);
+          }
+        }
+
+        renderDashboard();
+        renderDocumentQueue();
+
+        setTimeout(() => {
+          closeFolderImportModal();
+        }, 1200);
+      } else if (data.status === "cancelled" || data.status === "error") {
+        clearInterval(folderImportPoller);
+        folderImportPoller = null;
+        showToast(data.error_message || "Folder import stopped.", data.status === "error" ? "error" : "info");
+        if (runBtn) {
+          runBtn.disabled = false;
+          runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+        }
+      }
+    } catch (err) {
+      console.error("Error polling folder import:", err);
+    }
+  }, 600);
+}
+
+// Queue search and filter helpers
+function filterDocumentQueue(query) {
+  queueSearchQuery = (query || "").trim();
+  queueRenderLimit = 50; // Reset render window on filter change
+  const clearBtn = document.getElementById("doc-queue-clear-btn");
+  if (clearBtn) {
+    if (queueSearchQuery) clearBtn.classList.remove("hidden");
+    else clearBtn.classList.add("hidden");
+  }
+  renderDocumentQueue();
+}
+
+function clearQueueFilter() {
+  const input = document.getElementById("doc-queue-filter-input");
+  if (input) input.value = "";
+  filterDocumentQueue("");
+}
+
 function renderDocumentQueue() {
   const queueList = document.getElementById("doc-queue-list");
   const queueBadge = document.getElementById("doc-queue-badge");
@@ -737,15 +1111,36 @@ function renderDocumentQueue() {
   const sidebarBatchExport = document.getElementById("sidebar-batch-export");
   const bannerBatchBtn = document.getElementById("btn-export-batch-banner");
   const bannerBatchCount = document.getElementById("banner-batch-count");
+  const queueFilterWrap = document.getElementById("doc-queue-filter-wrap");
 
   if (!queueList) return;
 
   const count = activeSessions.length;
-  if (queueBadge) {
-    queueBadge.innerText = `${count} Document${count > 1 ? "s" : ""}`;
+  const hasMultiple = count > 1;
+
+  if (queueFilterWrap) {
+    if (count > 5) {
+      queueFilterWrap.classList.remove("hidden");
+    } else {
+      queueFilterWrap.classList.add("hidden");
+    }
   }
 
-  const hasMultiple = count > 1;
+  // Filter sessions according to search query
+  let filteredSessions = activeSessions;
+  if (queueSearchQuery) {
+    const q = queueSearchQuery.toLowerCase();
+    filteredSessions = activeSessions.filter(s => (s.filename || "").toLowerCase().includes(q));
+  }
+
+  if (queueBadge) {
+    if (queueSearchQuery) {
+      queueBadge.innerText = `${filteredSessions.length}/${count} Docs`;
+    } else {
+      queueBadge.innerText = `${count} Document${count > 1 ? "s" : ""}`;
+    }
+  }
+
   if (hasMultiple) {
     queueList.classList.remove("hidden");
     if (batchColorizeBtn) {
@@ -766,7 +1161,11 @@ function renderDocumentQueue() {
   }
 
   queueList.innerHTML = "";
-  activeSessions.forEach((sess) => {
+
+  // Windowed rendering: render up to queueRenderLimit items to prevent DOM lag on 1000+ files
+  const itemsToRender = filteredSessions.slice(0, queueRenderLimit);
+
+  itemsToRender.forEach((sess) => {
     const item = document.createElement("div");
     const isActive = currentSession && currentSession.session_id === sess.session_id;
     const isQueueSelected = selectedQueueSessions.has(sess.session_id);
@@ -779,7 +1178,7 @@ function renderDocumentQueue() {
       iconHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
     } else if (fn.endsWith(".pdf")) {
       iconHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
-    } else if (fn.endsWith(".zip")) {
+    } else if (fn.endsWith(".zip") || fn.endsWith(".cbz")) {
       iconHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
     }
 
@@ -811,8 +1210,22 @@ function renderDocumentQueue() {
     `;
     queueList.appendChild(item);
   });
+
+  // Append a "Show more" button if there are more items than queueRenderLimit
+  if (filteredSessions.length > queueRenderLimit) {
+    const moreBar = document.createElement("div");
+    moreBar.className = "doc-queue-more-bar";
+    moreBar.innerHTML = `<i class="ri-arrow-down-s-line"></i> Showing ${itemsToRender.length} of ${filteredSessions.length} — click to show more (+50)`;
+    moreBar.onclick = () => {
+      queueRenderLimit += 50;
+      renderDocumentQueue();
+    };
+    queueList.appendChild(moreBar);
+  }
+
   updateQueueSelectionUI();
 }
+
 
 function toggleQueueSelection(sessionId, isChecked) {
   if (isChecked) {
@@ -2606,6 +3019,7 @@ function updateHistoryStatsBar() {
 
 function setHistoryFilter(filter, tabBtn) {
   currentHistoryFilter = filter;
+  currentHistoryPage = 1;
   const tabs = document.querySelectorAll(".history-tab-btn");
   tabs.forEach(t => t.classList.remove("active"));
   if (tabBtn) tabBtn.classList.add("active");
@@ -2616,6 +3030,7 @@ function filterHistoryList() {
   const input = document.getElementById("history-search-input");
   const clearBtn = document.getElementById("btn-history-clear-search");
   currentHistorySearch = input ? input.value.trim().toLowerCase() : "";
+  currentHistoryPage = 1;
 
   if (clearBtn) {
     if (currentHistorySearch) {
@@ -2631,6 +3046,7 @@ function filterHistoryList() {
 function clearHistorySearch() {
   const input = document.getElementById("history-search-input");
   if (input) input.value = "";
+  currentHistoryPage = 1;
   filterHistoryList();
 }
 
@@ -2761,18 +3177,29 @@ async function bulkDeleteHistory() {
   await executeBulkDeletion(sessionIdsToDelete);
 }
 
+function changeHistoryPage(delta) {
+  currentHistoryPage += delta;
+  renderHistoryList();
+}
+
 function renderHistoryList() {
   const container = document.getElementById("history-list-container");
   const summaryEl = document.getElementById("history-footer-summary");
+  const paginationWrap = document.getElementById("history-pagination-wrap");
+  const pageIndicator = document.getElementById("history-page-indicator");
+  const prevBtn = document.getElementById("btn-hist-prev");
+  const nextBtn = document.getElementById("btn-hist-next");
+
   if (!container) return;
 
   const filtered = getFilteredHistoryItems();
 
-  if (summaryEl) {
-    summaryEl.innerText = `Showing ${filtered.length} of ${historyData.length} documents`;
-  }
-
   if (filtered.length === 0) {
+    if (paginationWrap) paginationWrap.classList.add("hidden");
+    if (summaryEl) {
+      summaryEl.innerText = `Showing 0 of ${historyData.length} documents`;
+    }
+
     let emptyMsg = "No documents uploaded or processed yet.";
     let emptyDesc = "Drag & drop manga files onto the upload area to start colorizing!";
     if (currentHistorySearch || currentHistoryFilter !== "all") {
@@ -2796,9 +3223,32 @@ function renderHistoryList() {
     return;
   }
 
+  // Calculate pagination
+  const totalPages = Math.ceil(filtered.length / historyPageSize) || 1;
+  if (currentHistoryPage > totalPages) currentHistoryPage = totalPages;
+  if (currentHistoryPage < 1) currentHistoryPage = 1;
+
+  if (paginationWrap) {
+    if (filtered.length > historyPageSize) {
+      paginationWrap.classList.remove("hidden");
+      if (pageIndicator) pageIndicator.innerText = `Page ${currentHistoryPage} of ${totalPages}`;
+      if (prevBtn) prevBtn.disabled = currentHistoryPage <= 1;
+      if (nextBtn) nextBtn.disabled = currentHistoryPage >= totalPages;
+    } else {
+      paginationWrap.classList.add("hidden");
+    }
+  }
+
+  const startIdx = (currentHistoryPage - 1) * historyPageSize;
+  const pageItems = filtered.slice(startIdx, startIdx + historyPageSize);
+
+  if (summaryEl) {
+    summaryEl.innerText = `Showing ${pageItems.length} of ${filtered.length} documents${filtered.length !== historyData.length ? ` (filtered from ${historyData.length})` : ""}`;
+  }
+
   container.innerHTML = "";
 
-  filtered.forEach(item => {
+  pageItems.forEach(item => {
     const isCurrent = currentSession && currentSession.session_id === item.session_id;
     const isSelected = selectedHistorySessions.has(item.session_id);
     const totalPages = item.total_pages || 0;
@@ -2811,7 +3261,7 @@ function renderHistoryList() {
       iconHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
     } else if (fn.endsWith(".pdf")) {
       iconHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
-    } else if (fn.endsWith(".zip")) {
+    } else if (fn.endsWith(".zip") || fn.endsWith(".cbz")) {
       iconHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
     }
 
@@ -2936,6 +3386,18 @@ window.bulkDeleteHistory = bulkDeleteHistory;
 window.toggleQueueSelection = toggleQueueSelection;
 window.deleteSelectedQueueDocuments = deleteSelectedQueueDocuments;
 window.executeBulkDeletion = executeBulkDeletion;
+window.changeHistoryPage = changeHistoryPage;
+window.handleBulkChunkedUpload = handleBulkChunkedUpload;
+window.openImportProgressModal = openImportProgressModal;
+window.closeImportProgressModal = closeImportProgressModal;
+window.cancelBatchImport = cancelBatchImport;
+window.openFolderImportModal = openFolderImportModal;
+window.closeFolderImportModal = closeFolderImportModal;
+window.handleFolderImportOverlayClick = handleFolderImportOverlayClick;
+window.startFolderImport = startFolderImport;
+window.filterDocumentQueue = filterDocumentQueue;
+window.clearQueueFilter = clearQueueFilter;
+
 
 
 

@@ -45,7 +45,7 @@ class MangaFileProcessor:
             return self._extract_epub_images(file_path, orig_dir)
         elif ext in IMAGE_EXTENSIONS:
             return self._extract_single_image(file_path, orig_dir)
-        elif ext == ".zip":
+        elif ext in (".zip", ".cbz"):
             return self._extract_epub_images(file_path, orig_dir)  # reuse zip extraction
         else:
             raise ValueError(f"Unsupported file format: {ext}")

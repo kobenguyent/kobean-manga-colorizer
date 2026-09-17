@@ -36,6 +36,15 @@ STATIC_DIR = BASE_DIR / "static"
 for d in [UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR, STATIC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# Increase open file descriptors limit for handling +1076 ebook files simultaneously
+try:
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(hard, 65536) if hard > 0 else 65536
+    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+except Exception as e:
+    print(f"[Resource Note] RLIMIT_NOFILE could not be raised: {e}")
+
 # Instantiate core engines
 file_processor = MangaFileProcessor(storage_dir=str(STORAGE_DIR))
 colorizer_engine = MangaColorizerEngine()
@@ -45,6 +54,10 @@ colorizer_engine = MangaColorizerEngine()
 SESSIONS: Dict[str, dict] = {}
 # session_id -> asyncio.Queue for SSE events
 EVENT_QUEUES: Dict[str, List[asyncio.Queue]] = {}
+
+# Background Directory Import Tasks tracker
+# import_id -> { "import_id": str, "status": "running"|"completed"|"cancelled"|"failed", ... }
+IMPORT_TASKS: Dict[str, Any] = {}
 
 # Global Active Batch Tracking
 CURRENT_BATCH: Dict[str, Any] = {
@@ -187,6 +200,14 @@ class BulkDeleteSessionsRequest(BaseModel):
     session_ids: Optional[List[str]] = None
     delete_all: Optional[bool] = False
 
+class DirectoryImportRequest(BaseModel):
+    directory_path: str
+    recursive: Optional[bool] = False
+    batch_id: Optional[str] = None
+    max_files: Optional[int] = 5000
+    run_async: Optional[bool] = True
+
+
 class PreviewRequest(BaseModel):
     session_id: str
     page_index: int = 0
@@ -243,7 +264,7 @@ async def upload_files(
     if not upload_list:
         raise HTTPException(status_code=400, detail="No files uploaded.")
 
-    ALLOWED_EXTENSIONS = [".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip"]
+    ALLOWED_EXTENSIONS = [".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"]
     effective_batch_id = batch_id or str(uuid.uuid4())
     created_sessions = []
 
@@ -256,15 +277,21 @@ async def upload_files(
         upload_path = UPLOAD_DIR / f"{session_id}_{uploaded_file.filename}"
 
         with open(upload_path, "wb") as buffer:
-            content = await uploaded_file.read()
-            buffer.write(content)
+            while chunk := await uploaded_file.read(1024 * 1024):
+                buffer.write(chunk)
 
         try:
             pages_meta = file_processor.process_input_file(str(upload_path), session_id)
         except Exception as e:
             if upload_path.exists():
-                upload_path.unlink()
+                upload_path.unlink(missing_ok=True)
             print(f"[Upload Parse Error] {uploaded_file.filename}: {e}")
+            continue
+
+        if not pages_meta:
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+            print(f"[Upload Warning] No readable pages found in {uploaded_file.filename}")
             continue
 
         for page in pages_meta:
@@ -315,6 +342,182 @@ async def upload_files(
         "filename": primary["filename"],
         "total_pages": primary["total_pages"],
         "pages": primary["pages"]
+    })
+
+
+@app.post("/api/import/directory")
+async def import_directory_endpoint(req: DirectoryImportRequest, background_tasks: BackgroundTasks):
+    """
+    Imports all supported ebook files (.epub, .pdf, .cbz, .zip, etc.) directly from a local directory path.
+    Supports +1076 files, recursive scanning, natural sorting, and asynchronous background progress tracking.
+    """
+    dir_path = Path(req.directory_path).expanduser().resolve()
+    if not dir_path.exists() or not dir_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Directory does not exist or is not a directory: {req.directory_path}")
+
+    ALLOWED_EXTENSIONS = {".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"}
+
+    discovered_files = []
+    if req.recursive:
+        for root, _, files in os.walk(str(dir_path)):
+            for f in files:
+                if f.startswith(".") or f.startswith("__MACOSX"):
+                    continue
+                p = Path(root) / f
+                if p.suffix.lower() in ALLOWED_EXTENSIONS:
+                    discovered_files.append(p)
+    else:
+        for item in dir_path.iterdir():
+            if item.is_file() and not item.name.startswith("."):
+                if item.suffix.lower() in ALLOWED_EXTENSIONS:
+                    discovered_files.append(item)
+
+    def _sort_key(p: Path):
+        fn = p.name.lower()
+        parts = [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', fn)]
+        return parts
+
+    discovered_files.sort(key=_sort_key)
+
+    if req.max_files and len(discovered_files) > req.max_files:
+        discovered_files = discovered_files[:req.max_files]
+
+    if not discovered_files:
+        raise HTTPException(status_code=404, detail=f"No supported ebook files found in {dir_path}")
+
+    import_id = str(uuid.uuid4())
+    effective_batch_id = req.batch_id or str(uuid.uuid4())
+
+    task_state = {
+        "import_id": import_id,
+        "batch_id": effective_batch_id,
+        "directory": str(dir_path),
+        "status": "running",
+        "total_files": len(discovered_files),
+        "imported_files": 0,
+        "failed_files": 0,
+        "current_file": None,
+        "created_sessions": [],
+        "error": None,
+        "cancel_requested": False
+    }
+    IMPORT_TASKS[import_id] = task_state
+
+    def _process_import():
+        for file_p in discovered_files:
+            if task_state.get("cancel_requested"):
+                task_state["status"] = "cancelled"
+                break
+
+            task_state["current_file"] = file_p.name
+            ext = file_p.suffix.lower()
+            session_id = str(uuid.uuid4())
+            upload_path = UPLOAD_DIR / f"{session_id}_{file_p.name}"
+
+            try:
+                shutil.copy2(str(file_p), str(upload_path))
+                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+                if not pages_meta:
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                    task_state["failed_files"] += 1
+                    continue
+
+                for page in pages_meta:
+                    page["status"] = "pending"
+                    page["colorized_url"] = None
+
+                sess_obj = {
+                    "session_id": session_id,
+                    "batch_id": effective_batch_id,
+                    "filename": file_p.name,
+                    "file_path": str(upload_path),
+                    "ext": ext,
+                    "total_pages": len(pages_meta),
+                    "pages": pages_meta,
+                    "status": "idle",
+                    "processed_count": 0,
+                    "model_provider": "google_nano",
+                    "model_name": "nano-banana"
+                }
+                SESSIONS[session_id] = sess_obj
+                EVENT_QUEUES[session_id] = []
+                save_session_meta(session_id)
+                task_state["imported_files"] += 1
+                task_state["created_sessions"].append({
+                    "session_id": session_id,
+                    "batch_id": effective_batch_id,
+                    "filename": file_p.name,
+                    "ext": ext,
+                    "total_pages": len(pages_meta),
+                    "status": "idle",
+                    "processed_count": 0
+                })
+            except Exception as e:
+                task_state["failed_files"] += 1
+                print(f"[Directory Import Error] {file_p.name}: {e}")
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+
+        if task_state["status"] != "cancelled":
+            task_state["status"] = "completed"
+        task_state["current_file"] = None
+
+    if req.run_async:
+        background_tasks.add_task(_process_import)
+        return JSONResponse({
+            "status": "started",
+            "import_id": import_id,
+            "batch_id": effective_batch_id,
+            "total_files": len(discovered_files),
+            "total_scanned_files": len(discovered_files),
+            "message": f"Started background import of {len(discovered_files)} files from {dir_path.name}"
+        })
+    else:
+        _process_import()
+        return JSONResponse({
+            "status": "completed",
+            "import_id": import_id,
+            "batch_id": effective_batch_id,
+            "total_files": len(discovered_files),
+            "total_scanned_files": len(discovered_files),
+            "imported_files": task_state["imported_files"],
+            "processed_files": task_state["imported_files"] + task_state["failed_files"],
+            "failed_files": task_state["failed_files"],
+            "created_sessions": task_state["created_sessions"],
+            "created_session_ids": [s["session_id"] for s in task_state["created_sessions"]]
+        })
+
+
+@app.get("/api/import/status/{import_id}")
+async def get_import_status(import_id: str):
+    task = IMPORT_TASKS.get(import_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Import task not found")
+    total = task.get("total_files", 0)
+    imported = task.get("imported_files", 0)
+    failed = task.get("failed_files", 0)
+    percent = round(((imported + failed) / total * 100), 1) if total > 0 else 0
+    return JSONResponse({
+        **task,
+        "percent": percent,
+        "progress_percent": percent,
+        "total_scanned_files": total,
+        "processed_files": imported + failed,
+        "created_session_ids": [s["session_id"] for s in task.get("created_sessions", [])]
+    })
+
+
+@app.post("/api/import/cancel/{import_id}")
+async def cancel_import_task(import_id: str):
+    task = IMPORT_TASKS.get(import_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Import task not found")
+    task["cancel_requested"] = True
+    task["status"] = "cancelled"
+    return JSONResponse({
+        "status": "success",
+        "message": f"Import task {import_id} cancelled"
     })
 
 @app.get("/api/session/latest")

@@ -41,12 +41,13 @@ TMP_TEST_PATTERNS = [
     "/tmp/kindle_test*",
     "/tmp/test_export*",
     "/tmp/single_image_test*",
-    "/tmp/progress_test*"
+    "/tmp/progress_test*",
+    "/tmp/import_test*"
 ]
 
 TEST_KEYWORDS = [
     "test", "sample", "cancel", "switch", "kindle_test", "batch_test",
-    "preview_manga", "exp_page", "test_export", "test_vol"
+    "preview_manga", "exp_page", "test_export", "test_vol", "import_test"
 ]
 
 

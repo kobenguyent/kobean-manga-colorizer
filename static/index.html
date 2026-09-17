@@ -60,7 +60,7 @@
     <!-- Upload Section -->
     <section class="card upload-section" id="upload-section">
       <div class="dropzone" id="dropzone">
-        <input type="file" id="file-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" hidden />
+        <input type="file" id="file-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip,.cbz" hidden />
 
         <!-- Idle Upload State -->
         <div class="dropzone-content" id="dropzone-idle-content">
@@ -68,10 +68,15 @@
             <i class="ri-upload-cloud-2-line"></i>
           </div>
           <h2>Drag & Drop Manga files here</h2>
-          <p class="dropzone-hint">Upload single or <strong>multiple files</strong>: <strong>.pdf</strong>, <strong>.epub</strong>, <strong>Images</strong> & <strong>.zip</strong></p>
-          <button class="btn btn-primary" type="button" id="btn-select-files">
-            <i class="ri-file-add-line"></i> Select Files (Multiple Supported)
-          </button>
+          <p class="dropzone-hint">Upload single or <strong>multiple files (+1000 supported)</strong>: <strong>.pdf</strong>, <strong>.epub</strong>, <strong>.cbz</strong> & <strong>.zip</strong></p>
+          <div style="display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap;">
+            <button class="btn btn-primary" type="button" id="btn-select-files">
+              <i class="ri-file-add-line"></i> Select Files (Bulk Supported)
+            </button>
+            <button class="btn btn-secondary" type="button" onclick="openFolderImportModal()" title="Import whole folders with +1000 ebooks directly from disk">
+              <i class="ri-folder-open-line"></i> Import Local Folder
+            </button>
+          </div>
           <div class="idle-history-container hidden" id="idle-history-container" style="margin-top: 1rem;">
             <button class="btn btn-secondary btn-sm" type="button" onclick="openHistoryModal()">
               <i class="ri-history-line"></i> View History (<span id="idle-history-count">0</span> loaded)
@@ -129,6 +134,15 @@
             </button>
           </div>
 
+          <!-- Search filter for queue when many documents loaded -->
+          <div class="doc-queue-filter-wrap hidden" id="doc-queue-filter-wrap">
+            <i class="ri-search-line doc-queue-search-icon"></i>
+            <input type="text" id="doc-queue-search" placeholder="Filter queued documents..." oninput="filterDocumentQueue(this.value)" />
+            <button class="btn-icon doc-queue-filter-clear hidden" id="doc-queue-filter-clear" onclick="clearQueueFilter()" title="Clear filter">
+              <i class="ri-close-line"></i>
+            </button>
+          </div>
+
           <!-- Multi-document list (when 2+ files are queued) -->
           <div class="doc-queue-list hidden" id="doc-queue-list">
             <!-- Rendered dynamically -->
@@ -139,13 +153,16 @@
             <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="triggerAddFiles()">
               <i class="ri-add-line"></i> Add Files
             </button>
+            <button class="btn btn-secondary btn-sm" onclick="openFolderImportModal()" title="Import whole folders with +1000 ebooks directly from disk">
+              <i class="ri-folder-open-line"></i> Folder
+            </button>
             <button class="btn btn-danger btn-sm hidden" id="btn-delete-selected-queue" onclick="deleteSelectedQueueDocuments(event)" title="Delete checked documents from queue">
               <i class="ri-delete-bin-line"></i> Delete Selected (<span id="queue-selected-count">0</span>)
             </button>
             <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-delete-all-files" onclick="clearAllDocuments(event)">
               <i class="ri-delete-bin-line"></i> Delete All
             </button>
-            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip" style="display: none;" />
+            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip,.cbz" style="display: none;" />
           </div>
         </div>
 
@@ -740,7 +757,22 @@
         <div class="history-footer-summary" id="history-footer-summary">
           Showing 0 documents
         </div>
+
+        <!-- History Pagination Controls -->
+        <div class="history-pagination-wrap hidden" id="history-pagination-wrap">
+          <button class="btn btn-secondary btn-xs" id="btn-hist-prev" onclick="changeHistoryPage(-1)" title="Previous page">
+            <i class="ri-arrow-left-s-line"></i> Prev
+          </button>
+          <span class="history-page-indicator" id="history-page-indicator">Page 1 of 1</span>
+          <button class="btn btn-secondary btn-xs" id="btn-hist-next" onclick="changeHistoryPage(1)" title="Next page">
+            Next <i class="ri-arrow-right-s-line"></i>
+          </button>
+        </div>
+
         <div class="history-footer-actions">
+          <button class="btn btn-secondary btn-sm" onclick="openFolderImportModal()" title="Import local folder (+1000 files)">
+            <i class="ri-folder-open-line"></i> Import Folder
+          </button>
           <button class="btn btn-outline btn-danger-outline btn-sm hidden" id="btn-footer-bulk-delete" onclick="bulkDeleteHistory()">
             <i class="ri-delete-bin-line"></i> Delete Selected (<span id="footer-bulk-delete-count">0</span>)
           </button>
@@ -753,6 +785,111 @@
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- Bulk Import Progress Modal Overlay -->
+  <div class="modal-overlay hidden" id="import-progress-modal-overlay">
+    <div class="bulk-import-dialog" role="dialog" aria-modal="true" aria-labelledby="bulk-import-title">
+      <div class="bulk-import-header">
+        <div class="bulk-import-icon">
+          <i class="ri-file-upload-line"></i>
+        </div>
+        <div>
+          <h3 id="bulk-import-title" class="bulk-import-title">Importing Ebook Files</h3>
+          <p class="bulk-import-subtitle" id="bulk-import-subtitle">Processing files in optimized batches...</p>
+        </div>
+      </div>
+
+      <div class="bulk-import-body">
+        <div class="bulk-import-progress-track">
+          <div class="bulk-import-progress-fill" id="bulk-import-progress-fill" style="width: 0%;"></div>
+        </div>
+        <div class="bulk-import-status-row">
+          <span id="bulk-import-status-text" class="bulk-import-status-text">Importing 0 of 0 files (0%)</span>
+          <span id="bulk-import-eta" class="bulk-import-eta"></span>
+        </div>
+        <div class="bulk-import-current-filename" id="bulk-import-current-file">Preparing upload...</div>
+
+        <div class="bulk-import-stats-chips">
+          <div class="import-chip">
+            <span class="chip-label">Batch Chunk:</span>
+            <span class="chip-val" id="bulk-import-chunk">1 / 1</span>
+          </div>
+          <div class="import-chip chip-success">
+            <span class="chip-label">Imported:</span>
+            <span class="chip-val" id="bulk-import-success-count">0</span>
+          </div>
+          <div class="import-chip chip-failed">
+            <span class="chip-label">Failed:</span>
+            <span class="chip-val" id="bulk-import-fail-count">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bulk-import-footer">
+        <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-cancel-bulk-import" onclick="cancelBatchImport()">
+          <i class="ri-close-circle-line"></i> Cancel Import
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Local Folder Import Modal Overlay -->
+  <div class="modal-overlay hidden" id="folder-import-modal-overlay" onclick="handleFolderImportOverlayClick(event)">
+    <div class="folder-import-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-import-title">
+      <div class="folder-import-header">
+        <div class="folder-import-header-left">
+          <div class="folder-import-icon">
+            <i class="ri-folder-open-line"></i>
+          </div>
+          <div>
+            <h3 id="folder-import-title" class="folder-import-title">Import from Local Folder</h3>
+            <p class="folder-import-subtitle">Import hundreds or thousands (+1076) of ebooks directly from disk</p>
+          </div>
+        </div>
+        <button class="btn-icon history-close-btn" onclick="closeFolderImportModal()" title="Close (Esc)">
+          <i class="ri-close-line"></i>
+        </button>
+      </div>
+
+      <div class="folder-import-body">
+        <div class="form-group">
+          <label class="form-label" for="folder-import-path">Directory Path on Server / Machine:</label>
+          <input type="text" class="input-text" id="folder-import-path" placeholder="/Users/name/Manga or /path/to/ebooks" />
+          <small class="form-hint" style="color: var(--text-muted); font-size: 0.75rem; margin-top: 4px; display: block;">Path to folder containing .pdf, .epub, .cbz, or .zip files.</small>
+        </div>
+
+        <div class="form-group-row" style="display: flex; gap: 1.5rem; align-items: center; margin-top: 0.75rem;">
+          <label class="checkbox-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.85rem;">
+            <input type="checkbox" id="folder-import-recursive" checked />
+            <span>Scan subfolders recursively</span>
+          </label>
+          <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <label for="folder-import-max" style="font-size: 0.85rem; color: var(--text-secondary);">Max Files:</label>
+            <input type="number" id="folder-import-max" value="5000" min="1" max="10000" style="width: 80px; padding: 4px 8px; background: var(--bg-input); border: 1px solid var(--bg-card-border); color: #fff; border-radius: 4px;" />
+          </div>
+        </div>
+
+        <!-- In-progress tracking section -->
+        <div class="folder-import-progress-area hidden" id="folder-import-progress-area" style="margin-top: 1.25rem;">
+          <div class="bulk-import-progress-track">
+            <div class="bulk-import-progress-fill" id="folder-progress-fill" style="width: 0%;"></div>
+          </div>
+          <div class="bulk-import-status-row" style="margin-top: 0.5rem;">
+            <span id="folder-progress-text" style="font-size: 0.85rem; font-weight: 600;">Scanning & importing...</span>
+            <span id="folder-progress-pct" style="font-size: 0.85rem; color: var(--accent-cyan);">0%</span>
+          </div>
+          <div id="folder-progress-file" style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"></div>
+        </div>
+      </div>
+
+      <div class="folder-import-footer" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-top: 1px solid var(--bg-card-border);">
+        <button class="btn btn-secondary btn-sm" onclick="closeFolderImportModal()">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="btn-run-folder-import" onclick="startFolderImport()">
+          <i class="ri-folder-download-line"></i> Start Import
+        </button>
+      </div>
     </div>
   </div>
 
