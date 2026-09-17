@@ -46,6 +46,12 @@ from colorizer_engine import (
     is_colored_page,
 )
 from file_processor import MangaFileProcessor
+from manga_presets import (
+    detect_manga_preset,
+    get_all_presets,
+    get_preset_by_id,
+    search_online_manga_preset,
+)
 
 app = FastAPI(title="Manga Colorizer Pro", version="1.0.0")
 
@@ -140,8 +146,15 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
                     sess["processed_count"] = sum(
                         1 for p in sess["pages"] if p.get("status") == "colorized"
                     )
-                    if sess.get("total_pages") and sess["processed_count"] == sess["total_pages"]:
-                        sess["status"] = "completed"
+                if not sess.get("detected_preset") and sess.get("filename"):
+                    detected = detect_manga_preset(sess["filename"])
+                    if detected:
+                        sess["detected_preset"] = detected.id
+                        sess["preset_title"] = detected.title
+                        if not sess.get("recommended_style") and detected.recommended_style:
+                            sess["recommended_style"] = detected.recommended_style
+                if session_id not in SESSION_PALETTES:
+                    _get_palette(session_id)
                 SESSIONS[session_id] = sess
                 if session_id not in EVENT_QUEUES:
                     EVENT_QUEUES[session_id] = []
@@ -294,15 +307,131 @@ class PaletteDeleteRequest(BaseModel):
     character_name: str
 
 
+class PaletteApplyPresetRequest(BaseModel):
+    session_id: str
+    preset_id: str
+
+
+class PaletteOnlineSearchRequest(BaseModel):
+    query: str
+    session_id: Optional[str] = None
+
+
 # In-memory palette store: session_id -> CharacterPalette
 SESSION_PALETTES: dict[str, CharacterPalette] = {}
 
 
+def save_session_palette(session_id: str, palette: CharacterPalette):
+    """Saves the palette to palette.json in the session directory."""
+    sess_dir = STORAGE_DIR / session_id
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    pal_path = sess_dir / "palette.json"
+    try:
+        with open(pal_path, "w", encoding="utf-8") as f:
+            json.dump(palette.to_dict(), f, indent=2)
+    except Exception as e:
+        print(f"[Palette Warning] Failed to write palette.json for {session_id}: {e}")
+
+
 def _get_palette(session_id: str) -> CharacterPalette:
-    """Returns the palette for a session, creating an empty one if not present."""
-    if session_id not in SESSION_PALETTES:
-        SESSION_PALETTES[session_id] = CharacterPalette()
-    return SESSION_PALETTES[session_id]
+    """Returns the palette for a session, restoring from disk if needed."""
+    if session_id in SESSION_PALETTES:
+        pal = SESSION_PALETTES[session_id]
+        if pal.characters:
+            return pal
+        sess = SESSIONS.get(session_id)
+        detected = None
+        if pal.preset_id:
+            detected = get_preset_by_id(pal.preset_id)
+        elif sess and sess.get("detected_preset"):
+            detected = get_preset_by_id(sess["detected_preset"])
+        elif sess and sess.get("filename"):
+            detected = detect_manga_preset(sess["filename"])
+        if detected:
+            pal = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in detected.characters
+                ],
+                preset_id=detected.id,
+                preset_title=detected.title,
+            )
+            SESSION_PALETTES[session_id] = pal
+            save_session_palette(session_id, pal)
+            return pal
+        return pal
+
+    # Try loading from disk
+    pal_path = STORAGE_DIR / session_id / "palette.json"
+    if pal_path.exists():
+        try:
+            with open(pal_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                pal = CharacterPalette.from_dict(d)
+                if not pal.characters:
+                    sess = SESSIONS.get(session_id)
+                    detected = None
+                    if pal.preset_id:
+                        detected = get_preset_by_id(pal.preset_id)
+                    elif sess and sess.get("detected_preset"):
+                        detected = get_preset_by_id(sess["detected_preset"])
+                    elif sess and sess.get("filename"):
+                        detected = detect_manga_preset(sess["filename"])
+                    if detected:
+                        pal = CharacterPalette(
+                            characters=[
+                                CharacterEntry(
+                                    name=c.name,
+                                    hair_hex=c.hair_hex,
+                                    skin_hex=c.skin_hex,
+                                    costume_hex=c.costume_hex,
+                                    extra_hex=c.extra_hex,
+                                )
+                                for c in detected.characters
+                            ],
+                            preset_id=detected.id,
+                            preset_title=detected.title,
+                        )
+                        save_session_palette(session_id, pal)
+                SESSION_PALETTES[session_id] = pal
+                return pal
+        except Exception as e:
+            print(f"[Palette Warning] Failed to read palette.json for {session_id}: {e}")
+
+    # Fallback: check if session has a filename and auto-detect
+    sess = SESSIONS.get(session_id)
+    if sess and sess.get("filename"):
+        detected = detect_manga_preset(sess["filename"])
+        if detected:
+            pal = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in detected.characters
+                ],
+                preset_id=detected.id,
+                preset_title=detected.title,
+            )
+            SESSION_PALETTES[session_id] = pal
+            save_session_palette(session_id, pal)
+            sess["detected_preset"] = detected.id
+            sess["preset_title"] = detected.title
+            return pal
+
+    new_pal = CharacterPalette()
+    SESSION_PALETTES[session_id] = new_pal
+    return new_pal
 
 
 @app.post("/api/upload")
@@ -367,6 +496,10 @@ async def upload_files(
             page["status"] = "pending"
             page["colorized_url"] = None
 
+        detected = detect_manga_preset(uploaded_file.filename)
+        detected_preset_id = detected.id if detected else None
+        preset_title = detected.title if detected else None
+
         sess_obj = {
             "session_id": session_id,
             "batch_id": effective_batch_id,
@@ -379,7 +512,29 @@ async def upload_files(
             "processed_count": 0,
             "model_provider": "google_nano",
             "model_name": "nano-banana",
+            "detected_preset": detected_preset_id,
+            "preset_title": preset_title,
         }
+        if detected:
+            if detected.recommended_style:
+                sess_obj["recommended_style"] = detected.recommended_style
+            pal = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in detected.characters
+                ],
+                preset_id=detected.id,
+                preset_title=detected.title,
+            )
+            SESSION_PALETTES[session_id] = pal
+            save_session_palette(session_id, pal)
+
         SESSIONS[session_id] = sess_obj
         EVENT_QUEUES[session_id] = []
         save_session_meta(session_id)
@@ -399,6 +554,8 @@ async def upload_files(
                 "total_pages": s["total_pages"],
                 "status": s["status"],
                 "processed_count": s["processed_count"],
+                "detected_preset": s.get("detected_preset"),
+                "preset_title": s.get("preset_title"),
             }
         )
 
@@ -501,6 +658,10 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
                     page["status"] = "pending"
                     page["colorized_url"] = None
 
+                detected = detect_manga_preset(file_p.name)
+                detected_preset_id = detected.id if detected else None
+                preset_title = detected.title if detected else None
+
                 sess_obj = {
                     "session_id": session_id,
                     "batch_id": effective_batch_id,
@@ -512,8 +673,30 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
                     "status": "idle",
                     "processed_count": 0,
                     "model_provider": "google_nano",
-                    "model_name": "nano-banana"
+                    "model_name": "nano-banana",
+                    "detected_preset": detected_preset_id,
+                    "preset_title": preset_title,
                 }
+                if detected:
+                    if detected.recommended_style:
+                        sess_obj["recommended_style"] = detected.recommended_style
+                    pal = CharacterPalette(
+                        characters=[
+                            CharacterEntry(
+                                name=c.name,
+                                hair_hex=c.hair_hex,
+                                skin_hex=c.skin_hex,
+                                costume_hex=c.costume_hex,
+                                extra_hex=c.extra_hex,
+                            )
+                            for c in detected.characters
+                        ],
+                        preset_id=detected.id,
+                        preset_title=detected.title,
+                    )
+                    SESSION_PALETTES[session_id] = pal
+                    save_session_palette(session_id, pal)
+
                 SESSIONS[session_id] = sess_obj
                 EVENT_QUEUES[session_id] = []
                 save_session_meta(session_id)
@@ -525,7 +708,9 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
                     "ext": ext,
                     "total_pages": len(pages_meta),
                     "status": "idle",
-                    "processed_count": 0
+                    "processed_count": 0,
+                    "detected_preset": detected_preset_id,
+                    "preset_title": preset_title,
                 })
             except Exception as e:
                 task_state["failed_files"] += 1
@@ -812,7 +997,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
 
         try:
             # Resolve palette for this session (if any characters are defined)
-            palette = SESSION_PALETTES.get(session_id)
+            palette = _get_palette(session_id)
             if palette and not palette.characters:
                 palette = None
 
@@ -963,7 +1148,7 @@ async def preview_single_page(req: PreviewRequest):
     output_path = str(colorized_dir / color_filename)
 
     try:
-        palette = SESSION_PALETTES.get(session_id)
+        palette = _get_palette(session_id)
         if palette and not palette.characters:
             palette = None
 
@@ -1023,6 +1208,105 @@ async def preview_single_page(req: PreviewRequest):
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
 
+@app.get("/api/palette/presets")
+async def list_manga_presets():
+    """Returns all registered manga presets with canonical character colors."""
+    presets = get_all_presets()
+    return JSONResponse({
+        "presets": [p.to_dict() for p in presets],
+        "count": len(presets),
+    })
+
+
+@app.get("/api/palette/preset/{preset_id}")
+async def get_manga_preset(preset_id: str):
+    """Returns a specific manga preset by its ID."""
+    preset = get_preset_by_id(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return JSONResponse({"preset": preset.to_dict()})
+
+
+@app.post("/api/palette/apply-preset")
+async def apply_preset_to_session(req: PaletteApplyPresetRequest):
+    """Applies all characters from a manga preset to the session palette."""
+    sess = get_or_restore_session(req.session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    preset = get_preset_by_id(req.preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail=f"Preset '{req.preset_id}' not found")
+
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name=c.name,
+                hair_hex=c.hair_hex,
+                skin_hex=c.skin_hex,
+                costume_hex=c.costume_hex,
+                extra_hex=c.extra_hex,
+            )
+            for c in preset.characters
+        ],
+        preset_id=preset.id,
+        preset_title=preset.title,
+    )
+    SESSION_PALETTES[req.session_id] = palette
+    save_session_palette(req.session_id, palette)
+
+    sess["detected_preset"] = preset.id
+    sess["preset_title"] = preset.title
+    if preset.recommended_style:
+        sess["recommended_style"] = preset.recommended_style
+    save_session_meta(req.session_id)
+
+    return JSONResponse({
+        "status": "ok",
+        "session_id": req.session_id,
+        "preset_id": preset.id,
+        "preset_title": preset.title,
+        "palette": palette.to_dict(),
+    })
+
+
+@app.post("/api/palette/search-online")
+async def search_online_preset_endpoint(req: PaletteOnlineSearchRequest):
+    """Searches online sources for character color palettes and generates a preset."""
+    preset = search_online_manga_preset(req.query)
+    if not preset:
+        raise HTTPException(status_code=404, detail=f"No color palette found online for '{req.query}'")
+
+    if req.session_id:
+        sess = get_or_restore_session(req.session_id)
+        if sess:
+            palette = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in preset.characters
+                ],
+                preset_id=preset.id,
+                preset_title=preset.title,
+            )
+            SESSION_PALETTES[req.session_id] = palette
+            save_session_palette(req.session_id, palette)
+            sess["detected_preset"] = preset.id
+            sess["preset_title"] = preset.title
+            save_session_meta(req.session_id)
+
+    return JSONResponse({
+        "status": "ok",
+        "preset": preset.to_dict(),
+        "applied_to_session": req.session_id if req.session_id else None,
+    })
+
+
 @app.get("/api/palette/{session_id}")
 async def get_palette(session_id: str):
     """Returns the character color palette for the given session."""
@@ -1030,7 +1314,12 @@ async def get_palette(session_id: str):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
     palette = _get_palette(session_id)
-    return JSONResponse({"session_id": session_id, "palette": palette.to_dict()})
+    return JSONResponse({
+        "session_id": session_id,
+        "preset_id": palette.preset_id or sess.get("detected_preset", ""),
+        "preset_title": palette.preset_title or sess.get("preset_title", ""),
+        "palette": palette.to_dict(),
+    })
 
 
 @app.post("/api/palette/upsert")
@@ -1054,6 +1343,7 @@ async def upsert_palette_character(req: PaletteUpsertRequest):
     # Replace existing entry by name, or append
     palette.characters = [c for c in palette.characters if c.name.lower() != new_entry.name.lower()]
     palette.characters.append(new_entry)
+    save_session_palette(req.session_id, palette)
 
     return JSONResponse(
         {"status": "ok", "session_id": req.session_id, "palette": palette.to_dict()}
@@ -1071,6 +1361,7 @@ async def delete_palette_character(session_id: str, character_name: str):
     before = len(palette.characters)
     palette.characters = [c for c in palette.characters if c.name.lower() != character_name.lower()]
     removed = before - len(palette.characters)
+    save_session_palette(session_id, palette)
 
     return JSONResponse(
         {"status": "ok", "removed": removed, "session_id": session_id, "palette": palette.to_dict()}
@@ -1084,7 +1375,13 @@ async def clear_palette(session_id: str):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    SESSION_PALETTES[session_id] = CharacterPalette()
+    empty_pal = CharacterPalette()
+    SESSION_PALETTES[session_id] = empty_pal
+    save_session_palette(session_id, empty_pal)
+    sess["detected_preset"] = None
+    sess["preset_title"] = None
+    save_session_meta(session_id)
+
     return JSONResponse({"status": "ok", "session_id": session_id, "palette": {"characters": []}})
 
 

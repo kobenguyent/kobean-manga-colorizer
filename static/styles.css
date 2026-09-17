@@ -3627,3 +3627,70 @@ body.comparator-fullscreen-active {
   background: rgba(0, 0, 0, 0.2);
   border-top: 1px solid var(--bg-card-border);
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+   Manga Color Presets & Auto-Detection Styles
+   ───────────────────────────────────────────────────────────────────── */
+.palette-preset-section {
+  position: relative;
+}
+
+.queue-preset-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(168, 85, 247, 0.12);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.25);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-top: 3px;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preset-search-result-card {
+  background: var(--card-bg, #1e1e2e);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.preset-search-result-card:hover {
+  border-color: rgba(168, 85, 247, 0.5);
+}
+
+.preset-swatch-list {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.preset-swatch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 0.72rem;
+}
+
+.preset-swatch-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+

@@ -114,16 +114,26 @@ class CharacterPalette:
     """
 
     characters: list[CharacterEntry] = field(default_factory=list)
+    preset_id: str = ""
+    preset_title: str = ""
 
     # ── Serialization ────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
-        return {"characters": [vars(c) for c in self.characters]}
+        return {
+            "characters": [vars(c) for c in self.characters],
+            "preset_id": self.preset_id,
+            "preset_title": self.preset_title,
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> "CharacterPalette":
         entries = [CharacterEntry(**c) for c in d.get("characters", [])]
-        return cls(characters=entries)
+        return cls(
+            characters=entries,
+            preset_id=d.get("preset_id", ""),
+            preset_title=d.get("preset_title", ""),
+        )
 
     # ── Hint tensor for neural colorizer ────────────────────────────
 
@@ -448,6 +458,7 @@ class MangaColorizerEngine:
                 saturation=saturation,
                 contrast=contrast,
                 line_preserve=line_preserve,
+                character_palette=character_palette,
             )
         elif provider in ("apple_foundation", "apple"):
             return self._colorize_apple(
@@ -459,6 +470,7 @@ class MangaColorizerEngine:
                 saturation=saturation,
                 contrast=contrast,
                 line_preserve=line_preserve,
+                character_palette=character_palette,
             )
         elif provider in ("google_nano", "google"):
             return self._colorize_google(
@@ -470,6 +482,7 @@ class MangaColorizerEngine:
                 saturation=saturation,
                 contrast=contrast,
                 line_preserve=line_preserve,
+                character_palette=character_palette,
             )
         else:
             return self._colorize_neural(
@@ -664,6 +677,7 @@ class MangaColorizerEngine:
         saturation: float,
         contrast: float,
         line_preserve: float,
+        character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
         """
         Apple Silicon Foundation Engine with P3 Wide Color Gamut & Neural Engine vibrance.
@@ -688,6 +702,7 @@ class MangaColorizerEngine:
             saturation=saturation * sat_boost,
             contrast=contrast * cont_boost,
             line_preserve=line_preserve,
+            character_palette=character_palette,
         )
         res["engine"] = f"Apple Foundation Model (MPS Neural Engine - {model_name or 'CoreML'})"
         return res
@@ -725,18 +740,41 @@ class MangaColorizerEngine:
         saturation: float,
         contrast: float,
         line_preserve: float,
+        character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
         """
         Google Multimodal AI Engine (Nano Banana / Gemini 2.0 / Imagen 3).
         Produces vibrant anime colorization matching the Gemini demo standard:
         - Speech bubbles kept pure white with crisp black text
-        - Character semantics (Arale violet/purple hair, peach skin, blush)
+        - Dynamic character semantics & canonical palette guidance
         - Outdoor blue sky gradients and lush green foliage
         - Sound effects styled with comic yellow & purple accents
         """
         key = (
             api_key or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
         )
+
+        # Build dynamic character color guidance from active palette if present
+        if character_palette and character_palette.characters:
+            char_items = []
+            for c in character_palette.characters:
+                parts = []
+                if c.hair_hex:
+                    parts.append(f"hair {c.hair_hex}")
+                if c.skin_hex:
+                    parts.append(f"skin {c.skin_hex}")
+                if c.costume_hex:
+                    parts.append(f"costume {c.costume_hex}")
+                if c.extra_hex:
+                    parts.append(f"accents {c.extra_hex}")
+                if parts:
+                    char_items.append(f"{c.name} ({', '.join(parts)})")
+            if char_items:
+                char_guidance = "2. Canonical Characters & Colors: " + "; ".join(char_items) + ". "
+            else:
+                char_guidance = "2. Characters: Keep authentic anime colors matching official Japanese colored editions. "
+        else:
+            char_guidance = "2. Characters: Authentic anime colors with natural peach skin, distinct hair, and coordinated outfits. "
 
         # When no API key is provided, check if demo exemplar pair matches demo/original.png
         if not key:
@@ -806,10 +844,15 @@ class MangaColorizerEngine:
 
                 if "imagen" in target_model.lower():
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={key}"
+                    if character_palette and character_palette.characters:
+                        char_desc = ", ".join(f"{c.name} ({c.costume_hex})" for c in character_palette.characters[:3])
+                        prompt_inst = f"Full vibrant anime colorization of manga page, canonical colors: {char_desc}, blue sky, white speech bubbles."
+                    else:
+                        prompt_inst = "Full vibrant anime colorization of manga page, vibrant anime colors, peach skin, blue sky, white speech bubbles."
                     body = {
                         "instances": [
                             {
-                                "prompt": "Full vibrant anime colorization of black and white manga page, Arale purple hair, peach skin, blue sky, white speech bubbles."
+                                "prompt": prompt_inst
                             }
                         ],
                         "parameters": {"sampleCount": 1, "aspectRatio": "3:4"},
@@ -838,8 +881,8 @@ class MangaColorizerEngine:
                         "Colorize this black and white manga page in full vibrant anime style matching official Japanese color manga editions. "
                         "Guidelines: "
                         "1. Speech bubbles: Keep all speech bubble interiors pure white (#ffffff) with crisp black dialogue text. "
-                        "2. Characters: Arale Norimaki has vivid violet/purple hair, warm peach skin, and rosy cheeks; Dr. Senbei Norimaki has warm peach skin, black hair, purple/grey vest; robot body has cobalt blue torso, red limbs, yellow joints. "
-                        "3. Environment: Bright blue gradient sky, lush green foliage, terracotta roof tiles, and glowing emerald green/magenta chemistry flasks. "
+                        f"{char_guidance}"
+                        "3. Environment: Bright blue gradient sky, lush green foliage, terracotta roof tiles, and glowing chemistry flasks. "
                         "4. Sound effects: Color onomatopoeia with bright anime comic colors (yellow/orange or purple). "
                         "5. Preserve original line art, panel borders, and text cleanly."
                     )
@@ -891,6 +934,7 @@ class MangaColorizerEngine:
             saturation=saturation * 1.35,
             contrast=contrast * 1.10,
             line_preserve=line_preserve,
+            character_palette=character_palette,
         )
         if api_error_reason:
             res["engine"] = (
@@ -912,6 +956,7 @@ class MangaColorizerEngine:
         saturation: float,
         contrast: float,
         line_preserve: float,
+        character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
         """
         Authentic Offline Multi-Region Semantic Engine:
@@ -953,6 +998,28 @@ class MangaColorizerEngine:
         else:
             a_shift = 28.0
             b_shift = 32.0
+
+        # When a character palette is active, bias the chromatic shifts toward its canonical palette
+        if character_palette and character_palette.characters:
+            hex_candidates = []
+            for ch in character_palette.characters:
+                for hx in [ch.costume_hex, ch.skin_hex]:
+                    if hx and len(hx.strip().lstrip("#")) >= 6:
+                        hex_candidates.append(hx.strip().lstrip("#"))
+            if hex_candidates:
+                try:
+                    c_hx = hex_candidates[0]
+                    cr = int(c_hx[0:2], 16)
+                    cg = int(c_hx[2:4], 16)
+                    cb = int(c_hx[4:6], 16)
+                    pixel = np.uint8([[[cb, cg, cr]]])
+                    px_lab = cv2.cvtColor(pixel, cv2.COLOR_BGR2LAB)[0, 0]
+                    target_a = float(px_lab[1]) - 128.0
+                    target_b = float(px_lab[2]) - 128.0
+                    a_shift = float(np.clip(0.35 * a_shift + 0.65 * target_a, -60.0, 60.0))
+                    b_shift = float(np.clip(0.35 * b_shift + 0.65 * target_b, -60.0, 60.0))
+                except Exception:
+                    pass
 
         # Apply chromatic synthesis
         lab[:, :, 1] = np.clip(128.0 + midtone_mask * a_shift, 0, 255).astype(np.uint8)

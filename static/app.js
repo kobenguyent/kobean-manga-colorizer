@@ -274,6 +274,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
   updateModelVariants("resnext_generator");
   initAllCustomSelects();
+  loadMangaPresets();
 
   // Auto-restore session from sessionStorage or fetch the latest active session
   const savedSessionId = sessionStorage.getItem("active_session_id");
@@ -1238,8 +1239,9 @@ function renderDocumentQueue() {
       <div class="doc-queue-icon">${iconHTML}</div>
       <div class="doc-queue-info">
         <div class="doc-queue-name" title="${sess.filename}">${sess.filename}</div>
-        <div class="doc-queue-meta">
+        <div class="doc-queue-meta" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <span>${sess.total_pages} pages</span>
+          ${sess.preset_title ? `<span class="queue-preset-pill" title="Manga Preset: ${sess.preset_title}"><i class="ri-palette-line"></i> ${sess.preset_title}</span>` : ""}
         </div>
       </div>
       <div class="doc-queue-top-actions">
@@ -3839,11 +3841,52 @@ window.clearQueueFilter = clearQueueFilter;
 
 
 // ─────────────────────────────────────────────────────────────────────
-//  Character Palette Manager
+//  Character Palette & Manga Presets Manager
 // ─────────────────────────────────────────────────────────────────────
 
 /** In-memory palette state for the active session. */
 let paletteCharacters = [];
+let allMangaPresets = [];
+let currentPresetId = "";
+
+/**
+ * Loads registered manga presets from the backend to populate the dropdown.
+ */
+async function loadMangaPresets() {
+  try {
+    const resp = await fetch("/api/palette/presets");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    allMangaPresets = data.presets || [];
+    populatePresetDropdown();
+  } catch (err) {
+    console.warn("Could not load manga presets:", err);
+  }
+}
+
+/**
+ * Populates the #palette-preset-select dropdown with all available presets.
+ */
+function populatePresetDropdown() {
+  const select = document.getElementById("palette-preset-select");
+  if (!select) return;
+
+  const currentVal = select.value;
+  select.innerHTML = '<option value="">Custom / None</option>';
+
+  const group = document.createElement("optgroup");
+  group.label = "Popular Manga Presets";
+
+  allMangaPresets.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = `${p.title} (${p.characters.length} characters)`;
+    group.appendChild(opt);
+  });
+
+  select.appendChild(group);
+  if (currentVal) select.value = currentVal;
+}
 
 /**
  * Fetches the current session's palette from the server and re-renders the list.
@@ -3855,10 +3898,232 @@ async function paletteLoadFromServer() {
     if (!resp.ok) return;
     const data = await resp.json();
     paletteCharacters = data.palette?.characters || [];
+    currentPresetId = data.preset_id || data.palette?.preset_id || currentSession.detected_preset || "";
+    const presetTitle = data.preset_title || data.palette?.preset_title || currentSession.preset_title || "";
+
+    // Sync dropdown
+    const select = document.getElementById("palette-preset-select");
+    if (select) {
+      if (currentPresetId && !Array.from(select.options).some(o => o.value === currentPresetId)) {
+        // Preset might be custom or online-fetched, append if not present
+        const opt = document.createElement("option");
+        opt.value = currentPresetId;
+        opt.textContent = presetTitle || currentPresetId;
+        select.appendChild(opt);
+      }
+      select.value = currentPresetId || "";
+    }
+
+    // Auto-detected badge
+    const badge = document.getElementById("palette-detected-badge");
+    const desc = document.getElementById("palette-preset-desc");
+    if (badge) {
+      if (currentPresetId && presetTitle) {
+        badge.style.display = "inline-flex";
+        badge.title = `Preset: ${presetTitle}`;
+        badge.innerHTML = `<i class="ri-sparkling-fill" style="margin-right:2px;"></i> ${presetTitle}`;
+      } else {
+        badge.style.display = "none";
+      }
+    }
+
+    // Preset description
+    if (desc) {
+      const presetObj = allMangaPresets.find(p => p.id === currentPresetId);
+      if (presetObj && presetObj.description) {
+        desc.style.display = "block";
+        desc.textContent = presetObj.description;
+      } else {
+        desc.style.display = "none";
+      }
+    }
+
     paletteRender();
   } catch (_) {
     // Silent — palette is optional
   }
+}
+
+/**
+ * Handles user selecting a manga preset from the dropdown.
+ */
+async function onMangaPresetSelected(presetId) {
+  if (!currentSession) {
+    showToast("No active session selected.", "warning");
+    return;
+  }
+
+  if (!presetId) {
+    // User picked "Custom / None"
+    currentPresetId = "";
+    const badge = document.getElementById("palette-detected-badge");
+    if (badge) badge.style.display = "none";
+    const desc = document.getElementById("palette-preset-desc");
+    if (desc) desc.style.display = "none";
+    return;
+  }
+
+  try {
+    const resp = await fetch("/api/palette/apply-preset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: currentSession.session_id,
+        preset_id: presetId
+      })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || "Failed to apply preset");
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    currentPresetId = presetId;
+    currentSession.detected_preset = presetId;
+    currentSession.preset_title = data.preset_title;
+
+    // Update active style recommendation if applicable
+    const presetObj = allMangaPresets.find(p => p.id === presetId);
+    if (presetObj && presetObj.recommended_style) {
+      const styleSelect = document.getElementById("style-select");
+      if (styleSelect) styleSelect.value = presetObj.recommended_style;
+    }
+
+    // Refresh preset info & palette list
+    paletteLoadFromServer();
+    renderDocumentQueue();
+    showToast(`✨ Applied "${data.preset_title}" preset (${paletteCharacters.length} characters loaded).`, "success");
+  } catch (err) {
+    showToast(`Error applying preset: ${err.message}`, "error");
+  }
+}
+
+/**
+ * Opens the online preset search modal. Pre-fills input with clean series title.
+ */
+function openSearchPresetModal() {
+  const modal = document.getElementById("preset-search-modal");
+  const input = document.getElementById("preset-search-input");
+  const results = document.getElementById("preset-search-results");
+  const loading = document.getElementById("preset-search-loading");
+
+  if (results) { results.style.display = "none"; results.innerHTML = ""; }
+  if (loading) loading.style.display = "none";
+
+  if (input && currentSession && currentSession.filename) {
+    // Derive a clean series name suggestion from filename
+    let clean = currentSession.filename
+      .replace(/\.(pdf|epub|cbz|cbr|zip|tar|gz|png|jpg|jpeg|webp)$/i, "")
+      .replace(/[\-_]+/g, " ")
+      .replace(/vol(ume)?\.?\s*\d+/i, "")
+      .replace(/ch(apter)?\.?\s*\d+/i, "")
+      .replace(/\b(part|omnibus|colored|colorized|c2c)\b/gi, "")
+      .trim();
+    input.value = clean || currentSession.filename;
+  }
+
+  if (modal) modal.classList.remove("hidden");
+  if (input) input.focus();
+}
+
+/**
+ * Closes the online preset search modal.
+ */
+function closeSearchPresetModal() {
+  const modal = document.getElementById("preset-search-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function handlePresetSearchOverlayClick(event) {
+  if (event.target && event.target.id === "preset-search-modal") {
+    closeSearchPresetModal();
+  }
+}
+
+/**
+ * Executes online lookup for manga color palette via backend /api/palette/search-online.
+ */
+async function executePresetOnlineSearch() {
+  const input = document.getElementById("preset-search-input");
+  const query = (input?.value || "").trim();
+  if (!query) {
+    showToast("Please enter a manga title to search.", "warning");
+    return;
+  }
+
+  const loading = document.getElementById("preset-search-loading");
+  const results = document.getElementById("preset-search-results");
+  const btn = document.getElementById("btn-run-preset-search");
+
+  if (loading) loading.style.display = "block";
+  if (results) { results.style.display = "none"; results.innerHTML = ""; }
+  if (btn) btn.disabled = true;
+
+  try {
+    const resp = await fetch("/api/palette/search-online", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: query,
+        session_id: currentSession ? currentSession.session_id : null
+      })
+    });
+
+    if (!resp.ok) {
+      const errData = await resp.json();
+      throw new Error(errData.detail || "No character color palette found online.");
+    }
+
+    const data = await resp.json();
+    const preset = data.preset;
+
+    // Refresh preset list in memory
+    await loadMangaPresets();
+
+    if (results) {
+      results.style.display = "block";
+      const charChips = (preset.characters || []).map(c => `
+        <div class="preset-swatch-chip" title="${c.name}: hair ${c.hair_hex}, costume ${c.costume_hex}">
+          <span class="preset-swatch-dot" style="background:${c.costume_hex || c.hair_hex || '#1565c0'};"></span>
+          <span>${c.name}</span>
+        </div>
+      `).join("");
+
+      results.innerHTML = `
+        <div class="preset-search-result-card">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div style="font-weight:600; font-size:0.9rem; color:#fff;">
+              <i class="ri-check-line" style="color:var(--accent-green);"></i> ${preset.title}
+            </div>
+            <span class="badge badge-accent" style="font-size:0.7rem;">${(preset.characters || []).length} characters</span>
+          </div>
+          <p style="font-size:0.78rem; color:var(--text-secondary); margin:4px 0 8px;">
+            ${preset.description || "Extracted from online sources"}
+          </p>
+          <div class="preset-swatch-list" style="margin-bottom:10px;">
+            ${charChips}
+          </div>
+          <button class="btn btn-primary btn-sm btn-block" onclick="applyOnlineSearchResult('${preset.id}')">
+            <i class="ri-sparkling-line"></i> Apply to Current Document
+          </button>
+        </div>
+      `;
+    }
+  } catch (err) {
+    if (results) {
+      results.style.display = "block";
+      results.innerHTML = `
+        <div style="padding:10px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.25); border-radius:6px; font-size:0.8rem; color:#ef4444;">
+          <i class="ri-error-warning-line"></i> ${err.message}
+        </div>
+      `;
+    }
+  } finally {
+    if (loading) loading.style.display = "none";
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function applyOnlineSearchResult(presetId) {
+  closeSearchPresetModal();
+  await onMangaPresetSelected(presetId);
 }
 
 /**
@@ -3874,7 +4139,7 @@ function paletteRender() {
 
   if (paletteCharacters.length === 0) {
     list.innerHTML = `<p style="font-size:0.78rem;color:var(--text-secondary);text-align:center;padding:0.5rem 0;">
-      No characters yet. Add one below.
+      No characters yet. Pick a preset above or add one below.
     </p>`;
     return;
   }
@@ -3962,9 +4227,16 @@ async function paletteDeleteCharacter(index) {
   }
 }
 
-window.paletteAddCharacter    = paletteAddCharacter;
-window.paletteDeleteCharacter = paletteDeleteCharacter;
-window.paletteLoadFromServer  = paletteLoadFromServer;
+window.loadMangaPresets              = loadMangaPresets;
+window.onMangaPresetSelected         = onMangaPresetSelected;
+window.openSearchPresetModal         = openSearchPresetModal;
+window.closeSearchPresetModal        = closeSearchPresetModal;
+window.handlePresetSearchOverlayClick = handlePresetSearchOverlayClick;
+window.executePresetOnlineSearch     = executePresetOnlineSearch;
+window.applyOnlineSearchResult       = applyOnlineSearchResult;
+window.paletteAddCharacter           = paletteAddCharacter;
+window.paletteDeleteCharacter        = paletteDeleteCharacter;
+window.paletteLoadFromServer         = paletteLoadFromServer;
 
 
 // ─────────────────────────────────────────────────────────────────────
