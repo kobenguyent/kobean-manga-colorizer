@@ -697,6 +697,11 @@
                 <i class="ri-brain-line"></i> Memory Active
               </span>
 
+              <!-- Visual Exemplar Reference Chip -->
+              <span class="badge" id="preview-exemplar-chip" style="display:none;cursor:pointer;background:rgba(59,130,246,0.18);color:#60a5fa;border:1px solid rgba(59,130,246,0.35);font-size:0.72rem;padding:3px 8px;gap:4px;align-items:center;" onclick="openExemplarGalleryModal()" title="View series exemplars">
+                <i class="ri-gallery-line"></i> <span id="preview-exemplar-label">Ref: None</span>
+              </span>
+
               <!-- Learn Page Button (saves page to Series Memory) -->
               <button class="btn btn-sm" id="btn-learn-page-memory" onclick="learnCurrentPreviewPage()"
                       style="background:linear-gradient(135deg,#7e22ce,#9333ea);border-color:#a855f7;color:#fff;"
@@ -1332,6 +1337,50 @@
             <i class="ri-check-line"></i> Apply to Page
           </button>
         </div>
+      </div>
+    </div>
+  <!-- Series Exemplars Gallery Modal -->
+  <div class="modal-overlay hidden" id="exemplar-gallery-modal-overlay" onclick="handleExemplarGalleryOverlayClick(event)">
+    <div class="folder-import-dialog" style="max-width: 680px; width: 95%;" role="dialog" aria-modal="true" aria-labelledby="exemplar-gallery-title">
+      <div class="folder-import-header">
+        <div class="folder-import-header-left">
+          <div class="folder-import-icon" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa;">
+            <i class="ri-gallery-line"></i>
+          </div>
+          <div>
+            <h3 class="folder-import-title" id="exemplar-gallery-title">Series Color Exemplars</h3>
+            <p class="folder-import-subtitle" id="exemplar-gallery-subtitle">Learned reference pages for color harmonization &amp; character consistency</p>
+          </div>
+        </div>
+        <button class="btn-icon history-close-btn" onclick="closeExemplarGalleryModal()" title="Close (Esc)">
+          <i class="ri-close-line"></i>
+        </button>
+      </div>
+
+      <div class="folder-import-body" style="padding: 1.25rem; max-height: 480px; overflow-y: auto;">
+        <div id="exemplar-gallery-loading" style="display: none; text-align: center; padding: 2rem 0;">
+          <div class="spinner" style="margin: 0 auto 0.75rem; width: 26px; height: 26px; border: 2px solid rgba(255,255,255,0.15); border-top-color: #60a5fa; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+          <span style="font-size: 0.85rem; color: var(--text-secondary);">Loading series exemplars...</span>
+        </div>
+
+        <div id="exemplar-gallery-empty" style="display: none; text-align: center; padding: 2.5rem 1rem;">
+          <i class="ri-image-line" style="font-size: 2.5rem; color: var(--text-muted); opacity: 0.6; display: block; margin-bottom: 0.75rem;"></i>
+          <p style="font-size: 0.95rem; font-weight: 500; margin-bottom: 0.25rem;">No Exemplars Recorded Yet</p>
+          <p style="font-size: 0.8rem; color: var(--text-secondary); max-width: 400px; margin: 0 auto;">
+            Pages learned or approved will appear here as visual few-shot exemplars to harmonize coloring across the series.
+          </p>
+        </div>
+
+        <div id="exemplar-gallery-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem;">
+          <!-- Injected dynamically by app.js -->
+        </div>
+      </div>
+
+      <div class="folder-import-footer" style="display: flex; justify-content: space-between; align-items: center; padding: 0.85rem 1.25rem; border-top: 1px solid var(--bg-card-border);">
+        <span style="font-size: 0.75rem; color: var(--text-muted);" id="exemplar-gallery-footer-info">
+          <i class="ri-pushpin-2-line"></i> Pinned exemplars receive priority ranking during colorization.
+        </span>
+        <button class="btn btn-secondary btn-sm" onclick="closeExemplarGalleryModal()">Close</button>
       </div>
     </div>
   </div>

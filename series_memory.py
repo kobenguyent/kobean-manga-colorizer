@@ -198,6 +198,7 @@ class SeriesMemoryBank:
         saturation: Optional[float] = None,
         contrast: Optional[float] = None,
         line_preserve: Optional[float] = None,
+        pinned: bool = False,
     ) -> SeriesMemory:
         """
         Records user confirmation / feedback for a page, updating character traits
@@ -252,36 +253,212 @@ class SeriesMemoryBank:
                     source_sessions=[session_id],
                 )
 
-        # Store exemplar page (keep up to 8 best exemplar pages per series)
+        # Store exemplar page with character metadata, style, and luminance
         if approved_image_path and os.path.exists(approved_image_path):
-            exists = any(
-                ex["session_id"] == session_id and ex["page_index"] == page_index
-                for ex in mem.exemplar_pages
-            )
-            if not exists:
-                mem.exemplar_pages.append({
-                    "session_id": session_id,
-                    "page_index": page_index,
-                    "image_path": str(approved_image_path),
-                    "added_at": time.time(),
-                })
-                if len(mem.exemplar_pages) > 8:
-                    mem.exemplar_pages = mem.exemplar_pages[-8:]
+            exists_idx = None
+            for i, ex in enumerate(mem.exemplar_pages):
+                if ex.get("session_id") == session_id and ex.get("page_index") == page_index:
+                    exists_idx = i
+                    break
+
+            char_names = [c.get("name", "").strip() for c in characters if isinstance(c, dict) and c.get("name")]
+            char_names = [n for n in char_names if n]
+
+            # Compute lightweight luminance summary
+            mean_l = 128.0
+            try:
+                from PIL import Image as PILImage
+                with PILImage.open(approved_image_path) as im:
+                    thumb = im.convert("L").resize((32, 32))
+                    import numpy as np
+                    mean_l = float(np.array(thumb).mean())
+            except Exception:
+                pass
+
+            # Persist exemplar image to series exemplars folder
+            exemplar_dir = self.storage_path.parent / "series_exemplars" / series_key
+            exemplar_dir.mkdir(parents=True, exist_ok=True)
+            dst_name = f"p{page_index}_{Path(approved_image_path).name}"
+            dst_path = exemplar_dir / dst_name
+            try:
+                import shutil
+                if Path(approved_image_path).resolve() != dst_path.resolve():
+                    shutil.copy2(approved_image_path, dst_path)
+                persisted_path = str(dst_path)
+            except Exception:
+                persisted_path = str(approved_image_path)
+
+            ex_data = {
+                "session_id": session_id,
+                "page_index": page_index,
+                "image_path": persisted_path,
+                "characters": char_names,
+                "character_names": char_names,
+                "style": style or mem.preferred_style or "manga",
+                "added_at": time.time(),
+                "pinned": bool(pinned),
+                "mean_l": round(mean_l, 1),
+            }
+
+            if exists_idx is not None:
+                # Update existing entry while preserving pinned state if not explicitly pinned
+                ex_data["pinned"] = pinned or mem.exemplar_pages[exists_idx].get("pinned", False)
+                mem.exemplar_pages[exists_idx] = ex_data
+            else:
+                mem.exemplar_pages.append(ex_data)
+                if len(mem.exemplar_pages) > 12:
+                    pinned_items = [ex for ex in mem.exemplar_pages if ex.get("pinned")]
+                    unpinned_items = [ex for ex in mem.exemplar_pages if not ex.get("pinned")]
+                    keep_unpinned = unpinned_items[-(12 - len(pinned_items)):]
+                    mem.exemplar_pages = pinned_items + keep_unpinned
 
         self.save()
         return mem
 
-    def get_exemplar_image(self, series_key: str, exclude_path: Optional[str] = None) -> Optional[str]:
-        """Returns the most recent valid exemplar colorized image for visual few-shot prompting."""
+    def find_best_exemplars(
+        self,
+        series_key: str,
+        target_image_path: Optional[str] = None,
+        active_character_names: Optional[list[str]] = None,
+        exclude_path: Optional[str] = None,
+        max_count: int = 2,
+    ) -> list[dict]:
+        """
+        Ranks and returns the top matching exemplar pages based on:
+        1. Pinned status (always prioritized).
+        2. Character overlap (pages with characters appearing on the target page score highest).
+        3. Lighting / luminance similarity (if target image is provided).
+        4. Recency.
+        """
         mem = self.get_memory(series_key)
         if not mem or not mem.exemplar_pages:
-            return None
+            return []
 
-        for ex in reversed(mem.exemplar_pages):
+        # Calculate target luminance if target image exists
+        target_l = 128.0
+        if target_image_path and os.path.exists(target_image_path):
+            try:
+                from PIL import Image as PILImage
+                with PILImage.open(target_image_path) as im:
+                    thumb = im.convert("L").resize((32, 32))
+                    import numpy as np
+                    target_l = float(np.array(thumb).mean())
+            except Exception:
+                pass
+
+        target_chars_lower = set()
+        if active_character_names:
+            target_chars_lower = {n.lower().strip() for n in active_character_names if n}
+
+        scored = []
+        now = time.time()
+        for ex in mem.exemplar_pages:
             p = ex.get("image_path")
-            if p and p != exclude_path and os.path.exists(p):
-                return p
+            if not p or p == exclude_path or not os.path.exists(p):
+                continue
+
+            score = 0.0
+            # 1. Pinned
+            if ex.get("pinned"):
+                score += 50.0
+
+            # 2. Character overlap
+            ex_chars = [c.lower().strip() for c in ex.get("characters", [])]
+            if target_chars_lower:
+                overlap = sum(1 for c in ex_chars if c in target_chars_lower)
+                score += overlap * 20.0
+            elif ex_chars:
+                score += len(ex_chars) * 2.0
+
+            # 3. Luminance closeness (max +5.0)
+            ex_l = ex.get("mean_l", 128.0)
+            l_diff = abs(target_l - ex_l)
+            score += max(0.0, 5.0 - (l_diff / 25.0))
+
+            # 4. Recency (max +2.0)
+            age_days = (now - ex.get("added_at", now)) / 86400.0
+            score += max(0.0, 2.0 - min(2.0, age_days * 0.1))
+
+            scored.append((score, ex))
+
+        # Sort descending by score
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in scored[:max_count]]
+
+    def get_exemplar_image(
+        self,
+        series_key: str,
+        exclude_path: Optional[str] = None,
+        active_character_names: Optional[list[str]] = None,
+        target_image_path: Optional[str] = None,
+    ) -> Optional[str]:
+        """Returns the single best matching exemplar image path."""
+        best = self.find_best_exemplars(
+            series_key=series_key,
+            target_image_path=target_image_path,
+            active_character_names=active_character_names,
+            exclude_path=exclude_path,
+            max_count=1,
+        )
+        if best:
+            return best[0].get("image_path")
+        # Fallback to direct reverse scan if needed
+        mem = self.get_memory(series_key)
+        if mem and mem.exemplar_pages:
+            for ex in reversed(mem.exemplar_pages):
+                p = ex.get("image_path")
+                if p and p != exclude_path and os.path.exists(p):
+                    return p
         return None
+
+    def remove_exemplar(
+        self,
+        series_key: str,
+        page_index: int,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Removes an exemplar page from memory by series_key and page_index."""
+        mem = self.get_memory(series_key)
+        if not mem:
+            return False
+        before = len(mem.exemplar_pages)
+        removed_items = [
+            ex for ex in mem.exemplar_pages
+            if (ex.get("page_index") == page_index and (session_id is None or ex.get("session_id") == session_id))
+        ]
+        mem.exemplar_pages = [
+            ex for ex in mem.exemplar_pages
+            if not (ex.get("page_index") == page_index and (session_id is None or ex.get("session_id") == session_id))
+        ]
+        if len(mem.exemplar_pages) < before:
+            self.save()
+            for ex in removed_items:
+                img_p = ex.get("image_path")
+                if img_p and os.path.exists(img_p) and "series_exemplars" in str(img_p):
+                    try:
+                        os.remove(img_p)
+                    except Exception:
+                        pass
+            return True
+        return False
+
+    def pin_exemplar(
+        self,
+        series_key: str,
+        page_index: int,
+        pinned: bool = True,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Sets the pinned priority flag for a specific exemplar page."""
+        mem = self.get_memory(series_key)
+        if not mem:
+            return False
+        for ex in mem.exemplar_pages:
+            if ex.get("page_index") == page_index and (session_id is None or ex.get("session_id") == session_id):
+                ex["pinned"] = pinned
+                self.save()
+                return True
+        return False
 
     def reset_series_memory(self, series_key: str) -> bool:
         """Clears learned traits and exemplars for a series."""

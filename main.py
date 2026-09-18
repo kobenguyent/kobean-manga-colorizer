@@ -391,6 +391,13 @@ class LearnPageRequest(BaseModel):
     exemplar: bool = True
 
 
+class PinExemplarRequest(BaseModel):
+    series_key: str
+    page_index: int
+    pinned: bool = True
+
+
+
 # In-memory palette store: session_id -> CharacterPalette
 SESSION_PALETTES: dict[str, CharacterPalette] = {}
 
@@ -1427,7 +1434,19 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 s_fn = sess.get("filename") or sess.get("folder_name") or ""
                 s_pid = (palette.preset_id if palette else None) or sess.get("detected_preset")
                 s_key, s_title = derive_series_key(s_fn, s_pid)
-                exemplar_path = SERIES_BANK.get_exemplar_image(s_key, exclude_path=output_path)
+                active_char_names = [c.name for c in palette.characters] if palette else []
+                best_exs = SERIES_BANK.find_best_exemplars(
+                    s_key,
+                    target_image_path=orig_path,
+                    active_character_names=active_char_names,
+                    exclude_path=output_path,
+                    max_count=2,
+                )
+                exemplar_paths = [
+                    e["image_path"] for e in best_exs
+                    if e.get("image_path") and os.path.exists(e["image_path"])
+                ]
+                exemplar_path = exemplar_paths[0] if exemplar_paths else None
 
                 # Run CPU-bound colorization in a thread without blocking main asyncio loop
                 res = await asyncio.to_thread(
@@ -1447,6 +1466,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     denoise_sigma=getattr(req, "denoise_sigma", 25),
                     recognition_mode=getattr(req, "recognition_mode", "auto"),
                     exemplar_image_path=exemplar_path,
+                    exemplar_image_paths=exemplar_paths,
                 )
 
                 # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -1478,6 +1498,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     page_info["skipped_colored"] = True
                 if res.get("exemplar_used"):
                     page_info["exemplar_used"] = res["exemplar_used"]
+                if res.get("exemplars_used"):
+                    page_info["exemplars_used"] = res["exemplars_used"]
 
                 # Auto-seed initial series memory exemplar if this series has none yet
                 if res.get("status") not in ("skipped_colored", "failed") and os.path.exists(output_path):
@@ -1508,6 +1530,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                         "skipped_colored": bool(page_info.get("skipped_colored")),
                         "colorized_url": page_info["colorized_url"],
                         "engine": page_info["engine_used"],
+                        "exemplar_used": page_info.get("exemplar_used"),
+                        "exemplars_used": page_info.get("exemplars_used", []),
                         "processed_count": sess["processed_count"],
                         "total": sess["total_pages"],
                     },
@@ -1731,7 +1755,21 @@ async def preview_single_page(req: PreviewRequest):
         s_fn = sess.get("filename") or sess.get("folder_name") or ""
         s_pid = (palette.preset_id if palette else None) or sess.get("detected_preset")
         s_key, s_title = derive_series_key(s_fn, s_pid)
-        exemplar_path = SERIES_BANK.get_exemplar_image(s_key, exclude_path=output_path)
+        active_char_names = list(req.active_character_names) if getattr(req, "active_character_names", None) else (
+            [c.name for c in palette.characters] if palette else []
+        )
+        best_exs = SERIES_BANK.find_best_exemplars(
+            s_key,
+            target_image_path=orig_path,
+            active_character_names=active_char_names,
+            exclude_path=output_path,
+            max_count=2,
+        )
+        exemplar_paths = [
+            e["image_path"] for e in best_exs
+            if e.get("image_path") and os.path.exists(e["image_path"])
+        ]
+        exemplar_path = exemplar_paths[0] if exemplar_paths else None
 
         res = await asyncio.to_thread(
             colorizer_engine.colorize_page,
@@ -1751,6 +1789,7 @@ async def preview_single_page(req: PreviewRequest):
             recognition_mode=getattr(req, "recognition_mode", "auto"),
             skip_recognition=bool(getattr(req, "skip_recognition", False)),
             exemplar_image_path=exemplar_path,
+            exemplar_image_paths=exemplar_paths,
         )
 
         page_info["status"] = "colorized"
@@ -1760,6 +1799,8 @@ async def preview_single_page(req: PreviewRequest):
             page_info["skipped_colored"] = True
         if res.get("exemplar_used"):
             page_info["exemplar_used"] = res["exemplar_used"]
+        if res.get("exemplars_used"):
+            page_info["exemplars_used"] = res["exemplars_used"]
         if "recognized_characters" in res:
             page_info["recognized_characters"] = res["recognized_characters"]
 
@@ -1778,6 +1819,8 @@ async def preview_single_page(req: PreviewRequest):
                 "status": "colorized",
                 "colorized_url": page_info["colorized_url"],
                 "engine": page_info["engine_used"],
+                "exemplar_used": page_info.get("exemplar_used"),
+                "exemplars_used": page_info.get("exemplars_used", []),
                 "processed_count": sess["processed_count"],
                 "total": sess.get("total_pages", len(pages)),
             },
@@ -1792,6 +1835,7 @@ async def preview_single_page(req: PreviewRequest):
                 "page_info": page_info,
                 "recognized_characters": res.get("recognized_characters", []),
                 "exemplar_used": res.get("exemplar_used"),
+                "exemplars_used": res.get("exemplars_used", []),
                 "series_key": s_key,
                 "processed_count": sess["processed_count"],
                 "total_pages": sess.get("total_pages", len(pages)),
@@ -2105,6 +2149,108 @@ async def reset_series_memory_endpoint(series_key: str):
         "status": "ok",
         "series_key": series_key,
         "reset": success,
+    })
+
+
+@app.get("/api/series-memory/{session_id}/exemplars")
+async def get_series_exemplars_endpoint(session_id: str):
+    """Retrieves all visual few-shot exemplars stored in Series Memory for a session or series."""
+    sess = get_or_restore_session(session_id)
+    if sess:
+        pal = _get_palette(session_id)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        s_key, s_title = derive_series_key(fn, pid)
+    else:
+        # Check if session_id is directly a series_key
+        mem = SERIES_BANK.get_memory(session_id)
+        if mem:
+            s_key = session_id
+            s_title = mem.title or session_id
+        else:
+            raise HTTPException(status_code=404, detail="Session or series not found")
+
+    mem = SERIES_BANK.get_memory(s_key)
+    exemplars = []
+    if mem and mem.exemplar_pages:
+        for ex in mem.exemplar_pages:
+            img_p = ex.get("image_path")
+            fn_img = Path(img_p).name if img_p else ""
+            exemplars.append({
+                "page_index": ex.get("page_index"),
+                "session_id": ex.get("session_id"),
+                "character_names": ex.get("character_names", []),
+                "mean_l": ex.get("mean_l"),
+                "style": ex.get("style", "manga"),
+                "pinned": bool(ex.get("pinned", False)),
+                "created_at": ex.get("created_at"),
+                "image_url": f"/api/series-memory/{s_key}/exemplar-image/{fn_img}" if fn_img else None,
+                "exists": os.path.exists(img_p) if img_p else False,
+            })
+
+    return JSONResponse({
+        "status": "ok",
+        "session_id": session_id,
+        "series_key": s_key,
+        "title": s_title,
+        "exemplars": exemplars,
+    })
+
+
+@app.get("/api/series-memory/{series_key}/exemplar-image/{filename}")
+async def get_series_exemplar_image(series_key: str, filename: str):
+    """Serves a stored exemplar image for a given series."""
+    img_path = STORAGE_DIR / "series_exemplars" / series_key / filename
+    if not img_path.exists():
+        bank_path = SERIES_BANK.storage_path.parent / "series_exemplars" / series_key / filename
+        if bank_path.exists():
+            img_path = bank_path
+        else:
+            raise HTTPException(status_code=404, detail="Exemplar image not found")
+    return FileResponse(str(img_path))
+
+
+@app.delete("/api/series-memory/{series_key}/exemplar/{page_index}")
+async def delete_series_exemplar_endpoint(series_key: str, page_index: int, session_id: Optional[str] = None):
+    """Removes a page exemplar from Series Memory and deletes its stored image file."""
+    effective_key = series_key
+    sess = get_or_restore_session(series_key)
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    success = SERIES_BANK.remove_exemplar(effective_key, page_index, session_id=session_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Exemplar not found")
+    return JSONResponse({
+        "status": "ok",
+        "series_key": effective_key,
+        "page_index": page_index,
+        "removed": True,
+    })
+
+
+@app.post("/api/series-memory/pin-exemplar")
+async def pin_series_exemplar_endpoint(req: PinExemplarRequest):
+    """Pins or unpins a visual exemplar in Series Memory to prioritize it in rankings."""
+    effective_key = req.series_key
+    sess = get_or_restore_session(req.series_key)
+    if sess:
+        pal = _get_palette(req.series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    success = SERIES_BANK.pin_exemplar(effective_key, req.page_index, req.pinned)
+    if not success:
+        raise HTTPException(status_code=404, detail="Exemplar not found")
+    return JSONResponse({
+        "status": "ok",
+        "series_key": effective_key,
+        "page_index": req.page_index,
+        "pinned": req.pinned,
     })
 
 
