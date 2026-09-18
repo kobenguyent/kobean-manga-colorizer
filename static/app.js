@@ -709,6 +709,12 @@ function setupEventListeners() {
   // Window-level drag & drop support so dropping files anywhere on the page uploads them
   ["dragenter", "dragover"].forEach(eventName => {
     window.addEventListener(eventName, (e) => {
+      const folderModal = document.getElementById("folder-import-modal-overlay");
+      const browserModal = document.getElementById("folder-browser-modal-overlay");
+      const confirmModal = document.getElementById("custom-confirm-modal-overlay");
+      if ((folderModal && !folderModal.classList.contains("hidden")) ||
+          (browserModal && !browserModal.classList.contains("hidden")) ||
+          (confirmModal && !confirmModal.classList.contains("hidden"))) return;
       e.preventDefault();
       const dropzone = document.getElementById("dropzone");
       if (dropzone) dropzone.classList.add("dragover");
@@ -725,6 +731,15 @@ function setupEventListeners() {
   });
 
   window.addEventListener("drop", (e) => {
+    const folderModal = document.getElementById("folder-import-modal-overlay");
+    const browserModal = document.getElementById("folder-browser-modal-overlay");
+    const confirmModal = document.getElementById("custom-confirm-modal-overlay");
+    if ((folderModal && !folderModal.classList.contains("hidden")) ||
+        (browserModal && !browserModal.classList.contains("hidden")) ||
+        (confirmModal && !confirmModal.classList.contains("hidden"))) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     const dropzone = document.getElementById("dropzone");
     if (dropzone) dropzone.classList.remove("dragover");
@@ -733,9 +748,75 @@ function setupEventListeners() {
     }
   });
 
+  // Folder Import Modal Dropzone & Path listeners
+  const folderDropzone = document.getElementById("folder-import-dropzone");
+  if (folderDropzone) {
+    ["dragenter", "dragover"].forEach(eventName => {
+      folderDropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        folderDropzone.classList.add("dragover");
+      });
+    });
+
+    ["dragleave", "dragend"].forEach(eventName => {
+      folderDropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        folderDropzone.classList.remove("dragover");
+      });
+    });
+
+    folderDropzone.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      folderDropzone.classList.remove("dragover");
+      await handleFolderDropzoneDrop(e);
+    });
+  }
+
+  const folderPathInput = document.getElementById("folder-import-path");
+  if (folderPathInput) {
+    folderPathInput.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    folderPathInput.addEventListener("drop", (e) => {
+      e.stopPropagation();
+      const text = e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/uri-list");
+      if (text) {
+        e.preventDefault();
+        folderPathInput.value = text.trim();
+        onFolderInputChanged(folderPathInput.value);
+      } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        const f = e.dataTransfer.files[0];
+        if (f.path) {
+          e.preventDefault();
+          folderPathInput.value = f.path;
+          onFolderInputChanged(folderPathInput.value);
+        }
+      }
+    });
+  }
+
   // Keyboard navigation for split comparator & modal dismissal (Escape, ArrowLeft, ArrowRight)
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      const confirmOverlay = document.getElementById("custom-confirm-modal-overlay");
+      if (confirmOverlay && !confirmOverlay.classList.contains("hidden")) {
+        resolveCustomConfirm(false);
+        return;
+      }
+      const browserOverlay = document.getElementById("folder-browser-modal-overlay");
+      if (browserOverlay && !browserOverlay.classList.contains("hidden")) {
+        closeFolderBrowserModal();
+        return;
+      }
+      const folderOverlay = document.getElementById("folder-import-modal-overlay");
+      if (folderOverlay && !folderOverlay.classList.contains("hidden")) {
+        closeFolderImportModal();
+        return;
+      }
       const histOverlay = document.getElementById("history-modal-overlay");
       if (histOverlay && !histOverlay.classList.contains("hidden")) {
         closeHistoryModal();
@@ -1265,19 +1346,506 @@ function cancelBatchImport() {
   showToast("Cancelling import...", "info");
 }
 
-// Local Folder Import Modal Controls
+// Custom Confirmation Modal
+let confirmModalResolver = null;
+
+function showConfirmModal({ title = "Confirm Action", message = "Are you sure?", confirmText = "Confirm", isDanger = true } = {}) {
+  return new Promise((resolve) => {
+    confirmModalResolver = resolve;
+    const overlay = document.getElementById("custom-confirm-modal-overlay");
+    const titleEl = document.getElementById("confirm-modal-title");
+    const msgEl = document.getElementById("confirm-modal-message");
+    const okBtn = document.getElementById("btn-confirm-modal-ok");
+    const iconEl = document.getElementById("confirm-modal-icon");
+
+    if (titleEl) titleEl.innerText = title;
+    if (msgEl) msgEl.innerText = message;
+    if (okBtn) {
+      okBtn.innerText = confirmText;
+      okBtn.className = isDanger ? "btn btn-danger btn-sm" : "btn btn-primary btn-sm";
+    }
+    if (iconEl) {
+      iconEl.style.background = isDanger ? "rgba(239, 68, 68, 0.15)" : "rgba(6, 182, 212, 0.15)";
+      iconEl.style.color = isDanger ? "#ef4444" : "var(--accent-cyan)";
+      iconEl.innerHTML = isDanger ? '<i class="ri-error-warning-line"></i>' : '<i class="ri-information-line"></i>';
+    }
+    if (overlay) overlay.classList.remove("hidden");
+  });
+}
+
+function resolveCustomConfirm(result) {
+  const overlay = document.getElementById("custom-confirm-modal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+  if (confirmModalResolver) {
+    confirmModalResolver(result);
+    confirmModalResolver = null;
+  }
+}
+
+function handleCustomConfirmOverlayClick(event) {
+  if (event.target.id === "custom-confirm-modal-overlay") {
+    resolveCustomConfirm(false);
+  }
+}
+
+// Custom Local Folder Browser Modal Controls & State
+let browserCurrentPath = "";
+let browserParentPath = null;
+let browserSelectedPath = "";
+let browserSubdirectories = [];
+
+async function openFolderBrowserModal(startPath = null) {
+  const overlay = document.getElementById("folder-browser-modal-overlay");
+  if (overlay) overlay.classList.remove("hidden");
+
+  let initial = startPath;
+  if (!initial) {
+    const pathInput = document.getElementById("folder-import-path");
+    if (pathInput && pathInput.value && !pathInput.value.startsWith("[Browser Selected]")) {
+      initial = pathInput.value.trim();
+    }
+  }
+
+  await loadBrowserDirectory(initial);
+}
+
+function closeFolderBrowserModal() {
+  const overlay = document.getElementById("folder-browser-modal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+}
+
+function handleFolderBrowserOverlayClick(event) {
+  if (event.target.id === "folder-browser-modal-overlay") {
+    closeFolderBrowserModal();
+  }
+}
+
+async function loadBrowserDirectory(dirPath = null) {
+  const listEl = document.getElementById("folder-browser-list");
+  if (listEl) {
+    listEl.innerHTML = '<div class="folder-browser-empty"><i class="ri-loader-4-line spin" style="font-size: 1.5rem; color: var(--accent-cyan);"></i><span>Loading directories...</span></div>';
+  }
+
+  try {
+    const url = dirPath ? `/api/import/browse-directory?path=${encodeURIComponent(dirPath)}` : "/api/import/browse-directory";
+    const res = await fetch(url);
+    if (!res.ok) {
+      if (listEl) {
+        listEl.innerHTML = '<div class="folder-browser-empty"><i class="ri-error-warning-line" style="font-size: 1.5rem; color: #ef4444;"></i><span>Failed to load directory</span></div>';
+      }
+      return;
+    }
+
+    const data = await res.json();
+    browserCurrentPath = data.current_path;
+    browserParentPath = data.parent_path;
+    browserSubdirectories = data.directories || [];
+    browserSelectedPath = data.current_path;
+
+    updateBrowserSelectedDisplay(browserCurrentPath, data.ebooks_here_count);
+    renderBrowserQuickRoots(data.quick_roots || []);
+    renderBrowserBreadcrumbs(data.breadcrumbs || []);
+    renderBrowserSubdirectories(browserSubdirectories);
+    renderBrowserInfoBar(data);
+
+    const filterInput = document.getElementById("folder-browser-filter-input");
+    if (filterInput) filterInput.value = "";
+
+    const upBtn = document.getElementById("btn-browser-up");
+    if (upBtn) upBtn.disabled = !browserParentPath || browserParentPath === browserCurrentPath;
+  } catch (err) {
+    if (listEl) {
+      listEl.innerHTML = `<div class="folder-browser-empty"><i class="ri-error-warning-line" style="font-size: 1.5rem; color: #ef4444;"></i><span>${escapeHtml(err.message)}</span></div>`;
+    }
+  }
+}
+
+function renderBrowserQuickRoots(roots) {
+  const container = document.getElementById("folder-browser-quick-roots");
+  if (!container) return;
+  container.innerHTML = "";
+
+  roots.forEach(r => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `browser-root-chip ${browserCurrentPath === r.path ? "active" : ""}`;
+    chip.innerHTML = `<i class="${r.icon || 'ri-folder-line'}"></i> ${escapeHtml(r.name)}`;
+    chip.onclick = () => loadBrowserDirectory(r.path);
+    container.appendChild(chip);
+  });
+}
+
+function renderBrowserBreadcrumbs(breadcrumbs) {
+  const container = document.getElementById("folder-browser-breadcrumbs");
+  if (!container) return;
+  container.innerHTML = "";
+
+  breadcrumbs.forEach((crumb, idx) => {
+    if (idx > 0) {
+      const sep = document.createElement("span");
+      sep.className = "breadcrumb-separator";
+      sep.innerText = "/";
+      container.appendChild(sep);
+    }
+    const item = document.createElement("span");
+    const isLast = idx === breadcrumbs.length - 1;
+    item.className = `breadcrumb-item ${isLast ? "active" : ""}`;
+    item.innerText = crumb.name;
+    if (!isLast) {
+      item.onclick = () => loadBrowserDirectory(crumb.path);
+    }
+    container.appendChild(item);
+  });
+
+  container.scrollLeft = container.scrollWidth;
+}
+
+function renderBrowserSubdirectories(dirs) {
+  const listEl = document.getElementById("folder-browser-list");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  if (!dirs || dirs.length === 0) {
+    listEl.innerHTML = '<div class="folder-browser-empty"><i class="ri-folder-info-line" style="font-size: 1.5rem;"></i><span>No subfolders in this directory</span></div>';
+    return;
+  }
+
+  dirs.forEach(d => {
+    const item = document.createElement("div");
+    item.className = `folder-browser-item ${browserSelectedPath === d.path ? "selected" : ""}`;
+    item.dataset.path = d.path;
+
+    const badgeHtml = d.ebook_count > 0 ? `<span class="folder-ebook-badge">${d.ebook_count} ebook${d.ebook_count > 1 ? 's' : ''}</span>` : '';
+
+    item.innerHTML = `
+      <div class="folder-browser-item-icon">
+        <i class="ri-folder-fill"></i>
+      </div>
+      <div class="folder-browser-item-details">
+        <div class="folder-browser-item-name" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</div>
+        <div class="folder-browser-item-meta">
+          ${badgeHtml || '<span style="color: var(--text-muted);">folder</span>'}
+        </div>
+      </div>
+      <button type="button" class="btn-icon" style="padding: 2px; color: var(--text-muted);" title="Open folder">
+        <i class="ri-arrow-right-s-line"></i>
+      </button>
+    `;
+
+    item.onclick = (e) => {
+      if (e.target.closest(".btn-icon")) {
+        loadBrowserDirectory(d.path);
+        return;
+      }
+      selectBrowserItem(d.path, d.ebook_count, item);
+    };
+
+    item.ondblclick = () => {
+      loadBrowserDirectory(d.path);
+    };
+
+    listEl.appendChild(item);
+  });
+}
+
+function selectBrowserItem(path, ebookCount, element) {
+  browserSelectedPath = path;
+  document.querySelectorAll(".folder-browser-item").forEach(el => el.classList.remove("selected"));
+  if (element) element.classList.add("selected");
+  updateBrowserSelectedDisplay(path, ebookCount);
+}
+
+function updateBrowserSelectedDisplay(path, ebookCount = null) {
+  const display = document.getElementById("folder-browser-selected-path");
+  if (display) {
+    const countText = typeof ebookCount === "number" && ebookCount > 0 ? ` (${ebookCount} ebook files)` : "";
+    display.innerText = `${path}${countText}`;
+  }
+}
+
+function renderBrowserInfoBar(data) {
+  const bar = document.getElementById("folder-browser-info-bar");
+  if (!bar) return;
+  const count = data.ebooks_here_count || 0;
+  if (count > 0) {
+    const sample = data.sample_ebooks && data.sample_ebooks.length > 0 ? ` (e.g. ${data.sample_ebooks.slice(0, 3).join(", ")})` : "";
+    bar.innerHTML = `<i class="ri-checkbox-circle-fill" style="color: var(--accent-cyan);"></i> <span>Current directory contains <strong>${count}</strong> ebook file${count > 1 ? 's' : ''}${sample}.</span>`;
+  } else {
+    bar.innerHTML = '<i class="ri-information-line" style="color: var(--text-muted);"></i> <span>Navigate into a manga folder or choose one above.</span>';
+  }
+}
+
+function filterBrowserFolders(query) {
+  const q = (query || "").toLowerCase().trim();
+  const items = document.querySelectorAll(".folder-browser-item");
+  items.forEach(item => {
+    const nameEl = item.querySelector(".folder-browser-item-name");
+    const name = nameEl ? nameEl.innerText.toLowerCase() : "";
+    if (!q || name.includes(q)) {
+      item.style.display = "";
+    } else {
+      item.style.display = "none";
+    }
+  });
+}
+
+function navigateBrowserUp() {
+  if (browserParentPath && browserParentPath !== browserCurrentPath) {
+    loadBrowserDirectory(browserParentPath);
+  }
+}
+
+function confirmFolderBrowserSelection() {
+  const selectedPath = browserSelectedPath || browserCurrentPath;
+  if (!selectedPath) return;
+
+  const pathInput = document.getElementById("folder-import-path");
+  if (pathInput) {
+    pathInput.value = selectedPath;
+    validateAndDisplayFolderPath(selectedPath);
+  }
+
+  closeFolderBrowserModal();
+}
+
+// Local Folder Import Modal Controls & State
+let chosenFolderFiles = [];
+let folderValidationTimeout = null;
+
+function triggerFolderPicker() {
+  openFolderBrowserModal();
+}
+
+function handleFolderPickerSelection(event) {
+  const files = event.target.files ? Array.from(event.target.files) : [];
+  processChosenFiles(files);
+}
+
+function processChosenFiles(files) {
+  if (!files || files.length === 0) return;
+
+  const ALLOWED_EXTS = [".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"];
+  const validFiles = files.filter(f => {
+    const ext = "." + f.name.split(".").pop().toLowerCase();
+    return ALLOWED_EXTS.includes(ext);
+  });
+
+  chosenFolderFiles = validFiles;
+
+  let folderName = "";
+  let detectedPath = "";
+
+  if (files[0]) {
+    if (files[0].path) {
+      const p = files[0].path;
+      const rel = files[0].webkitRelativePath || files[0].name;
+      if (p.endsWith(rel)) {
+        const rootDirName = rel.split("/")[0];
+        detectedPath = p.substring(0, p.length - rel.length) + rootDirName;
+      } else {
+        detectedPath = p.substring(0, p.lastIndexOf("/"));
+      }
+    }
+
+    if (files[0].webkitRelativePath && files[0].webkitRelativePath.includes("/")) {
+      folderName = files[0].webkitRelativePath.split("/")[0];
+    } else {
+      folderName = files[0].name ? files[0].name.split("/")[0] : "Selected Folder";
+    }
+  }
+
+  const dropLabel = document.getElementById("folder-dropzone-label");
+  const dropSub = document.getElementById("folder-dropzone-sub");
+  const pathInput = document.getElementById("folder-import-path");
+
+  if (dropLabel) {
+    dropLabel.innerHTML = `<i class="ri-folder-check-line" style="color: var(--accent-cyan); margin-right: 6px;"></i> Selected: <strong>${escapeHtml(folderName || "Folder")}</strong> (${validFiles.length} ebook files)`;
+  }
+  if (dropSub) {
+    dropSub.innerText = `${validFiles.length} file(s) ready for import. Click "Start Import" below.`;
+  }
+
+  if (detectedPath) {
+    if (pathInput) {
+      pathInput.value = detectedPath;
+      validateAndDisplayFolderPath(detectedPath);
+    }
+  } else {
+    if (pathInput && !pathInput.value.trim()) {
+      pathInput.value = folderName ? folderName : "";
+    }
+    const valDiv = document.getElementById("folder-path-validation");
+    if (valDiv) {
+      valDiv.innerHTML = `<span class="folder-validation-success"><i class="ri-checkbox-circle-fill"></i> Selected folder ready (${validFiles.length} ebook file(s) queued for import)</span>`;
+    }
+  }
+}
+
+async function handleFolderDropzoneDrop(e) {
+  const text = e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/uri-list");
+  if (text && (text.startsWith("/") || text.startsWith("file://") || text.startsWith("~") || text.startsWith('"'))) {
+    const pathInput = document.getElementById("folder-import-path");
+    if (pathInput) {
+      pathInput.value = text.trim();
+      validateAndDisplayFolderPath(text.trim());
+    }
+  }
+
+  const files = await scanFilesFromDataTransfer(e.dataTransfer);
+  if (files && files.length > 0) {
+    processChosenFiles(files);
+  }
+}
+
+async function scanFilesFromDataTransfer(dataTransfer) {
+  const files = [];
+  if (dataTransfer.items && dataTransfer.items.length > 0) {
+    const entries = [];
+    for (let i = 0; i < dataTransfer.items.length; i++) {
+      const item = dataTransfer.items[i];
+      if (item.webkitGetAsEntry) {
+        const entry = item.webkitGetAsEntry();
+        if (entry) entries.push(entry);
+      }
+    }
+
+    if (entries.length > 0) {
+      async function readAllDirEntries(dirReader) {
+        let allEntries = [];
+        let batch;
+        do {
+          batch = await new Promise((resolve) => {
+            dirReader.readEntries(resolve, () => resolve([]));
+          });
+          if (batch && batch.length > 0) {
+            allEntries = allEntries.concat(batch);
+          }
+        } while (batch && batch.length > 0);
+        return allEntries;
+      }
+
+      async function traverse(entry) {
+        if (!entry) return;
+        if (entry.isFile) {
+          try {
+            const file = await new Promise((res, rej) => entry.file(res, rej));
+            files.push(file);
+          } catch (err) {
+            console.warn("Could not read file entry:", err);
+          }
+        } else if (entry.isDirectory) {
+          try {
+            const reader = entry.createReader();
+            const children = await readAllDirEntries(reader);
+            for (const child of children) {
+              await traverse(child);
+            }
+          } catch (err) {
+            console.warn("Could not read directory entry:", err);
+          }
+        }
+      }
+
+      for (const entry of entries) {
+        await traverse(entry);
+      }
+      if (files.length > 0) {
+        return files;
+      }
+    }
+  }
+
+  return Array.from(dataTransfer.files || []);
+}
+
+function setFolderPath(path) {
+  const pathInput = document.getElementById("folder-import-path");
+  if (pathInput) {
+    pathInput.value = path;
+    validateAndDisplayFolderPath(path);
+    pathInput.focus();
+  }
+}
+
+function onFolderInputChanged(val) {
+  if (folderValidationTimeout) clearTimeout(folderValidationTimeout);
+  folderValidationTimeout = setTimeout(() => {
+    validateAndDisplayFolderPath(val);
+  }, 300);
+}
+
+async function validateAndDisplayFolderPath(rawVal) {
+  const statusEl = document.getElementById("folder-path-validation");
+  if (!statusEl) return;
+  const pathVal = (rawVal || "").trim();
+  if (!pathVal) {
+    statusEl.innerHTML = "";
+    return;
+  }
+
+  statusEl.innerHTML = '<span style="color: var(--text-muted);"><i class="ri-loader-4-line spin"></i> Checking path...</span>';
+
+  try {
+    const res = await fetch(`/api/import/validate-directory?path=${encodeURIComponent(pathVal)}`);
+    if (!res.ok) {
+      statusEl.innerHTML = '<span class="folder-validation-error"><i class="ri-close-circle-line"></i> Validation request failed</span>';
+      return;
+    }
+    const data = await res.json();
+    if (data.valid) {
+      const count = data.total_files || 0;
+      const fileText = count === 1 ? "1 ebook file" : `${count} ebook files`;
+      statusEl.innerHTML = `<span class="folder-validation-success"><i class="ri-checkbox-circle-fill"></i> Valid folder: <code>${escapeHtml(data.resolved_path)}</code> (${fileText} found)</span>`;
+      const dropLabel = document.getElementById("folder-dropzone-label");
+      if (dropLabel && (!chosenFolderFiles || chosenFolderFiles.length === 0)) {
+        dropLabel.innerHTML = `<i class="ri-folder-check-line" style="color: var(--accent-cyan); margin-right: 6px;"></i> ${escapeHtml(data.name)} (${count} files)`;
+      }
+    } else {
+      if (chosenFolderFiles && chosenFolderFiles.length > 0) {
+        statusEl.innerHTML = `<span class="folder-validation-success"><i class="ri-checkbox-circle-fill"></i> Ready to import ${chosenFolderFiles.length} file(s) from browser selection</span>`;
+      } else {
+        statusEl.innerHTML = `<span class="folder-validation-error"><i class="ri-error-warning-line"></i> ${escapeHtml(data.error || "Directory not found on host")}</span>`;
+      }
+    }
+  } catch (err) {
+    if (chosenFolderFiles && chosenFolderFiles.length > 0) {
+      statusEl.innerHTML = `<span class="folder-validation-success"><i class="ri-checkbox-circle-fill"></i> Ready to import ${chosenFolderFiles.length} file(s) from browser selection</span>`;
+    } else {
+      statusEl.innerHTML = `<span class="folder-validation-error"><i class="ri-error-warning-line"></i> Check failed: ${escapeHtml(err.message)}</span>`;
+    }
+  }
+}
+
 function openFolderImportModal() {
+  chosenFolderFiles = [];
   const overlay = document.getElementById("folder-import-modal-overlay");
   const progressArea = document.getElementById("folder-import-progress-area");
   const runBtn = document.getElementById("btn-run-folder-import");
+  const dropLabel = document.getElementById("folder-dropzone-label");
+  const dropSub = document.getElementById("folder-dropzone-sub");
+  const valDiv = document.getElementById("folder-path-validation");
+  const pathInput = document.getElementById("folder-import-path");
+
   if (progressArea) progressArea.classList.add("hidden");
   if (runBtn) {
     runBtn.disabled = false;
     runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
   }
+  if (dropLabel) {
+    dropLabel.innerHTML = 'Click to Choose Folder or Drag & Drop Folder Here';
+  }
+  if (dropSub) {
+    dropSub.innerText = 'Choose any folder from your machine with .cbz, .epub, .pdf, or .zip files';
+  }
+  if (valDiv) valDiv.innerHTML = "";
+
   if (overlay) overlay.classList.remove("hidden");
-  const pathInput = document.getElementById("folder-import-path");
-  if (pathInput) pathInput.focus();
+  if (pathInput) {
+    pathInput.focus();
+    if (pathInput.value.trim()) {
+      validateAndDisplayFolderPath(pathInput.value);
+    }
+  }
 }
 
 function closeFolderImportModal() {
@@ -1302,15 +1870,20 @@ async function startFolderImport() {
   const progressArea = document.getElementById("folder-import-progress-area");
   const runBtn = document.getElementById("btn-run-folder-import");
 
-  const dirPath = pathInput ? pathInput.value.trim() : "";
-  if (!dirPath) {
-    showToast("Please enter a valid directory path.", "error");
+  const rawDirPath = pathInput ? pathInput.value.trim() : "";
+  const recursive = recursiveCb ? recursiveCb.checked : true;
+  const maxFiles = maxInput ? parseInt(maxInput.value, 10) || 5000 : 5000;
+
+  if (!rawDirPath) {
+    if (chosenFolderFiles && chosenFolderFiles.length > 0) {
+      closeFolderImportModal();
+      await handleBulkChunkedUpload(chosenFolderFiles);
+      return;
+    }
+    showToast("Please enter a valid directory path or choose a folder.", "error");
     if (pathInput) pathInput.focus();
     return;
   }
-
-  const recursive = recursiveCb ? recursiveCb.checked : true;
-  const maxFiles = maxInput ? parseInt(maxInput.value, 10) || 5000 : 5000;
 
   if (runBtn) {
     runBtn.disabled = true;
@@ -1323,14 +1896,21 @@ async function startFolderImport() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        directory_path: dirPath,
+        directory_path: rawDirPath,
         recursive: recursive,
-        max_files: maxFiles
+        max_files: maxFiles,
+        batch_id: currentBatchId || undefined
       })
     });
 
     const data = await resp.json();
     if (!resp.ok) {
+      if (chosenFolderFiles && chosenFolderFiles.length > 0) {
+        showToast("Path not found on host; importing chosen folder files via browser upload...", "info");
+        closeFolderImportModal();
+        await handleBulkChunkedUpload(chosenFolderFiles);
+        return;
+      }
       showToast(data.detail || "Folder import failed to start.", "error");
       if (runBtn) {
         runBtn.disabled = false;
@@ -1340,9 +1920,19 @@ async function startFolderImport() {
     }
 
     currentImportId = data.import_id;
+    if (data.batch_id) {
+      currentBatchId = data.batch_id;
+      sessionStorage.setItem("active_batch_id", currentBatchId);
+    }
     showToast(`Scanning directory: found ${data.total_scanned_files} ebook file(s)...`, "info");
     pollFolderImport(currentImportId);
   } catch (err) {
+    if (chosenFolderFiles && chosenFolderFiles.length > 0) {
+      showToast("Path not found on host; importing chosen folder files via browser upload...", "info");
+      closeFolderImportModal();
+      await handleBulkChunkedUpload(chosenFolderFiles);
+      return;
+    }
     showToast(`Failed to start folder import: ${err.message}`, "error");
     if (runBtn) {
       runBtn.disabled = false;
@@ -1618,9 +2208,13 @@ async function deleteSelectedQueueDocuments(event) {
   if (count === 0) return;
 
   const sessionIdsToDelete = Array.from(selectedQueueSessions);
-  if (!confirm(`Are you sure you want to delete ${count} selected document(s)? This will permanently delete the files and all pages.`)) {
-    return;
-  }
+  const confirmed = await showConfirmModal({
+    title: "Delete Selected Documents",
+    message: `Are you sure you want to delete ${count} selected document(s)? This will permanently delete the files and all pages.`,
+    confirmText: "Delete Documents",
+    isDanger: true
+  });
+  if (!confirmed) return;
 
   showToast(`Deleting ${count} document(s)...`, "info");
   await executeBulkDeletion(sessionIdsToDelete);
@@ -3535,9 +4129,13 @@ async function deleteDocument(event, sessionId) {
   const sessToDelete = activeSessions.find(s => s.session_id === sessionId) || (currentSession?.session_id === sessionId ? currentSession : null);
   const docName = sessToDelete ? sessToDelete.filename : "this document";
 
-  if (!confirm(`Are you sure you want to delete "${docName}"? This will permanently delete the file and all its pages.`)) {
-    return;
-  }
+  const confirmed = await showConfirmModal({
+    title: "Delete Document",
+    message: `Are you sure you want to delete "${docName}"? This will permanently delete the file and all its pages.`,
+    confirmText: "Delete",
+    isDanger: true
+  });
+  if (!confirmed) return;
 
   showToast(`Deleting "${docName}"...`, "info");
 
@@ -3633,9 +4231,13 @@ async function deletePage(event, pageIdx) {
   const page = currentSession.pages[pageIdx];
   const pageName = page.display_name || `Page ${pageIdx + 1}`;
 
-  if (!confirm(`Delete ${pageName}? This will remove it from the document.`)) {
-    return;
-  }
+  const confirmed = await showConfirmModal({
+    title: "Delete Page",
+    message: `Delete ${pageName}? This will remove it from the document.`,
+    confirmText: "Delete Page",
+    isDanger: true
+  });
+  if (!confirmed) return;
 
   try {
     const resp = await fetch(`/api/session/${currentSession.session_id}/page/${pageIdx}`, {
@@ -3687,9 +4289,13 @@ async function clearAllDocuments(event) {
   if (event) event.stopPropagation();
 
   const count = activeSessions.length || (currentSession ? 1 : 0);
-  if (!confirm(`Are you sure you want to delete all ${count} document(s) and files? This cannot be undone.`)) {
-    return;
-  }
+  const confirmed = await showConfirmModal({
+    title: "Delete All Documents",
+    message: `Are you sure you want to delete all ${count} document(s) and files? This cannot be undone.`,
+    confirmText: "Delete All",
+    isDanger: true
+  });
+  if (!confirmed) return;
 
   showToast("Deleting all documents...", "info");
 
@@ -4029,9 +4635,13 @@ async function bulkDeleteHistory() {
   if (count === 0) return;
 
   const sessionIdsToDelete = Array.from(selectedHistorySessions);
-  if (!confirm(`Are you sure you want to permanently delete ${count} selected document session(s)? All extracted pages and colorized files will be deleted.`)) {
-    return;
-  }
+  const confirmed = await showConfirmModal({
+    title: "Delete History Sessions",
+    message: `Are you sure you want to permanently delete ${count} selected document session(s)? All extracted pages and colorized files will be deleted.`,
+    confirmText: "Delete Sessions",
+    isDanger: true
+  });
+  if (!confirmed) return;
 
   showToast(`Deleting ${count} document session(s)...`, "info");
   await executeBulkDeletion(sessionIdsToDelete);
@@ -5369,5 +5979,21 @@ window.openFolderImportModal = openFolderImportModal;
 window.closeFolderImportModal = closeFolderImportModal;
 window.handleFolderImportOverlayClick = handleFolderImportOverlayClick;
 window.startFolderImport = startFolderImport;
+window.triggerFolderPicker = triggerFolderPicker;
+window.handleFolderPickerSelection = handleFolderPickerSelection;
+window.setFolderPath = setFolderPath;
+window.onFolderInputChanged = onFolderInputChanged;
+window.validateAndDisplayFolderPath = validateAndDisplayFolderPath;
 window.filterDocumentQueue = filterDocumentQueue;
 window.clearQueueFilter = clearQueueFilter;
+window.openFolderBrowserModal = openFolderBrowserModal;
+window.closeFolderBrowserModal = closeFolderBrowserModal;
+window.handleFolderBrowserOverlayClick = handleFolderBrowserOverlayClick;
+window.loadBrowserDirectory = loadBrowserDirectory;
+window.navigateBrowserUp = navigateBrowserUp;
+window.confirmFolderBrowserSelection = confirmFolderBrowserSelection;
+window.filterBrowserFolders = filterBrowserFolders;
+window.showConfirmModal = showConfirmModal;
+window.resolveCustomConfirm = resolveCustomConfirm;
+window.handleCustomConfirmOverlayClick = handleCustomConfirmOverlayClick;
+

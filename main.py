@@ -674,15 +674,49 @@ async def upload_files(
     )
 
 
+def normalize_directory_path(raw_path: str) -> Path:
+    """
+    Normalizes a user-supplied directory path from various browser/OS formats:
+    - Strips surrounding quotes ("..." or '...')
+    - Strips file:// or file: URL schemes
+    - Unquotes URL encoded characters (e.g. %20 -> space)
+    - Unescapes terminal escaped spaces (e.g. \  -> space)
+    - Expands user home directories (~)
+    - If a user selected or pointed to a file inside the folder, resolves to its parent folder.
+    """
+    import urllib.parse
+    p = raw_path.strip()
+    if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
+        p = p[1:-1].strip()
+    if p.startswith("file://"):
+        p = urllib.parse.unquote(urllib.parse.urlparse(p).path)
+    elif p.startswith("file:"):
+        p = urllib.parse.unquote(p[5:])
+    if "%" in p:
+        p = urllib.parse.unquote(p)
+    p = p.replace(r"\ ", " ")
+    resolved = Path(p).expanduser().resolve()
+    if resolved.exists() and resolved.is_file():
+        resolved = resolved.parent
+    return resolved
+
+
 @app.post("/api/import/directory")
 async def import_directory_endpoint(req: DirectoryImportRequest, background_tasks: BackgroundTasks):
     """
     Imports all supported ebook files (.epub, .pdf, .cbz, .zip, etc.) directly from a local directory path.
     Supports +1076 files, recursive scanning, natural sorting, and asynchronous background progress tracking.
     """
-    dir_path = Path(req.directory_path).expanduser().resolve()
+    try:
+        dir_path = normalize_directory_path(req.directory_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid directory path format: {req.directory_path} ({e})")
+
     if not dir_path.exists() or not dir_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Directory does not exist or is not a directory: {req.directory_path}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Directory does not exist or is not a directory: {req.directory_path} (resolved: {dir_path})",
+        )
 
     ALLOWED_EXTENSIONS = {".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"}
 
@@ -877,6 +911,198 @@ async def cancel_import_task(import_id: str):
     return JSONResponse({
         "status": "success",
         "message": f"Import task {import_id} cancelled"
+    })
+
+
+@app.get("/api/import/validate-directory")
+async def validate_directory_endpoint(path: str = Query(...)):
+    """
+    Validates a directory path, normalizes it, and counts supported ebook files.
+    Used for instant live UI feedback when choosing or pasting a folder path.
+    """
+    if not path or not path.strip():
+        return JSONResponse({"valid": False, "error": "Path is empty"})
+
+    try:
+        dir_path = normalize_directory_path(path)
+    except Exception as e:
+        return JSONResponse({"valid": False, "error": f"Invalid format: {e}"})
+
+    if not dir_path.exists():
+        return JSONResponse({
+            "valid": False,
+            "error": "Directory does not exist",
+            "resolved_path": str(dir_path),
+        })
+
+    if not dir_path.is_dir():
+        return JSONResponse({
+            "valid": False,
+            "error": "Path is not a directory",
+            "resolved_path": str(dir_path),
+        })
+
+    ALLOWED_EXTENSIONS = {".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"}
+    sample_files = []
+    file_count = 0
+
+    try:
+        for item in dir_path.iterdir():
+            if item.is_file() and not item.name.startswith(".") and item.suffix.lower() in ALLOWED_EXTENSIONS:
+                file_count += 1
+                if len(sample_files) < 5:
+                    sample_files.append(item.name)
+    except Exception as e:
+        return JSONResponse({"valid": False, "error": str(e), "resolved_path": str(dir_path)})
+
+    return JSONResponse({
+        "valid": True,
+        "resolved_path": str(dir_path),
+        "name": dir_path.name or str(dir_path),
+        "total_files": file_count,
+        "sample_files": sample_files,
+    })
+
+
+@app.get("/api/import/suggest-directories")
+async def suggest_directories_endpoint(query: Optional[str] = None):
+    """
+    Returns quick accessible folders and autocompletions for the folder path input.
+    """
+    home = Path.home()
+    quick_roots = [
+        {"name": "Desktop", "path": str(home / "Desktop")},
+        {"name": "Downloads", "path": str(home / "Downloads")},
+        {"name": "Documents", "path": str(home / "Documents")},
+        {"name": "Home (~)", "path": str(home)},
+        {"name": "Current Project", "path": str(BASE_DIR)},
+    ]
+    accessible = [r for r in quick_roots if Path(r["path"]).exists()]
+
+    if query and query.strip():
+        try:
+            q_path = normalize_directory_path(query)
+            parent = q_path if (q_path.exists() and q_path.is_dir()) else q_path.parent
+            if parent.exists() and parent.is_dir():
+                subdirs = []
+                q_name = q_path.name.lower() if not (q_path.exists() and q_path.is_dir()) else ""
+                for child in sorted(parent.iterdir()):
+                    if child.is_dir() and not child.name.startswith("."):
+                        if not q_name or q_name in child.name.lower():
+                            subdirs.append({"name": child.name, "path": str(child)})
+                            if len(subdirs) >= 10:
+                                break
+                return JSONResponse({"suggestions": subdirs, "quick_roots": accessible})
+        except Exception:
+            pass
+
+    return JSONResponse({"suggestions": [], "quick_roots": accessible})
+
+
+@app.get("/api/import/browse-directory")
+async def browse_directory_endpoint(path: Optional[str] = None):
+    """
+    Returns directory contents for browsing folders inside the custom web modal.
+    Includes breadcrumbs, parent path, quick navigation roots, and child folders with ebook file counts.
+    """
+    home = Path.home()
+
+    quick_roots = [
+        {"name": "Home (~)", "path": str(home), "icon": "ri-home-4-line"},
+        {"name": "Desktop", "path": str(home / "Desktop"), "icon": "ri-macbook-line"},
+        {"name": "Downloads", "path": str(home / "Downloads"), "icon": "ri-download-line"},
+        {"name": "Documents", "path": str(home / "Documents"), "icon": "ri-file-text-line"},
+        {"name": "Current Project", "path": str(BASE_DIR), "icon": "ri-folder-settings-line"},
+    ]
+    if Path("/Volumes").exists():
+        quick_roots.append({"name": "Volumes (Disks)", "path": "/Volumes", "icon": "ri-hard-drive-2-line"})
+    accessible_roots = [r for r in quick_roots if Path(r["path"]).exists()]
+
+    target_path = None
+    if path and path.strip():
+        try:
+            target_path = normalize_directory_path(path)
+        except Exception:
+            target_path = None
+
+    if not target_path or not target_path.exists() or not target_path.is_dir():
+        target_path = (home / "Desktop") if (home / "Desktop").exists() else home
+
+    ALLOWED_EXTENSIONS = {".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"}
+
+    # Calculate breadcrumbs
+    parts = []
+    curr = target_path
+    while curr != curr.parent:
+        parts.append({"name": curr.name or str(curr), "path": str(curr)})
+        curr = curr.parent
+    parts.append({"name": "Root (/)", "path": str(curr)})
+    parts.reverse()
+
+    subdirs = []
+    ebooks_here = 0
+    sample_ebooks = []
+
+    try:
+        for item in sorted(target_path.iterdir(), key=lambda x: x.name.lower()):
+            if item.name.startswith(".") or item.name.startswith("__MACOSX"):
+                continue
+            if item.is_dir():
+                ebook_cnt = 0
+                has_child_dir = False
+                try:
+                    for child in item.iterdir():
+                        if child.name.startswith("."):
+                            continue
+                        if child.is_file() and child.suffix.lower() in ALLOWED_EXTENSIONS:
+                            ebook_cnt += 1
+                        elif child.is_dir():
+                            has_child_dir = True
+                except Exception:
+                    pass
+
+                subdirs.append({
+                    "name": item.name,
+                    "path": str(item),
+                    "ebook_count": ebook_cnt,
+                    "has_subfolders": has_child_dir,
+                })
+            elif item.is_file() and item.suffix.lower() in ALLOWED_EXTENSIONS:
+                ebooks_here += 1
+                if len(sample_ebooks) < 5:
+                    sample_ebooks.append(item.name)
+    except PermissionError:
+        return JSONResponse({
+            "error": f"Permission denied accessing {target_path}",
+            "current_path": str(target_path),
+            "parent_path": str(target_path.parent) if target_path != target_path.parent else None,
+            "breadcrumbs": parts,
+            "quick_roots": accessible_roots,
+            "directories": [],
+            "ebooks_here_count": 0,
+            "sample_ebooks": [],
+        })
+    except Exception as e:
+        return JSONResponse({
+            "error": str(e),
+            "current_path": str(target_path),
+            "parent_path": str(target_path.parent) if target_path != target_path.parent else None,
+            "breadcrumbs": parts,
+            "quick_roots": accessible_roots,
+            "directories": [],
+            "ebooks_here_count": 0,
+            "sample_ebooks": [],
+        })
+
+    return JSONResponse({
+        "current_path": str(target_path),
+        "name": target_path.name or str(target_path),
+        "parent_path": str(target_path.parent) if target_path != target_path.parent else None,
+        "breadcrumbs": parts,
+        "quick_roots": accessible_roots,
+        "directories": subdirs,
+        "ebooks_here_count": ebooks_here,
+        "sample_ebooks": sample_ebooks,
     })
 
 

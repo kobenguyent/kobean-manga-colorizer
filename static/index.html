@@ -1062,10 +1062,44 @@
       </div>
 
       <div class="folder-import-body">
-        <div class="form-group">
-          <label class="form-label" for="folder-import-path">Directory Path on Server / Machine:</label>
-          <input type="text" class="input-text" id="folder-import-path" placeholder="/Users/name/Manga or /path/to/ebooks" />
-          <small class="form-hint" style="color: var(--text-muted); font-size: 0.75rem; margin-top: 4px; display: block;">Path to folder containing .pdf, .epub, .cbz, or .zip files.</small>
+        <!-- Choose Folder Dropzone / Picker -->
+        <div class="folder-import-dropzone" id="folder-import-dropzone" onclick="openFolderBrowserModal()">
+          <input type="file" id="folder-picker-input" webkitdirectory directory multiple style="display: none;" onchange="handleFolderPickerSelection(event)" />
+          <div class="folder-dropzone-icon">
+            <i class="ri-folder-add-line"></i>
+          </div>
+          <div class="folder-dropzone-content">
+            <div id="folder-dropzone-label" style="font-weight: 600; font-size: 0.95rem; color: #fff;">
+              Click to Choose Folder or Drag & Drop Folder Here
+            </div>
+            <div id="folder-dropzone-sub" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;">
+              Choose any folder from your machine with .cbz, .epub, .pdf, or .zip files
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 1rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label class="form-label" for="folder-import-path" style="margin-bottom: 0;">Directory Path on Disk:</label>
+            <button type="button" class="btn-text-action" onclick="openFolderBrowserModal()" style="font-size: 0.8rem; color: var(--accent-cyan); background: none; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+              <i class="ri-folder-open-line"></i> Browse Folder...
+            </button>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" class="input-text" id="folder-import-path" placeholder="/Users/name/Manga or choose folder above..." style="flex: 1;" oninput="onFolderInputChanged(this.value)" />
+            <button type="button" class="btn btn-secondary btn-sm" onclick="openFolderBrowserModal()" title="Browse folders on disk" style="white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;">
+              <i class="ri-folder-open-line"></i> Browse...
+            </button>
+          </div>
+          <div id="folder-path-validation" style="font-size: 0.78rem; margin-top: 5px; min-height: 18px;"></div>
+          <!-- Quick Root Shortcuts -->
+          <div id="folder-quick-shortcuts" style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center;">
+            <span style="font-size: 0.75rem; color: var(--text-muted);">Quick pick:</span>
+            <button type="button" class="quick-path-pill" onclick="setFolderPath('~/Desktop')">Desktop</button>
+            <button type="button" class="quick-path-pill" onclick="setFolderPath('~/Downloads')">Downloads</button>
+            <button type="button" class="quick-path-pill" onclick="setFolderPath('~/Documents')">Documents</button>
+            <button type="button" class="quick-path-pill" onclick="setFolderPath('~')">Home (~)</button>
+          </div>
         </div>
 
         <div class="form-group-row" style="display: flex; gap: 1.5rem; align-items: center; margin-top: 0.75rem;">
@@ -1099,6 +1133,90 @@
         </button>
       </div>
     </div>
+  </div>
+
+  <!-- Custom Local Folder Browser Modal Overlay -->
+  <div class="modal-overlay hidden" id="folder-browser-modal-overlay" onclick="handleFolderBrowserOverlayClick(event)" style="z-index: 1050;">
+    <div class="folder-import-dialog folder-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-browser-title">
+      <div class="folder-import-header">
+        <div class="folder-import-header-left">
+          <div class="folder-import-icon" style="background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan);">
+            <i class="ri-folder-shared-line"></i>
+          </div>
+          <div>
+            <h3 id="folder-browser-title" class="folder-import-title">Browse Folders on Disk</h3>
+            <p class="folder-browser-subtitle">Choose a manga or ebook folder without using browser popups</p>
+          </div>
+        </div>
+        <button type="button" class="btn-icon history-close-btn" onclick="closeFolderBrowserModal()" title="Close (Esc)">
+          <i class="ri-close-line"></i>
+        </button>
+      </div>
+
+      <div class="folder-browser-body">
+        <!-- Quick Roots Bar -->
+        <div class="folder-browser-quick-roots" id="folder-browser-quick-roots"></div>
+
+        <!-- Navigation Bar: Parent button + Breadcrumbs + Filter input -->
+        <div class="folder-browser-toolbar">
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-browser-up" onclick="navigateBrowserUp()" title="Go to parent directory">
+            <i class="ri-arrow-up-line"></i> Up
+          </button>
+          <div class="folder-browser-breadcrumbs" id="folder-browser-breadcrumbs"></div>
+          <div class="folder-browser-search-wrap">
+            <i class="ri-search-line"></i>
+            <input type="text" id="folder-browser-filter-input" placeholder="Filter folders..." oninput="filterBrowserFolders(this.value)" />
+          </div>
+        </div>
+
+        <!-- Folder List / Grid Area -->
+        <div class="folder-browser-list" id="folder-browser-list">
+          <!-- Dynamically populated -->
+        </div>
+
+        <!-- Current folder status info -->
+        <div class="folder-browser-info-bar" id="folder-browser-info-bar"></div>
+      </div>
+
+      <div class="folder-browser-footer">
+        <div class="folder-browser-selection-display">
+          <span class="selection-label">Target:</span>
+          <code id="folder-browser-selected-path" class="selection-path">No folder selected</code>
+        </div>
+        <div class="folder-browser-actions">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="closeFolderBrowserModal()">Cancel</button>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-confirm-browser-folder" onclick="confirmFolderBrowserSelection()">
+            <i class="ri-check-line"></i> Select This Folder
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Confirmation Modal Overlay -->
+  <div class="modal-overlay hidden" id="custom-confirm-modal-overlay" onclick="handleCustomConfirmOverlayClick(event)" style="z-index: 1200;">
+    <div class="folder-import-dialog" role="dialog" aria-modal="true" style="max-width: 440px;">
+      <div class="folder-import-header" style="border-bottom: none; padding-bottom: 0.5rem;">
+        <div class="folder-import-header-left">
+          <div class="folder-import-icon" id="confirm-modal-icon" style="background: rgba(239, 68, 68, 0.15); color: #ef4444;">
+            <i class="ri-error-warning-line"></i>
+          </div>
+          <div>
+            <h3 id="confirm-modal-title" class="folder-import-title" style="font-size: 1.1rem;">Confirm Action</h3>
+          </div>
+        </div>
+      </div>
+      <div class="folder-import-body" style="padding: 0.5rem 1.5rem 1.25rem 1.5rem;">
+        <p id="confirm-modal-message" style="font-size: 0.9rem; color: var(--text-secondary); line-height: 1.5; margin: 0;">
+          Are you sure you want to proceed?
+        </p>
+      </div>
+      <div class="folder-import-footer" style="padding: 1rem 1.5rem; display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid var(--bg-card-border);">
+        <button type="button" class="btn btn-secondary btn-sm" id="btn-confirm-modal-cancel" onclick="resolveCustomConfirm(false)">Cancel</button>
+        <button type="button" class="btn btn-danger btn-sm" id="btn-confirm-modal-ok" onclick="resolveCustomConfirm(true)">Confirm</button>
+      </div>
+    </div>
+  </div>
   <!-- Online Manga Preset Search Modal -->
   <div class="modal-overlay hidden" id="preset-search-modal" onclick="handlePresetSearchOverlayClick(event)">
     <div class="folder-import-dialog" style="max-width: 520px;" role="dialog" aria-modal="true">

@@ -217,6 +217,154 @@ class TestLargeImport(unittest.TestCase):
         self.assertIn("window.handleBulkChunkedUpload", js_content)
         self.assertIn("window.openFolderImportModal", js_content)
 
+    def test_08_normalize_directory_path(self):
+        """Test path normalization for quotes, file:// URLs, escaped spaces, and home expansion."""
+        from main import normalize_directory_path
+
+        home = Path.home()
+        # Home expansion
+        self.assertEqual(normalize_directory_path("~"), home)
+        self.assertEqual(normalize_directory_path("~/Desktop"), home / "Desktop")
+
+        # Quoted paths
+        self.assertEqual(normalize_directory_path('"/tmp"'), Path("/tmp").resolve())
+        self.assertEqual(normalize_directory_path("'/tmp'"), Path("/tmp").resolve())
+
+        # file:// protocol
+        self.assertEqual(normalize_directory_path("file:///tmp"), Path("/tmp").resolve())
+
+        # URL encoded spaces
+        test_dir = Path("/tmp/test space manga")
+        test_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.assertEqual(normalize_directory_path("file:///tmp/test%20space%20manga"), test_dir.resolve())
+            self.assertEqual(normalize_directory_path(r"/tmp/test\ space\ manga"), test_dir.resolve())
+            self.assertEqual(normalize_directory_path('"/tmp/test space manga"'), test_dir.resolve())
+        finally:
+            shutil.rmtree(str(test_dir), ignore_errors=True)
+
+        # File pointed to directly resolves to its parent folder
+        test_file = Path("/tmp/sample_manga.cbz")
+        test_file.touch()
+        try:
+            self.assertEqual(normalize_directory_path(str(test_file)), Path("/tmp").resolve())
+        finally:
+            test_file.unlink(missing_ok=True)
+
+    def test_09_validate_directory_endpoint(self):
+        """Test GET /api/import/validate-directory with valid and invalid paths."""
+        # Empty path
+        resp = requests.get(f"{SERVER_URL}/api/import/validate-directory?path=", timeout=5)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["valid"])
+
+        # Non-existent path
+        resp = requests.get(f"{SERVER_URL}/api/import/validate-directory?path=/tmp/non_existent_dir_9999", timeout=5)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["valid"])
+        self.assertIn("does not exist", resp.json()["error"])
+
+        # Valid path with files
+        valid_dir = Path("/tmp/import_test_validate_09")
+        valid_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            create_dummy_cbz(valid_dir / "vol1.cbz", num_pages=1)
+            create_dummy_cbz(valid_dir / "vol2.cbz", num_pages=1)
+
+            resp = requests.get(f"{SERVER_URL}/api/import/validate-directory?path={valid_dir}", timeout=5)
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertTrue(data["valid"])
+            self.assertEqual(data["total_files"], 2)
+            self.assertIn("vol1.cbz", data["sample_files"])
+        finally:
+            shutil.rmtree(str(valid_dir), ignore_errors=True)
+
+    def test_10_suggest_directories_endpoint(self):
+        """Test GET /api/import/suggest-directories for root shortcuts and autocompletion."""
+        resp = requests.get(f"{SERVER_URL}/api/import/suggest-directories", timeout=5)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("quick_roots", data)
+        self.assertGreater(len(data["quick_roots"]), 0)
+        names = [r["name"] for r in data["quick_roots"]]
+        self.assertTrue(any(n in names for n in ["Desktop", "Downloads", "Documents", "Home (~)"]))
+
+    def test_11_frontend_folder_picker_controls(self):
+        """Verify HTML and JS elements for folder picker and dropzone integration."""
+        index_path = Path(__file__).resolve().parent.parent / "static" / "index.html"
+        html_content = index_path.read_text(encoding="utf-8")
+        self.assertIn('id="folder-picker-input"', html_content)
+        self.assertIn('id="folder-import-dropzone"', html_content)
+        self.assertIn('id="folder-path-validation"', html_content)
+        self.assertIn('webkitdirectory', html_content)
+        self.assertIn('quick-path-pill', html_content)
+
+        app_path = Path(__file__).resolve().parent.parent / "static" / "app.js"
+        js_content = app_path.read_text(encoding="utf-8")
+        self.assertIn("triggerFolderPicker", js_content)
+        self.assertIn("handleFolderPickerSelection", js_content)
+        self.assertIn("validateAndDisplayFolderPath", js_content)
+        self.assertIn("setFolderPath", js_content)
+        self.assertIn("onFolderInputChanged", js_content)
+        self.assertIn("window.triggerFolderPicker", js_content)
+        self.assertIn("window.setFolderPath", js_content)
+
+    def test_12_browse_directory_endpoint(self):
+        """Test GET /api/import/browse-directory for in-app custom folder navigation."""
+        # Default request
+        resp = requests.get(f"{SERVER_URL}/api/import/browse-directory", timeout=5)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("current_path", data)
+        self.assertIn("breadcrumbs", data)
+        self.assertIn("quick_roots", data)
+        self.assertIn("directories", data)
+
+        # Browse specific test folder with ebooks and subfolders
+        test_dir = Path("/tmp/test_browse_dir_12")
+        test_dir.mkdir(parents=True, exist_ok=True)
+        sub1 = test_dir / "Subfolder A"
+        sub1.mkdir(parents=True, exist_ok=True)
+        try:
+            create_dummy_cbz(test_dir / "root_book.cbz", num_pages=1)
+            create_dummy_cbz(sub1 / "child_book.cbz", num_pages=1)
+
+            resp = requests.get(f"{SERVER_URL}/api/import/browse-directory?path={test_dir}", timeout=5)
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertEqual(data["current_path"], str(test_dir.resolve()))
+            self.assertEqual(data["ebooks_here_count"], 1)
+            dir_names = [d["name"] for d in data["directories"]]
+            self.assertIn("Subfolder A", dir_names)
+            sub1_entry = next(d for d in data["directories"] if d["name"] == "Subfolder A")
+            self.assertEqual(sub1_entry["ebook_count"], 1)
+        finally:
+            shutil.rmtree(str(test_dir), ignore_errors=True)
+
+    def test_13_custom_modals_integration(self):
+        """Verify custom folder browser modal and custom confirmation modal markup and logic."""
+        index_path = Path(__file__).resolve().parent.parent / "static" / "index.html"
+        html_content = index_path.read_text(encoding="utf-8")
+        self.assertIn('id="folder-browser-modal-overlay"', html_content)
+        self.assertIn('id="custom-confirm-modal-overlay"', html_content)
+        self.assertIn('openFolderBrowserModal()', html_content)
+        self.assertIn('folder-browser-dialog', html_content)
+        self.assertIn('folder-browser-breadcrumbs', html_content)
+
+        app_path = Path(__file__).resolve().parent.parent / "static" / "app.js"
+        js_content = app_path.read_text(encoding="utf-8")
+        self.assertIn("openFolderBrowserModal", js_content)
+        self.assertIn("closeFolderBrowserModal", js_content)
+        self.assertIn("loadBrowserDirectory", js_content)
+        self.assertIn("showConfirmModal", js_content)
+        self.assertIn("resolveCustomConfirm", js_content)
+        # Ensure zero native confirm() calls remain in app.js
+        self.assertNotIn("confirm(`", js_content)
+        self.assertNotIn('confirm("', js_content)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
