@@ -823,6 +823,11 @@ function setupEventListeners() {
         closeHistoryModal();
         return;
       }
+      const exemplarOverlay = document.getElementById("exemplar-gallery-modal-overlay");
+      if (exemplarOverlay && !exemplarOverlay.classList.contains("hidden")) {
+        closeExemplarGalleryModal();
+        return;
+      }
     }
 
     const splitCard = document.getElementById("split-preview-card");
@@ -2753,6 +2758,27 @@ function subscribeToProgressStream(sessionId = null, autoResume = false) {
           if (countText) countText.innerText = data.processed_count;
         }
 
+        if (data.exemplar_used) {
+          pageInfo.exemplar_used = data.exemplar_used;
+        }
+        if (data.exemplars_used) {
+          pageInfo.exemplars_used = data.exemplars_used;
+        }
+        if (data.quality_score) {
+          pageInfo.quality_score = data.quality_score;
+        }
+        if (data.auto_harvested) {
+          pageInfo.auto_harvested = true;
+        }
+        if (currentPreviewPageIndex === idx) {
+          if (typeof updateExemplarPreviewChip === "function") {
+            updateExemplarPreviewChip(pageInfo);
+          }
+          if (typeof updateQualityPreviewChip === "function") {
+            updateQualityPreviewChip(pageInfo);
+          }
+        }
+
         updateColorizedCount();
         updateSelectionUI();
       }
@@ -2837,6 +2863,10 @@ function subscribeToProgressStream(sessionId = null, autoResume = false) {
       updateColorizedCount();
       renderDocumentQueue();
       showToast("Colorization cancelled.", "info");
+    } else if (data.type === "adapter_training_progress") {
+      if (typeof updateAdapterTrainingProgressUI === "function") {
+        updateAdapterTrainingProgressUI(data);
+      }
     }
   };
 
@@ -2952,6 +2982,12 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
         if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
           renderPageCharacterChips(data.recognized_characters);
         }
+      }
+      if (data.exemplar_used) {
+        page.exemplar_used = data.exemplar_used;
+      }
+      if (data.exemplars_used) {
+        page.exemplars_used = data.exemplars_used;
       }
       const ts = Date.now();
       
@@ -3169,6 +3205,12 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   }
   if (typeof fetchSeriesMemory === "function") {
     fetchSeriesMemory(currentSession?.session_id);
+  }
+  if (typeof updateExemplarPreviewChip === "function") {
+    updateExemplarPreviewChip(page);
+  }
+  if (typeof updateQualityPreviewChip === "function") {
+    updateQualityPreviewChip(page);
   }
 }
 
@@ -6259,6 +6301,19 @@ async function fetchSeriesMemory(sessionId) {
         previewBadge.style.display = "none";
       }
     }
+
+    if (typeof updateExemplarPreviewChip === "function") {
+      updateExemplarPreviewChip(currentSession?.pages?.[currentPreviewPageIndex]);
+    }
+    if (typeof updateQualityPreviewChip === "function") {
+      updateQualityPreviewChip(currentSession?.pages?.[currentPreviewPageIndex]);
+    }
+    if (typeof fetchSeriesAdapterStatus === "function") {
+      fetchSeriesAdapterStatus(sessionId);
+    }
+    if (typeof fetchSeriesAutoRefineStatus === "function") {
+      fetchSeriesAutoRefineStatus(sessionId);
+    }
   } catch (err) {
     console.warn("Failed to fetch series memory:", err);
   }
@@ -6359,6 +6414,489 @@ async function resetCurrentSeriesMemory(event) {
   }
 }
 
+// ── Visual Exemplars & Cross-Page Color Transfer ───────────────────
+
+function updateExemplarPreviewChip(page) {
+  const chip = document.getElementById("preview-exemplar-chip");
+  const label = document.getElementById("preview-exemplar-label");
+  if (!chip || !label) return;
+
+  if (!page) {
+    chip.style.display = "none";
+    return;
+  }
+
+  const exemplars = page.exemplars_used || (page.exemplar_used ? [page.exemplar_used] : []);
+  if (exemplars.length > 0) {
+    chip.style.display = "inline-flex";
+    if (exemplars.length === 1) {
+      const match = String(exemplars[0]).match(/p(\d+)_/);
+      const refPage = match ? `Page ${parseInt(match[1], 10) + 1}` : "Ref Page";
+      label.textContent = `Ref: ${refPage}`;
+      chip.title = `Visual exemplar used: ${refPage}. Click to view or manage all series exemplars.`;
+    } else {
+      label.textContent = `Refs: ${exemplars.length} Pages`;
+      chip.title = `${exemplars.length} visual exemplars applied for color harmony. Click to manage.`;
+    }
+  } else if (currentSeriesMemory && currentSeriesMemory.exemplar_pages && currentSeriesMemory.exemplar_pages.length > 0) {
+    chip.style.display = "inline-flex";
+    label.textContent = `Refs: ${currentSeriesMemory.exemplar_pages.length} Saved`;
+    chip.title = `${currentSeriesMemory.exemplar_pages.length} visual exemplar(s) in Series Memory. Click to view or manage.`;
+  } else {
+    chip.style.display = "none";
+  }
+}
+
+function updateQualityPreviewChip(page) {
+  const chip = document.getElementById("preview-quality-chip");
+  const label = document.getElementById("preview-quality-label");
+  const icon = document.getElementById("preview-quality-icon");
+  if (!chip || !label || !icon) return;
+
+  if (!page || !page.quality_score || page.status !== "colorized") {
+    chip.style.display = "none";
+    return;
+  }
+
+  const q = page.quality_score;
+  const scorePct = Math.round((q.overall_score || 0) * 100);
+  const grade = q.grade || (scorePct >= 82 ? "high" : scorePct >= 65 ? "moderate" : "review_suggested");
+  const m = q.metrics || {};
+
+  chip.style.display = "inline-flex";
+
+  const metricsDesc = `Linework: ${Math.round((m.linework_integrity || 0) * 100)}% | White Purity: ${Math.round((m.white_purity || 0) * 100)}% | Richness: ${Math.round((m.color_richness || 0) * 100)}%`;
+
+  if (grade === "high") {
+    chip.style.background = "rgba(34, 197, 94, 0.18)";
+    chip.style.color = "#4ade80";
+    chip.style.borderColor = "rgba(34, 197, 94, 0.35)";
+    icon.className = "ri-shield-check-line";
+    label.textContent = `Quality: ${scorePct}%`;
+    chip.title = `High Confidence (${scorePct}%): Clean linework & pure bubbles. ${metricsDesc}`;
+  } else if (grade === "moderate") {
+    chip.style.background = "rgba(234, 179, 8, 0.18)";
+    chip.style.color = "#facc15";
+    chip.style.borderColor = "rgba(234, 179, 8, 0.35)";
+    icon.className = "ri-shield-line";
+    label.textContent = `Quality: ${scorePct}%`;
+    chip.title = `Moderate Quality (${scorePct}%). ${metricsDesc}`;
+  } else {
+    chip.style.background = "rgba(239, 68, 68, 0.18)";
+    chip.style.color = "#f87171";
+    chip.style.borderColor = "rgba(239, 68, 68, 0.35)";
+    icon.className = "ri-alert-line";
+    label.textContent = `Review Suggested (${scorePct}%)`;
+    chip.title = `Review Suggested (${scorePct}%): Potential color bleeding or desaturation. ${metricsDesc}`;
+  }
+}
+
+async function openExemplarGalleryModal() {
+  if (!currentSession) {
+    showToast("No active session.", "warning");
+    return;
+  }
+
+  const overlay = document.getElementById("exemplar-gallery-modal-overlay");
+  if (!overlay) return;
+  overlay.classList.remove("hidden");
+
+  if (typeof fetchSeriesAdapterStatus === "function") {
+    fetchSeriesAdapterStatus(currentSession.session_id);
+  }
+  if (typeof fetchSeriesAutoRefineStatus === "function") {
+    fetchSeriesAutoRefineStatus(currentSession.session_id);
+  }
+
+  const loadingEl = document.getElementById("exemplar-gallery-loading");
+  const emptyEl = document.getElementById("exemplar-gallery-empty");
+  const gridEl = document.getElementById("exemplar-gallery-grid");
+
+  if (loadingEl) loadingEl.style.display = "block";
+  if (emptyEl) emptyEl.style.display = "none";
+  if (gridEl) gridEl.innerHTML = "";
+
+  try {
+    const resp = await fetch(`/api/series-memory/${currentSession.session_id}/exemplars`);
+    if (!resp.ok) {
+      throw new Error(`Server returned ${resp.status}`);
+    }
+    const data = await resp.json();
+    if (loadingEl) loadingEl.style.display = "none";
+
+    const titleEl = document.getElementById("exemplar-gallery-title");
+    if (titleEl && data.title) {
+      titleEl.textContent = `Series Color Exemplars: ${data.title}`;
+    }
+
+    renderExemplarGallery(data.series_key, data.exemplars || []);
+  } catch (err) {
+    if (loadingEl) loadingEl.style.display = "none";
+    showToast(`Failed to load exemplars: ${err.message}`, "error");
+  }
+}
+
+function closeExemplarGalleryModal() {
+  const overlay = document.getElementById("exemplar-gallery-modal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+}
+
+function handleExemplarGalleryOverlayClick(event) {
+  if (event.target.id === "exemplar-gallery-modal-overlay") {
+    closeExemplarGalleryModal();
+  }
+}
+
+function renderExemplarGallery(seriesKey, exemplars) {
+  const emptyEl = document.getElementById("exemplar-gallery-empty");
+  const gridEl = document.getElementById("exemplar-gallery-grid");
+  if (!gridEl) return;
+
+  if (!exemplars || exemplars.length === 0) {
+    if (emptyEl) emptyEl.style.display = "block";
+    gridEl.innerHTML = "";
+    return;
+  }
+
+  if (emptyEl) emptyEl.style.display = "none";
+
+  const safeSeriesKey = escapeHtml(seriesKey || "");
+
+  gridEl.innerHTML = exemplars.map((ex) => {
+    const pageNum = (typeof ex.page_index === "number") ? ex.page_index + 1 : 1;
+    const isPinned = Boolean(ex.pinned);
+    const styleLabel = escapeHtml(ex.style || "manga");
+    const lumLabel = (typeof ex.mean_l === "number") ? `L: ${ex.mean_l}` : "";
+    const charNames = Array.isArray(ex.character_names) ? ex.character_names : [];
+    const charChips = charNames.length > 0
+      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:2px;">` +
+        charNames.slice(0, 3).map(n => `<span style="font-size:0.65rem;background:rgba(168,85,247,0.2);color:#c084fc;padding:1px 5px;border-radius:3px;">${escapeHtml(n)}</span>`).join("") +
+        (charNames.length > 3 ? `<span style="font-size:0.65rem;color:var(--text-muted);">+${charNames.length - 3}</span>` : "") +
+        `</div>`
+      : "";
+
+    const imgUrl = ex.image_url ? `${ex.image_url}?t=${Date.now()}` : "/static/placeholder.png";
+
+    const qScoreVal = (typeof ex.quality_score === "number")
+      ? ex.quality_score
+      : (typeof ex.overall_score === "number" ? ex.overall_score : null);
+    const qualityChip = qScoreVal !== null
+      ? `<span style="font-size:0.65rem;background:rgba(34,197,94,0.18);color:#4ade80;padding:1px 5px;border-radius:3px;" title="Quality Confidence Score"><i class="ri-shield-check-line"></i> ${Math.round(qScoreVal * 100)}%</span>`
+      : (lumLabel ? `<span style="font-size:0.68rem;color:var(--text-muted);">${lumLabel}</span>` : "");
+
+    return `
+      <div class="exemplar-card" style="border:1px solid var(--bg-card-border);border-radius:8px;background:var(--bg-card);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.2);">
+        <div style="position:relative;width:100%;aspect-ratio:3/4;background:#18181b;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+          <img src="${imgUrl}" alt="Page ${pageNum}" style="width:100%;height:100%;object-fit:cover;display:block;" loading="lazy">
+          <span style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,0.75);color:#fff;font-size:0.7rem;padding:2px 6px;border-radius:4px;font-weight:600;">
+            Page ${pageNum}
+          </span>
+          ${isPinned ? `<span style="position:absolute;top:6px;right:6px;background:rgba(234,179,8,0.95);color:#000;font-size:0.65rem;padding:2px 6px;border-radius:4px;font-weight:700;display:flex;align-items:center;gap:3px;"><i class="ri-pushpin-fill"></i> PINNED</span>` : ""}
+        </div>
+        <div style="padding:8px 10px;display:flex;flex-direction:column;gap:5px;flex:1;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="font-size:0.72rem;color:var(--text-secondary);text-transform:capitalize;">${styleLabel}</span>
+            ${qualityChip}
+          </div>
+          ${charChips}
+          <div style="display:flex;gap:6px;margin-top:auto;padding-top:8px;border-top:1px solid var(--bg-card-border);">
+            <button class="btn btn-secondary btn-sm" onclick="pinSeriesExemplar('${safeSeriesKey}', ${ex.page_index}, ${!isPinned})" style="flex:1;font-size:0.72rem;padding:3px 6px;justify-content:center;" title="${isPinned ? 'Unpin exemplar' : 'Pin exemplar as top priority'}">
+              <i class="${isPinned ? 'ri-pushpin-line' : 'ri-pushpin-2-line'}"></i> ${isPinned ? 'Unpin' : 'Pin'}
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="deleteSeriesExemplar('${safeSeriesKey}', ${ex.page_index})" style="color:#ef4444;font-size:0.72rem;padding:3px 8px;" title="Delete exemplar">
+              <i class="ri-delete-bin-line"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+async function pinSeriesExemplar(seriesKey, pageIndex, pinned) {
+  try {
+    const resp = await fetch("/api/series-memory/pin-exemplar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        series_key: seriesKey,
+        page_index: pageIndex,
+        pinned: pinned
+      })
+    });
+    const data = await resp.json();
+    if (resp.ok && data.status === "ok") {
+      showToast(pinned ? `📌 Page ${pageIndex + 1} pinned as primary exemplar!` : `Unpinned Page ${pageIndex + 1}.`, "info");
+      if (currentSession) {
+        await fetchSeriesMemory(currentSession.session_id);
+      }
+      await openExemplarGalleryModal();
+    } else {
+      showToast(data.detail || "Failed to update pinned status.", "error");
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+  }
+}
+
+async function deleteSeriesExemplar(seriesKey, pageIndex) {
+  const confirmed = await showConfirmModal({
+    title: "Delete Exemplar",
+    message: `Remove Page ${pageIndex + 1} from Series Memory exemplars? It will no longer serve as a visual color transfer reference.`,
+    confirmText: "Delete",
+    confirmClass: "btn-danger"
+  });
+
+  if (!confirmed) return;
+
+  try {
+    const resp = await fetch(`/api/series-memory/${seriesKey}/exemplar/${pageIndex}`, {
+      method: "DELETE"
+    });
+    const data = await resp.json();
+    if (resp.ok && data.status === "ok") {
+      showToast(`Removed Page ${pageIndex + 1} exemplar from Series Memory.`, "info");
+      if (currentSession) {
+        await fetchSeriesMemory(currentSession.session_id);
+      }
+      await openExemplarGalleryModal();
+    } else {
+      showToast(data.detail || "Failed to delete exemplar.", "error");
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+  }
+}
+
+async function fetchSeriesAdapterStatus(sessionId) {
+  if (!sessionId) return;
+  try {
+    const resp = await fetch(`/api/series-memory/${sessionId}/adapter-status`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    const badge = document.getElementById("adapter-status-badge");
+    const subtext = document.getElementById("adapter-status-subtext");
+    const btnTrain = document.getElementById("btn-train-adapter");
+    const btnDelete = document.getElementById("btn-delete-adapter");
+    const container = document.getElementById("adapter-training-progress-container");
+    const sideBadge = document.getElementById("series-adapter-badge");
+
+    if (data.status === "ready") {
+      if (badge) {
+        badge.textContent = "Ready";
+        badge.style.background = "rgba(168,85,247,0.25)";
+        badge.style.color = "#c084fc";
+      }
+      if (subtext) {
+        const lossStr = typeof data.loss === "number" ? ` | Loss: ${data.loss.toFixed(4)}` : "";
+        const samplesStr = data.samples_count ? ` | ${data.samples_count} sample(s)` : "";
+        subtext.textContent = `LoRA active (${data.steps || 100} steps${lossStr}${samplesStr}). Residual generator adapts to series style.`;
+      }
+      if (btnTrain) {
+        btnTrain.disabled = false;
+        btnTrain.innerHTML = '<i class="ri-refresh-line"></i> Re-Train LoRA';
+      }
+      if (btnDelete) {
+        btnDelete.style.display = "inline-flex";
+      }
+      if (container) {
+        container.style.display = "none";
+      }
+      if (sideBadge) {
+        sideBadge.style.display = "inline-flex";
+        sideBadge.textContent = "LoRA: Active";
+        sideBadge.style.background = "rgba(168,85,247,0.2)";
+        sideBadge.style.color = "#c084fc";
+      }
+    } else if (data.status === "training") {
+      updateAdapterTrainingProgressUI(data);
+    } else {
+      // not_trained, failed, or unavailable
+      if (badge) {
+        badge.textContent = "Not Trained";
+        badge.style.background = "rgba(255,255,255,0.08)";
+        badge.style.color = "var(--text-muted)";
+      }
+      if (subtext) {
+        subtext.textContent = "Adapts neural generator weights to the artist's shading & linework habits.";
+      }
+      if (btnTrain) {
+        btnTrain.disabled = false;
+        btnTrain.innerHTML = '<i class="ri-sparkles-line"></i> Fine-Tune LoRA';
+      }
+      if (btnDelete) {
+        btnDelete.style.display = "none";
+      }
+      if (container) {
+        container.style.display = "none";
+      }
+      if (sideBadge) {
+        sideBadge.style.display = "none";
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to fetch adapter status:", err);
+  }
+}
+
+function updateAdapterTrainingProgressUI(data) {
+  const container = document.getElementById("adapter-training-progress-container");
+  const stepText = document.getElementById("adapter-training-step-text");
+  const lossText = document.getElementById("adapter-training-loss-text");
+  const fill = document.getElementById("adapter-training-progress-fill");
+  const badge = document.getElementById("adapter-status-badge");
+  const subtext = document.getElementById("adapter-status-subtext");
+  const btnTrain = document.getElementById("btn-train-adapter");
+  const sideBadge = document.getElementById("series-adapter-badge");
+
+  if (data.status === "training") {
+    if (container) container.style.display = "block";
+    const pct = Math.min(100, Math.max(0, Math.round((data.progress || 0) * 100)));
+    if (fill) fill.style.width = `${pct}%`;
+    if (stepText) stepText.textContent = `Fine-tuning: Step ${data.step} / ${data.total_steps} (${pct}%)`;
+    if (lossText) lossText.textContent = `Loss: ${typeof data.loss === "number" ? data.loss.toFixed(4) : "--"}`;
+    if (subtext) subtext.textContent = "Fine-tuning in progress... Adapting generator to series linework & style.";
+    if (badge) {
+      badge.textContent = "Training…";
+      badge.style.background = "rgba(234,179,8,0.2)";
+      badge.style.color = "#facc15";
+    }
+    if (btnTrain) {
+      btnTrain.disabled = true;
+      btnTrain.innerHTML = '<i class="ri-loader-4-line spinner"></i> Training…';
+    }
+    if (sideBadge) {
+      sideBadge.style.display = "inline-flex";
+      sideBadge.textContent = "LoRA: Training…";
+      sideBadge.style.background = "rgba(234,179,8,0.2)";
+      sideBadge.style.color = "#facc15";
+    }
+  } else if (data.status === "completed") {
+    if (container) {
+      if (fill) fill.style.width = "100%";
+      setTimeout(() => { if (container) container.style.display = "none"; }, 1500);
+    }
+    showToast("🎉 Series Style LoRA adapter training complete!", "success");
+    if (currentSession) {
+      fetchSeriesAdapterStatus(currentSession.session_id);
+    }
+  }
+}
+
+async function triggerSeriesAdapterTraining() {
+  if (!currentSession) {
+    showToast("No active session.", "warning");
+    return;
+  }
+  const btn = document.getElementById("btn-train-adapter");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line spinner"></i> Starting…';
+  }
+  try {
+    const resp = await fetch(`/api/series-memory/${currentSession.session_id}/train-adapter`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ steps: 100, lr: 0.0002 })
+    });
+    const data = await resp.json();
+    if (resp.ok && data.status === "training_started") {
+      showToast(`⚡ Fine-tuning started (${data.samples_count} sample images, ${data.total_steps} steps).`, "info");
+      const container = document.getElementById("adapter-training-progress-container");
+      if (container) container.style.display = "block";
+    } else {
+      showToast(data.detail || "Failed to start adapter training.", "error");
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-sparkles-line"></i> Fine-Tune LoRA';
+      }
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="ri-sparkles-line"></i> Fine-Tune LoRA';
+    }
+  }
+}
+
+async function deleteCurrentSeriesAdapter() {
+  if (!currentSession) {
+    showToast("No active session.", "warning");
+    return;
+  }
+  const confirmed = await showConfirmModal({
+    title: "Delete Series Adapter",
+    message: "Delete the trained Series LoRA weights for this manga? Colorization will revert to base neural generator weights.",
+    confirmText: "Delete Adapter",
+    confirmClass: "btn-danger"
+  });
+  if (!confirmed) return;
+
+  try {
+    const resp = await fetch(`/api/series-memory/${currentSession.session_id}/adapter`, {
+      method: "DELETE"
+    });
+    const data = await resp.json();
+    if (resp.ok && data.status === "ok") {
+      showToast("🗑️ Series Style LoRA adapter deleted.", "info");
+      await fetchSeriesAdapterStatus(currentSession.session_id);
+    } else {
+      showToast(data.detail || "Failed to delete series adapter.", "error");
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+  }
+}
+
+async function fetchSeriesAutoRefineStatus(sessionId) {
+  if (!sessionId) return;
+  try {
+    const resp = await fetch(`/api/series-memory/${sessionId}/auto-refine`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    const chk = document.getElementById("chk-auto-refine-adapter");
+    const counterText = document.getElementById("auto-refine-counter-text");
+    const gateBadge = document.getElementById("auto-harvest-threshold-badge");
+
+    if (chk) {
+      chk.checked = Boolean(data.auto_refine_enabled);
+    }
+    if (counterText) {
+      counterText.textContent = `${data.unrefined_pages_count || 0} / ${data.auto_refine_interval || 5} harvested`;
+    }
+    if (gateBadge && typeof data.auto_harvest_threshold === "number") {
+      gateBadge.textContent = `Gate: ≥ ${Math.round(data.auto_harvest_threshold * 100)}% Quality`;
+    }
+  } catch (err) {
+    console.warn("Failed to fetch auto-refine status:", err);
+  }
+}
+
+async function toggleAutoRefineAdapter(enabled) {
+  if (!currentSession) return;
+  try {
+    const resp = await fetch(`/api/series-memory/${currentSession.session_id}/auto-refine`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: Boolean(enabled) })
+    });
+    const data = await resp.json();
+    if (resp.ok && data.status === "ok") {
+      showToast(
+        enabled
+          ? "🤖 Auto-refine enabled: High-confidence pages will auto-update LoRA."
+          : "Auto-refine disabled.",
+        "info"
+      );
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+  }
+}
+
 window.recolorizePage     = recolorizePage;
 window.recolorizeSelected = recolorizeSelected;
 window.changeHistoryPage = changeHistoryPage;
@@ -6390,4 +6928,18 @@ window.handleCustomConfirmOverlayClick = handleCustomConfirmOverlayClick;
 window.fetchSeriesMemory = fetchSeriesMemory;
 window.learnCurrentPreviewPage = learnCurrentPreviewPage;
 window.resetCurrentSeriesMemory = resetCurrentSeriesMemory;
+window.updateExemplarPreviewChip = updateExemplarPreviewChip;
+window.openExemplarGalleryModal = openExemplarGalleryModal;
+window.closeExemplarGalleryModal = closeExemplarGalleryModal;
+window.handleExemplarGalleryOverlayClick = handleExemplarGalleryOverlayClick;
+window.renderExemplarGallery = renderExemplarGallery;
+window.pinSeriesExemplar = pinSeriesExemplar;
+window.deleteSeriesExemplar = deleteSeriesExemplar;
+window.fetchSeriesAdapterStatus = fetchSeriesAdapterStatus;
+window.triggerSeriesAdapterTraining = triggerSeriesAdapterTraining;
+window.deleteCurrentSeriesAdapter = deleteCurrentSeriesAdapter;
+window.updateAdapterTrainingProgressUI = updateAdapterTrainingProgressUI;
+window.updateQualityPreviewChip = updateQualityPreviewChip;
+window.fetchSeriesAutoRefineStatus = fetchSeriesAutoRefineStatus;
+window.toggleAutoRefineAdapter = toggleAutoRefineAdapter;
 

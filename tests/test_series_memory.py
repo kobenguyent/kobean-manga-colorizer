@@ -96,8 +96,10 @@ def test_series_memory_persistence(tmp_path):
     assert len(mem2.exemplar_pages) == 2
 
     # Exemplar resolution with exclude
-    exemplar = bank.get_exemplar_image("dr_slump", exclude_path=str(img2))
-    assert exemplar == str(img1)
+    exemplar = bank.get_exemplar_image("dr_slump", exclude_path=mem2.exemplar_pages[1]["image_path"])
+    assert exemplar is not None
+    assert "page_1" in Path(exemplar).name
+    assert Path(exemplar).exists()
 
     # Persistence verification: reload from disk in new instance
     bank_reloaded = SeriesMemoryBank(store_file)
@@ -220,3 +222,273 @@ def test_series_memory_api_endpoints(client, tmp_path):
         res_reset = client.post(f"/api/series-memory/reset/{data_learn['series_key']}")
         assert res_reset.status_code == 200
         assert res_reset.json()["reset"] is True
+
+
+def test_find_best_exemplars_ranking(tmp_path):
+    """Verifies that find_best_exemplars ranks exemplars by character overlap, pinned status, and luminance."""
+    bank = SeriesMemoryBank(tmp_path / "memory.json")
+    series_key = "one_piece"
+
+    # Create 3 dummy pages
+    img0 = tmp_path / "p0.png"
+    img1 = tmp_path / "p1.png"
+    img2 = tmp_path / "p2.png"
+    Image.new("RGB", (64, 64), color=(200, 200, 200)).save(img0)
+    Image.new("RGB", (64, 64), color=(30, 30, 30)).save(img1)
+    Image.new("RGB", (64, 64), color=(120, 120, 120)).save(img2)
+
+    # Page 0: Luffy
+    bank.record_learning(
+        series_key=series_key,
+        title="One Piece",
+        characters=[{"name": "Luffy", "hair_hex": "#000000"}],
+        session_id="s1",
+        page_index=0,
+        approved_image_path=str(img0),
+        pinned=False,
+    )
+    # Page 1: Zoro (pinned)
+    bank.record_learning(
+        series_key=series_key,
+        title="One Piece",
+        characters=[{"name": "Zoro", "hair_hex": "#15803d"}],
+        session_id="s1",
+        page_index=1,
+        approved_image_path=str(img1),
+        pinned=True,
+    )
+    # Page 2: Luffy & Nami
+    bank.record_learning(
+        series_key=series_key,
+        title="One Piece",
+        characters=[
+            {"name": "Luffy", "hair_hex": "#000000"},
+            {"name": "Nami", "hair_hex": "#ea580c"},
+        ],
+        session_id="s1",
+        page_index=2,
+        approved_image_path=str(img2),
+        pinned=False,
+    )
+
+    # 1. Query for Luffy: Page 1 is pinned (+50), Page 2 has Luffy (+20), Page 0 has Luffy (+20)
+    best = bank.find_best_exemplars(
+        series_key=series_key,
+        active_character_names=["Luffy"],
+        max_count=2,
+    )
+    assert len(best) == 2
+    # Pinned page 1 should be ranked #1
+    assert best[0]["page_index"] == 1
+    assert best[0]["pinned"] is True
+
+    # 2. Unpin Page 1 and query for Luffy & Nami
+    bank.pin_exemplar(series_key, 1, pinned=False)
+    best_unpinned = bank.find_best_exemplars(
+        series_key=series_key,
+        active_character_names=["Luffy", "Nami"],
+        max_count=2,
+    )
+    assert len(best_unpinned) == 2
+    # Page 2 has 2 matching characters (overlap score 40) -> should be #1
+    assert best_unpinned[0]["page_index"] == 2
+    # Page 0 has 1 matching character (overlap score 20) -> should be #2
+    assert best_unpinned[1]["page_index"] == 0
+
+    # 3. Test remove_exemplar
+    assert bank.remove_exemplar(series_key, 2) is True
+    remaining = bank.find_best_exemplars(series_key, max_count=5)
+    remaining_indices = [ex["page_index"] for ex in remaining]
+    assert 2 not in remaining_indices
+    assert len(remaining) == 2
+
+
+def test_transfer_exemplar_palette(tmp_path):
+    """Verifies statistical Reinhard Lab color transfer with line art and speech bubble protection."""
+    import numpy as np
+    from colorizer_engine import transfer_exemplar_palette
+
+    # Create target RGB image (neutral flat color)
+    target = np.full((100, 100, 3), 128, dtype=np.uint8)
+    # Add a pure white speech bubble in top-left
+    target[0:20, 0:20] = 255
+    # Add deep black line art ink in bottom-left
+    target[80:100, 0:20] = 10
+
+    # Normalized original grayscale
+    orig_gray = np.mean(target.astype(np.float32) / 255.0, axis=2)
+
+    # Create exemplar image with warm red/gold tint
+    exemplar_file = tmp_path / "exemplar_tint.png"
+    exemplar_img = Image.new("RGB", (100, 100), color=(220, 90, 40))
+    exemplar_img.save(exemplar_file)
+
+    transferred = transfer_exemplar_palette(
+        target_rgb=target,
+        exemplar_img_path=str(exemplar_file),
+        blend_weight=0.5,
+        preserve_line_art=True,
+        orig_gray=orig_gray,
+    )
+
+    assert transferred.shape == (100, 100, 3)
+    assert transferred.dtype == np.uint8
+
+    # The neutral gray body (center) should have shifted towards the warm exemplar
+    center_pixel = transferred[50, 50]
+    # Red channel should be higher than blue channel due to the warm exemplar
+    assert center_pixel[0] > center_pixel[2]
+
+    # Bubble area (white) should be protected and remain bright
+    bubble_pixel = transferred[5, 5]
+    assert bubble_pixel[0] >= 240 and bubble_pixel[1] >= 240 and bubble_pixel[2] >= 240
+
+    # Ink line area should be protected and remain dark
+    ink_pixel = transferred[90, 5]
+    assert ink_pixel[0] <= 30 and ink_pixel[1] <= 30 and ink_pixel[2] <= 30
+
+
+def test_series_memory_exemplar_endpoints(client, tmp_path):
+    """Verifies GET /exemplars, GET /exemplar-image, POST /pin-exemplar, and DELETE /exemplar."""
+    session_id = "test_exemplar_api_session"
+    sess_dir = tmp_path / session_id
+    color_dir = sess_dir / "colorized"
+    color_dir.mkdir(parents=True, exist_ok=True)
+
+    dummy_color = color_dir / "page_001.png"
+    Image.new("RGB", (64, 64), color="purple").save(dummy_color)
+
+    with patch("main.STORAGE_DIR", tmp_path):
+        SESSIONS[session_id] = {
+            "session_id": session_id,
+            "filename": "Chainsaw Man - Ch 01.cbz",
+            "detected_preset": "chainsaw_man",
+            "preset_title": "Chainsaw Man",
+            "total_pages": 1,
+            "processed_count": 1,
+            "status": "completed",
+            "pages": [
+                {
+                    "filename": "page_001.png",
+                    "path": str(dummy_color),
+                    "original_path": str(dummy_color),
+                    "status": "colorized",
+                    "colorized_url": f"/api/session/{session_id}/image/colorized/page_001.png",
+                }
+            ],
+        }
+
+        # 1. Learn page with exemplar
+        res_learn = client.post(
+            "/api/series-memory/learn-page",
+            json={
+                "session_id": session_id,
+                "page_index": 0,
+                "character_names": ["Denji"],
+                "exemplar": True,
+            },
+        )
+        assert res_learn.status_code == 200
+        series_key = res_learn.json()["series_key"]
+
+        # 2. GET /api/series-memory/{session_id}/exemplars
+        res_exs = client.get(f"/api/series-memory/{session_id}/exemplars")
+        assert res_exs.status_code == 200
+        data_exs = res_exs.json()
+        assert data_exs["status"] == "ok"
+        assert len(data_exs["exemplars"]) == 1
+        ex0 = data_exs["exemplars"][0]
+        assert ex0["page_index"] == 0
+        assert ex0["pinned"] is False
+        assert ex0["image_url"] is not None
+
+        # 3. Fetch exemplar image via image_url
+        img_resp = client.get(ex0["image_url"])
+        assert img_resp.status_code == 200
+        assert "image" in img_resp.headers.get("content-type", "")
+
+        # 4. Pin exemplar
+        pin_resp = client.post(
+            "/api/series-memory/pin-exemplar",
+            json={"series_key": series_key, "page_index": 0, "pinned": True},
+        )
+        assert pin_resp.status_code == 200
+        assert pin_resp.json()["pinned"] is True
+
+        # Check it's pinned
+        res_exs2 = client.get(f"/api/series-memory/{session_id}/exemplars")
+        assert res_exs2.json()["exemplars"][0]["pinned"] is True
+
+        # 5. Delete exemplar
+        del_resp = client.delete(f"/api/series-memory/{series_key}/exemplar/0")
+        assert del_resp.status_code == 200
+        assert del_resp.json()["removed"] is True
+
+        # Check it's gone
+        res_exs3 = client.get(f"/api/series-memory/{session_id}/exemplars")
+        assert len(res_exs3.json()["exemplars"]) == 0
+
+
+def test_learn_page_without_path_key_production_session_format(client, tmp_path, monkeypatch):
+    """
+    Verifies that POST /api/series-memory/learn-page works with realistic production session
+    dictionaries where pages only contain 'filename', 'original_path', and 'colorized_url'
+    (WITHOUT a 'path' key), preventing KeyError: 'path'.
+    """
+    storage_dir = tmp_path / "sessions"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("main.STORAGE_DIR", storage_dir)
+
+    session_id = "test-prod-session-format"
+    sess_dir = storage_dir / session_id
+    colorized_dir = sess_dir / "colorized"
+    original_dir = sess_dir / "original"
+    colorized_dir.mkdir(parents=True, exist_ok=True)
+    original_dir.mkdir(parents=True, exist_ok=True)
+
+    dummy_orig = original_dir / "page_0001.jpg"
+    dummy_color = colorized_dir / "page_0001.jpg"
+    Image.new("RGB", (60, 60), (240, 240, 240)).save(dummy_orig)
+    Image.new("RGB", (60, 60), (255, 120, 80)).save(dummy_color)
+
+    # Realistic production page structure (NO 'path' key)
+    SESSIONS[session_id] = {
+        "session_id": session_id,
+        "filename": "one_piece_ch1.cbz",
+        "detected_preset": "one_piece",
+        "preset_title": "One Piece",
+        "total_pages": 1,
+        "processed_count": 1,
+        "status": "completed",
+        "pages": [
+            {
+                "page_index": 0,
+                "display_name": "Page 1",
+                "filename": "page_0001.jpg",
+                "original_path": str(dummy_orig),
+                "width": 60,
+                "height": 60,
+                "type": "pdf_page",
+                "status": "colorized",
+                "colorized_url": f"/api/session/{session_id}/image/colorized/page_0001.jpg",
+                "engine_used": "ResNeXt-50/101 Generator + Vibrant Chroma (MPS)",
+                "recognized_characters": [{"name": "Monkey D. Luffy", "confidence": 0.95}],
+            }
+        ],
+    }
+
+    res_learn = client.post(
+        "/api/series-memory/learn-page",
+        json={
+            "session_id": session_id,
+            "page_index": 0,
+            "exemplar": True,
+        },
+    )
+    assert res_learn.status_code == 200, f"Expected 200, got {res_learn.status_code}: {res_learn.text}"
+    data = res_learn.json()
+    assert data["status"] == "ok"
+    assert data["series_key"] == "one_piece"
+    assert SESSIONS[session_id]["pages"][0]["learned_to_memory"] is True
+    assert len(data["memory"]["exemplar_pages"]) >= 1
+

@@ -1,0 +1,8 @@
+{
+  "series_key": "one_piece",
+  "steps": 40,
+  "final_loss": 0.0,
+  "samples_count": 2,
+  "timestamp": 1789748180.244415,
+  "device": "mps"
+}

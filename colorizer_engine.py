@@ -34,6 +34,13 @@ BASE_DIR = Path(__file__).parent.resolve()
 NETWORKS_DIR = BASE_DIR / "networks"
 DENOISING_DIR = BASE_DIR / "denoising" / "models"
 
+try:
+    from series_adapter import SeriesAdapterTrainer, SeriesResidualAdapter
+    HAS_SERIES_ADAPTER = True
+except ImportError as e:
+    HAS_SERIES_ADAPTER = False
+
+
 
 # ─────────────────────────────────────────────────────────────────────
 #  Color Detection Utility
@@ -923,6 +930,93 @@ def apply_character_palette_harmonization(
     )
 
 
+def transfer_exemplar_palette(
+    target_rgb: np.ndarray,
+    exemplar_img_path: str,
+    blend_weight: float = 0.35,
+    preserve_line_art: bool = True,
+    orig_gray: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Transfers the chromatic tone and color atmosphere of an approved manga exemplar page
+    to the target colorized page using statistical Lab color distribution alignment (Reinhard et al.).
+
+    Safeguards:
+    - Protects native ink lines (prevents line bleeding).
+    - Protects pure white speech bubbles and margin paper.
+    - Preserves local high-saturation character features while aligning ambient tones (skin, background, sky).
+    """
+    if not exemplar_img_path or not os.path.exists(exemplar_img_path):
+        return target_rgb
+
+    try:
+        ex_bgr = cv2.imread(exemplar_img_path)
+        if ex_bgr is None:
+            return target_rgb
+        ex_rgb = cv2.cvtColor(ex_bgr, cv2.COLOR_BGR2RGB)
+
+        target_lab = cv2.cvtColor(target_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        ex_lab = cv2.cvtColor(ex_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+        # Mask out extreme highlights (speech bubbles/margins) and shadows (black ink lines)
+        # to ensure color statistics are calculated purely on shaded content
+        target_mask = (target_lab[:, :, 0] > 25.0) & (target_lab[:, :, 0] < 242.0)
+        ex_mask = (ex_lab[:, :, 0] > 25.0) & (ex_lab[:, :, 0] < 242.0)
+
+        if not np.any(target_mask) or not np.any(ex_mask):
+            return target_rgb
+
+        # Compute mean and std for each channel
+        mean_t = [float(target_lab[:, :, i][target_mask].mean()) for i in range(3)]
+        std_t = [max(float(target_lab[:, :, i][target_mask].std()), 1.0) for i in range(3)]
+
+        mean_e = [float(ex_lab[:, :, i][ex_mask].mean()) for i in range(3)]
+        std_e = [max(float(ex_lab[:, :, i][ex_mask].std()), 1.0) for i in range(3)]
+
+        # Scale and shift chromatic a and b channels
+        res_lab = target_lab.copy()
+        res_lab[:, :, 1] = (target_lab[:, :, 1] - mean_t[1]) * (std_e[1] / std_t[1]) + mean_e[1]
+        res_lab[:, :, 2] = (target_lab[:, :, 2] - mean_t[2]) * (std_e[2] / std_t[2]) + mean_e[2]
+
+        # Subtle L channel alignment (damped so target panel contrast is preserved)
+        l_scale = float(np.clip(std_e[0] / std_t[0], 0.85, 1.15))
+        res_lab[:, :, 0] = (target_lab[:, :, 0] - mean_t[0]) * l_scale + mean_t[0]
+
+        res_lab = np.clip(res_lab, 0, 255).astype(np.uint8)
+        transferred_rgb = cv2.cvtColor(res_lab, cv2.COLOR_LAB2RGB)
+
+        # Blend with target
+        w = float(np.clip(blend_weight, 0.0, 1.0))
+        blended = np.clip(
+            (1.0 - w) * target_rgb.astype(np.float32) + w * transferred_rgb.astype(np.float32),
+            0,
+            255,
+        ).astype(np.uint8)
+
+        # Protect native ink and pure white speech bubbles
+        if orig_gray is not None:
+            if orig_gray.dtype == np.uint8:
+                gray_f = orig_gray.astype(np.float32) / 255.0
+            else:
+                gray_f = orig_gray
+
+            # Pure white speech bubbles (preserve white interior)
+            bubble_mask = gray_f > 0.95
+            if np.any(bubble_mask):
+                blended[bubble_mask] = target_rgb[bubble_mask]
+
+            # Crisp black lines
+            if preserve_line_art:
+                line_mask = gray_f < 0.20
+                if np.any(line_mask):
+                    blended[line_mask] = target_rgb[line_mask]
+
+        return blended
+    except Exception as e:
+        print(f"[transfer_exemplar_palette Warning] {e}")
+        return target_rgb
+
+
 # ─────────────────────────────────────────────────────────────────────
 #  Manga Character Recognition Engine
 # ─────────────────────────────────────────────────────────────────────
@@ -1800,6 +1894,9 @@ class MangaColorizerEngine:
         self.colorizer_model: Optional[Any] = None
         self.denoiser: Optional[Any] = None
         self.recognizer = MangaCharacterRecognizer()
+        self.adapter_trainer = (
+            SeriesAdapterTrainer(BASE_DIR / "storage") if HAS_SERIES_ADAPTER else None
+        )
         self._init_models()
 
     def _ensure_weights(self):
@@ -1891,6 +1988,9 @@ class MangaColorizerEngine:
         recognition_mode: str = "auto",
         skip_recognition: bool = False,
         exemplar_image_path: Optional[str] = None,
+        exemplar_image_paths: Optional[list[str]] = None,
+        series_key: Optional[str] = None,
+        use_series_adapter: bool = True,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -1912,6 +2012,7 @@ class MangaColorizerEngine:
                                 via active_character_names, avoiding a redundant CLIP scan.
             exemplar_image_path: Optional path to an approved colorized page from the series
                                 to provide few-shot visual consistency.
+            exemplar_image_paths: Optional list of approved exemplar paths for multi-reference learning.
         """
         # ── Early exit: page already has colors ─────────────────────
         if skip_if_colored and is_colored_page(image_path):
@@ -1925,6 +2026,11 @@ class MangaColorizerEngine:
                 "output_path": output_path,
             }
 
+        # Resolve exemplar path(s)
+        active_ex_path = exemplar_image_path
+        if not active_ex_path and exemplar_image_paths:
+            active_ex_path = exemplar_image_paths[0]
+
         # ── Page-specific Character Recognition & Palette Optimization ──
         active_palette = character_palette
         recognized_chars: list[dict] = []
@@ -1932,7 +2038,11 @@ class MangaColorizerEngine:
             if any(c.bounding_box is not None for c in character_palette.characters):
                 active_palette = character_palette
                 recognized_chars = [
-                    {"name": c.name, "confidence": 1.0, "bounding_box": list(c.bounding_box)}
+                    {
+                        "name": c.name,
+                        "confidence": 1.0,
+                        "bounding_box": list(c.bounding_box),
+                    }
                     for c in character_palette.characters
                     if c.bounding_box
                 ]
@@ -2014,6 +2124,7 @@ class MangaColorizerEngine:
                 contrast=contrast,
                 line_preserve=line_preserve,
                 character_palette=active_palette,
+                exemplar_image_path=active_ex_path,
             )
         elif provider in ("apple_foundation", "apple"):
             res = self._colorize_apple(
@@ -2028,6 +2139,7 @@ class MangaColorizerEngine:
                 character_palette=active_palette,
                 denoise_screentone=denoise_screentone,
                 denoise_sigma=denoise_sigma,
+                exemplar_image_path=active_ex_path,
             )
         elif provider in ("google_nano", "google"):
             res = self._colorize_google(
@@ -2040,7 +2152,8 @@ class MangaColorizerEngine:
                 contrast=contrast,
                 line_preserve=line_preserve,
                 character_palette=active_palette,
-                exemplar_image_path=exemplar_image_path,
+                exemplar_image_path=active_ex_path,
+                exemplar_image_paths=exemplar_image_paths,
             )
         else:
             res = self._colorize_neural(
@@ -2055,13 +2168,32 @@ class MangaColorizerEngine:
                 character_palette=active_palette,
                 denoise_screentone=denoise_screentone,
                 denoise_sigma=denoise_sigma,
+                exemplar_image_path=active_ex_path,
+                series_key=series_key,
+                use_series_adapter=use_series_adapter,
             )
 
         if isinstance(res, dict):
             if "recognized_characters" not in res:
                 res["recognized_characters"] = recognized_chars
-            if exemplar_image_path and "exemplar_used" not in res and os.path.exists(exemplar_image_path):
-                res["exemplar_used"] = Path(exemplar_image_path).name
+            if active_ex_path and "exemplar_used" not in res and os.path.exists(active_ex_path):
+                res["exemplar_used"] = Path(active_ex_path).name
+            if exemplar_image_paths and "exemplars_used" not in res:
+                res["exemplars_used"] = [Path(p).name for p in exemplar_image_paths if p and os.path.exists(p)]
+
+            # Phase 4: Automated Quality & Confidence Scoring
+            try:
+                from quality_scorer import calculate_quality_score
+                is_skipped = res.get("status") == "skipped_colored"
+                if os.path.exists(output_path):
+                    res["quality_score"] = calculate_quality_score(
+                        orig_img=image_path,
+                        color_img=output_path,
+                        is_skipped_colored=is_skipped,
+                    )
+            except Exception as e:
+                print(f"[MangaColorizer WARNING] Quality scoring error: {e}")
+
         return res
 
     # ── Neural ResNeXt Colorizer Engine ─────────────────────────────
@@ -2079,6 +2211,9 @@ class MangaColorizerEngine:
         character_palette: Optional["CharacterPalette"] = None,
         denoise_screentone: bool = True,
         denoise_sigma: int = 25,
+        exemplar_image_path: Optional[str] = None,
+        series_key: Optional[str] = None,
+        use_series_adapter: bool = True,
     ) -> dict:
         """
         High-Vibrancy Deep Neural Manga Colorization:
@@ -2089,11 +2224,20 @@ class MangaColorizerEngine:
         5. Clean white paper & speech bubble protection.
         6. Optional CharacterPalette hint injection for cross-panel color consistency.
         7. FFDNet Screentone / Halftone dot noise preprocessing.
+        8. Cross-page exemplar palette alignment.
         """
         if self.colorizer_model is None:
             print("[MangaColorizer] Neural model not loaded, running local fallback.")
             return self._colorize_local_semantic(
-                image_path, output_path, model_name, style, saturation, contrast, line_preserve
+                image_path=image_path,
+                output_path=output_path,
+                model_name=model_name,
+                style=style,
+                saturation=saturation,
+                contrast=contrast,
+                line_preserve=line_preserve,
+                character_palette=character_palette,
+                exemplar_image_path=exemplar_image_path,
             )
 
         # 1. Load original high-resolution image
@@ -2138,9 +2282,21 @@ class MangaColorizerEngine:
             hint = torch.zeros(1, 4, pad_h, pad_w, dtype=torch.float32, device=self.device)
 
         # 4. Authentic Neural Inference (Automatic Manga Colorization)
+        adapter_used = False
         with torch.no_grad():
             fake_color, _ = self.colorizer_model(torch.cat([tens_in, hint], 1))
             fake_color = fake_color.detach()
+
+            # 4b. Apply Series LoRA / Residual Adapter if trained for this series (Phase 3)
+            if use_series_adapter and series_key and self.adapter_trainer is not None:
+                adapter = self.adapter_trainer.load_adapter(series_key, device=self.device)
+                if adapter is not None:
+                    try:
+                        fake_color = adapter(fake_color, tens_in[:, 0:1])
+                        adapter_used = True
+                        print(f"[MangaColorizer] Series LoRA Adapter applied for '{series_key}' ✅")
+                    except Exception as e:
+                        print(f"[MangaColorizer WARNING] Failed applying series adapter: {e}")
 
         # Unpad and convert back to RGB [0, 1]
         result_rn = fake_color[0].detach().cpu().permute(1, 2, 0) * 0.5 + 0.5
@@ -2281,18 +2437,31 @@ class MangaColorizerEngine:
         except Exception as e:
             print(f"[MangaColorizer WARNING] Speech bubble protection: {e}")
 
+        # 9b. Optional Cross-Page Exemplar Palette Alignment (Phase 2)
+        if exemplar_image_path and os.path.exists(exemplar_image_path):
+            final_rgb = transfer_exemplar_palette(
+                target_rgb=final_rgb,
+                exemplar_img_path=exemplar_image_path,
+                blend_weight=0.35,
+                preserve_line_art=True,
+                orig_gray=gray_orig,
+            )
+
         # 10. Convert RGB to BGR for cv2.imwrite output
         final_bgr = cv2.cvtColor(final_rgb, cv2.COLOR_RGB2BGR)
 
         # Save to output file
         self._write_optimized_image(output_path, final_bgr, quality=88)
 
-        return {
+        ret = {
             "status": "success",
             "engine": f"ResNeXt-50/101 Generator + Vibrant Chroma ({self.device.upper()})",
             "style": profile["name"],
             "output_path": output_path,
         }
+        if adapter_used:
+            ret["adapter_used"] = True
+        return ret
 
     # ── Apple Silicon Neural Engine ─────────────────────────────────
 
@@ -2309,6 +2478,7 @@ class MangaColorizerEngine:
         character_palette: Optional["CharacterPalette"] = None,
         denoise_screentone: bool = True,
         denoise_sigma: int = 25,
+        exemplar_image_path: Optional[str] = None,
     ) -> dict:
         """
         Apple Silicon Foundation Engine with P3 Wide Color Gamut & Neural Engine vibrance.
@@ -2336,6 +2506,7 @@ class MangaColorizerEngine:
             character_palette=character_palette,
             denoise_screentone=denoise_screentone,
             denoise_sigma=denoise_sigma,
+            exemplar_image_path=exemplar_image_path,
         )
         res["engine"] = f"Apple Foundation Model (MPS Neural Engine - {model_name or 'CoreML'})"
         return res
@@ -2375,6 +2546,7 @@ class MangaColorizerEngine:
         line_preserve: float,
         character_palette: Optional["CharacterPalette"] = None,
         exemplar_image_path: Optional[str] = None,
+        exemplar_image_paths: Optional[list[str]] = None,
     ) -> dict:
         """
         Google Multimodal AI Engine (Nano Banana / Gemini 2.0 / Imagen 3).
@@ -2383,11 +2555,17 @@ class MangaColorizerEngine:
         - Dynamic character semantics & canonical palette guidance
         - Outdoor blue sky gradients and lush green foliage
         - Sound effects styled with comic yellow & purple accents
-        - Visual exemplar reference support for cross-page few-shot consistency
+        - Multi-exemplar visual reference support for cross-page few-shot consistency
         """
         key = (
             api_key or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
         )
+
+        ex_paths = []
+        if exemplar_image_paths:
+            ex_paths = [p for p in exemplar_image_paths if p and os.path.exists(p)]
+        elif exemplar_image_path and os.path.exists(exemplar_image_path):
+            ex_paths = [exemplar_image_path]
 
         # Build dynamic character color guidance from active palette if present
         if character_palette and character_palette.characters:
@@ -2455,8 +2633,9 @@ class MangaColorizerEngine:
                                 "style": "Gemini Demo Reference",
                                 "output_path": output_path,
                             }
-                            if exemplar_image_path and os.path.exists(exemplar_image_path):
-                                ret["exemplar_used"] = Path(exemplar_image_path).name
+                            if ex_paths:
+                                ret["exemplar_used"] = Path(ex_paths[0]).name
+                                ret["exemplars_used"] = [Path(p).name for p in ex_paths]
                             return ret
                 except Exception as e:
                     print(f"[Demo Match Warning] {e}")
@@ -2516,8 +2695,9 @@ class MangaColorizerEngine:
                                 "engine": f"Google Imagen 3 Colorizer ({target_model})",
                                 "output_path": output_path,
                             }
-                            if exemplar_image_path and os.path.exists(exemplar_image_path):
-                                ret["exemplar_used"] = Path(exemplar_image_path).name
+                            if ex_paths:
+                                ret["exemplar_used"] = Path(ex_paths[0]).name
+                                ret["exemplars_used"] = [Path(p).name for p in ex_paths]
                             return ret
                     else:
                         api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
@@ -2534,15 +2714,16 @@ class MangaColorizerEngine:
                     )
 
                     parts_list = []
-                    if exemplar_image_path and os.path.exists(exemplar_image_path):
+                    for i, ep in enumerate(ex_paths[:2]):
                         try:
-                            with open(exemplar_image_path, "rb") as ef:
+                            with open(ep, "rb") as ef:
                                 ex_b64 = base64.b64encode(ef.read()).decode()
-                            ex_mime = "image/jpeg" if exemplar_image_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+                            ex_mime = "image/jpeg" if ep.lower().endswith((".jpg", ".jpeg")) else "image/png"
+                            label = "Primary Visual Character Exemplar" if i == 0 else "Atmospheric / Palette Reference Exemplar"
                             parts_list.append({
                                 "text": (
-                                    "Visual Exemplar Reference: Below is a previously approved, canonically colored page from this exact series. "
-                                    "Strictly match character hair color, skin tones, outfit colors, and shading consistency with this reference image."
+                                    f"Visual Reference {i + 1} ({label}): Below is an approved canonical color page from this exact series. "
+                                    "Strictly match character hair color, skin tones, outfit colors, background aesthetic, and shading consistency with this reference image."
                                 )
                             })
                             parts_list.append({"inline_data": {"mime_type": ex_mime, "data": ex_b64}})
@@ -2592,8 +2773,9 @@ class MangaColorizerEngine:
                                             "engine": f"Google Gemini ({model_candidate})",
                                             "output_path": output_path,
                                         }
-                                        if exemplar_image_path and os.path.exists(exemplar_image_path):
-                                            ret["exemplar_used"] = Path(exemplar_image_path).name
+                                        if ex_paths:
+                                            ret["exemplar_used"] = Path(ex_paths[0]).name
+                                            ret["exemplars_used"] = [Path(p).name for p in ex_paths]
                                         return ret
                         else:
                             api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
@@ -2617,7 +2799,12 @@ class MangaColorizerEngine:
             contrast=contrast * 1.10,
             line_preserve=line_preserve,
             character_palette=character_palette,
+            exemplar_image_path=ex_paths[0] if ex_paths else None,
         )
+        if ex_paths:
+            res["exemplar_used"] = Path(ex_paths[0]).name
+            res["exemplars_used"] = [Path(p).name for p in ex_paths]
+
         if api_error_reason:
             res["engine"] = (
                 f"ResNeXt Neural Engine (Fallback - Google API: {api_error_reason[:40]})"
@@ -2639,10 +2826,11 @@ class MangaColorizerEngine:
         contrast: float,
         line_preserve: float,
         character_palette: Optional["CharacterPalette"] = None,
+        exemplar_image_path: Optional[str] = None,
     ) -> dict:
         """
         Authentic Offline Multi-Region Semantic Engine:
-        Uses LAB color synthesis with region classification and clean margin protection.
+        Uses LAB color synthesis with region classification, exemplar palette transfer, and clean margin protection.
         """
         img_bgr = cv2.imread(image_path)
         if img_bgr is None:
@@ -2702,17 +2890,31 @@ class MangaColorizerEngine:
         bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
         # Harmonize with character palette presets if active
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         if character_palette is not None and character_palette.characters:
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             rgb = apply_character_palette_harmonization(
                 rgb, character_palette, orig_gray=gray.astype(np.float32) / 255.0
             )
-            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+        # Cross-page exemplar palette transfer (Phase 2)
+        if exemplar_image_path and os.path.exists(exemplar_image_path):
+            rgb = transfer_exemplar_palette(
+                target_rgb=rgb,
+                exemplar_img_path=exemplar_image_path,
+                blend_weight=0.35,
+                preserve_line_art=True,
+                orig_gray=gray.astype(np.float32) / 255.0,
+            )
+
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
         self._write_optimized_image(output_path, bgr, quality=88)
 
-        return {
+        ret = {
             "status": "success",
             "engine": f"Smart Local Colorizer ({model_name or style})",
             "output_path": output_path,
         }
+        if exemplar_image_path and os.path.exists(exemplar_image_path):
+            ret["exemplar_used"] = Path(exemplar_image_path).name
+        return ret
