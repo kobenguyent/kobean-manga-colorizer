@@ -3149,6 +3149,14 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   if (typeof updatePageCharacterChips === "function") {
     updatePageCharacterChips(pageIdx);
   }
+
+  const learnBtn = document.getElementById("btn-learn-page-memory");
+  if (learnBtn) {
+    learnBtn.disabled = !page.colorized_url || page.status !== "colorized";
+  }
+  if (typeof fetchSeriesMemory === "function") {
+    fetchSeriesMemory(currentSession?.session_id);
+  }
 }
 
 // --- Comparator Zoom & Pan Engine ---
@@ -4976,6 +4984,9 @@ async function paletteLoadFromServer() {
     }
 
     paletteRender();
+    if (typeof fetchSeriesMemory === "function") {
+      fetchSeriesMemory(currentSession?.session_id);
+    }
   } catch (_) {
     // Silent — palette is optional
   }
@@ -5882,10 +5893,19 @@ async function recolorizePage(pageIdx) {
         colorImg.src = `${data.colorized_url}?t=${ts}`;
       }
 
-      showToast(`${page.display_name} recolorized!`, "success");
+      if (data.exemplar_used) {
+        showToast(`✨ ${page.display_name} recolorized with series exemplar (${data.exemplar_used})!`, "success");
+      } else {
+        showToast(`${page.display_name} recolorized!`, "success");
+      }
       updateColorizedCount();
       // Re-render gallery so card recolorize button refreshes
       renderGalleryGrid();
+      const learnBtn = document.getElementById("btn-learn-page-memory");
+      if (learnBtn) learnBtn.disabled = false;
+      if (typeof fetchSeriesMemory === "function") {
+        fetchSeriesMemory(currentSession?.session_id);
+      }
     } else {
       if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
       showToast(data.detail || "Recolorize failed.", "error");
@@ -5968,6 +5988,148 @@ async function recolorizeSelected() {
   }
 }
 
+// ── Series Memory Active Learning Engine ─────────────────────────
+let currentSeriesMemory = null;
+
+async function fetchSeriesMemory(sessionId) {
+  if (!sessionId && currentSession) sessionId = currentSession.session_id;
+  if (!sessionId) return;
+  try {
+    const resp = await fetch(`/api/series-memory/${sessionId}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    currentSeriesMemory = data.memory || null;
+
+    const box = document.getElementById("series-memory-status-box");
+    const learnedCountEl = document.getElementById("series-memory-learned-count");
+    const exemplarCountEl = document.getElementById("series-memory-exemplar-count");
+    const previewBadge = document.getElementById("series-memory-preview-badge");
+
+    const learnedCount = currentSeriesMemory && currentSeriesMemory.characters
+      ? Object.keys(currentSeriesMemory.characters).length
+      : 0;
+    const exemplarCount = currentSeriesMemory && currentSeriesMemory.exemplar_pages
+      ? currentSeriesMemory.exemplar_pages.length
+      : 0;
+
+    if (box) {
+      if (currentSeriesMemory && (learnedCount > 0 || exemplarCount > 0)) {
+        box.style.display = "flex";
+        if (learnedCountEl) learnedCountEl.textContent = learnedCount;
+        if (exemplarCountEl) exemplarCountEl.textContent = exemplarCount;
+      } else {
+        box.style.display = "none";
+      }
+    }
+
+    if (previewBadge) {
+      if (currentSeriesMemory && (learnedCount > 0 || exemplarCount > 0)) {
+        previewBadge.style.display = "inline-flex";
+        previewBadge.title = `Series Memory Active: ${learnedCount} learned character prior(s), ${exemplarCount} visual exemplar(s)`;
+      } else {
+        previewBadge.style.display = "none";
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to fetch series memory:", err);
+  }
+}
+
+async function learnCurrentPreviewPage() {
+  if (!currentSession) {
+    showToast("No active session.", "warning");
+    return;
+  }
+  if (currentPreviewPageIndex < 0 || !currentSession.pages[currentPreviewPageIndex]) {
+    showToast("No page selected in preview.", "warning");
+    return;
+  }
+  const page = currentSession.pages[currentPreviewPageIndex];
+  if (page.status !== "colorized") {
+    showToast("Please colorize this page first before saving to Series Memory.", "warning");
+    return;
+  }
+
+  const btn = document.getElementById("btn-learn-page-memory");
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="ri-loader-4-line spinner"></i> Learning…';
+  }
+
+  try {
+    const resp = await fetch("/api/series-memory/learn-page", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: currentSession.session_id,
+        page_index: currentPreviewPageIndex,
+        exemplar: true
+      })
+    });
+    const data = await resp.json();
+    if (resp.ok && data.status === "ok") {
+      showToast(`🧠 ${data.message || "Page learned into Series Memory!"}`, "success");
+      if (btn) {
+        btn.innerHTML = '<i class="ri-check-line"></i> Learned!';
+        setTimeout(() => {
+          if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = origHtml || '<i class="ri-brain-line"></i> Learn Page';
+          }
+        }, 2000);
+      }
+      await fetchSeriesMemory(currentSession.session_id);
+      await paletteLoadFromServer();
+    } else {
+      showToast(data.detail || "Failed to learn page into series memory.", "error");
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = origHtml || '<i class="ri-brain-line"></i> Learn Page';
+      }
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml || '<i class="ri-brain-line"></i> Learn Page';
+    }
+  }
+}
+
+async function resetCurrentSeriesMemory(event) {
+  if (event) event.stopPropagation();
+  if (!currentSession) return;
+  const seriesKey = currentSeriesMemory?.series_key || currentSession.detected_preset || "";
+  if (!seriesKey) {
+    showToast("No series key identified for this manga.", "warning");
+    return;
+  }
+
+  const confirmed = await showConfirmModal({
+    title: "Reset Series Memory",
+    message: `Reset learned Series Memory and exemplars for "${currentSeriesMemory?.title || seriesKey}"? This will clear active cross-page learning priors for this series.`,
+    confirmText: "Reset Memory",
+    confirmClass: "btn-danger"
+  });
+
+  if (!confirmed) return;
+
+  try {
+    const resp = await fetch(`/api/series-memory/reset/${seriesKey}`, { method: "POST" });
+    const data = await resp.json();
+    if (resp.ok && data.status === "ok") {
+      showToast("Series Memory reset successfully.", "info");
+      await fetchSeriesMemory(currentSession.session_id);
+      await paletteLoadFromServer();
+    } else {
+      showToast(data.detail || "Reset failed.", "error");
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, "error");
+  }
+}
+
 window.recolorizePage     = recolorizePage;
 window.recolorizeSelected = recolorizeSelected;
 window.changeHistoryPage = changeHistoryPage;
@@ -5996,4 +6158,7 @@ window.filterBrowserFolders = filterBrowserFolders;
 window.showConfirmModal = showConfirmModal;
 window.resolveCustomConfirm = resolveCustomConfirm;
 window.handleCustomConfirmOverlayClick = handleCustomConfirmOverlayClick;
+window.fetchSeriesMemory = fetchSeriesMemory;
+window.learnCurrentPreviewPage = learnCurrentPreviewPage;
+window.resetCurrentSeriesMemory = resetCurrentSeriesMemory;
 

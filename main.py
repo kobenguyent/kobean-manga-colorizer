@@ -53,6 +53,12 @@ from manga_presets import (
     get_preset_by_id,
     search_online_manga_preset,
 )
+from series_memory import (
+    LearnedCharacterTrait,
+    SeriesMemory,
+    SeriesMemoryBank,
+    derive_series_key,
+)
 
 app = FastAPI(title="Manga Colorizer Pro", version="1.0.0")
 
@@ -87,6 +93,7 @@ except Exception as e:
 # Instantiate core engines
 file_processor = MangaFileProcessor(storage_dir=str(STORAGE_DIR))
 colorizer_engine = MangaColorizerEngine()
+SERIES_BANK = SeriesMemoryBank(STORAGE_DIR / "series_memory.json")
 
 # Session state store
 # session_id -> { "file_path": str, "filename": str, "ext": str, "pages": [...], "status": "idle"|"processing"|"completed", "progress": {...} }
@@ -377,6 +384,13 @@ class PaletteOnlineSearchRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class LearnPageRequest(BaseModel):
+    session_id: str
+    page_index: int
+    character_names: Optional[list[str]] = None
+    exemplar: bool = True
+
+
 # In-memory palette store: session_id -> CharacterPalette
 SESSION_PALETTES: dict[str, CharacterPalette] = {}
 
@@ -393,8 +407,8 @@ def save_session_palette(session_id: str, palette: CharacterPalette):
         print(f"[Palette Warning] Failed to write palette.json for {session_id}: {e}")
 
 
-def _get_palette(session_id: str) -> CharacterPalette:
-    """Returns the palette for a session, restoring from disk if needed."""
+def _resolve_base_palette(session_id: str) -> CharacterPalette:
+    """Resolves the raw base palette for a session from memory or disk."""
     if session_id in SESSION_PALETTES:
         pal = SESSION_PALETTES[session_id]
         sess = SESSIONS.get(session_id)
@@ -530,6 +544,28 @@ def _get_palette(session_id: str) -> CharacterPalette:
     new_pal = CharacterPalette()
     SESSION_PALETTES[session_id] = new_pal
     return new_pal
+
+
+def _apply_series_memory_to_palette(session_id: str, pal: CharacterPalette) -> CharacterPalette:
+    """Merges learned traits from SeriesMemory into the session's active palette."""
+    sess = SESSIONS.get(session_id)
+    fn = ""
+    pid = pal.preset_id
+    if sess:
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = pid or sess.get("detected_preset")
+    if fn or pid:
+        s_key, _ = derive_series_key(fn, pid)
+        mem = SERIES_BANK.get_memory(s_key)
+        if mem and mem.characters:
+            return pal.apply_series_memory(mem)
+    return pal
+
+
+def _get_palette(session_id: str) -> CharacterPalette:
+    """Returns the palette for a session, dynamically enhanced with learned series memory."""
+    pal = _resolve_base_palette(session_id)
+    return _apply_series_memory_to_palette(session_id, pal)
 
 
 @app.post("/api/upload")
@@ -1387,6 +1423,12 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 if palette and not palette.characters:
                     palette = None
 
+                # Visual few-shot exemplar from series memory
+                s_fn = sess.get("filename") or sess.get("folder_name") or ""
+                s_pid = (palette.preset_id if palette else None) or sess.get("detected_preset")
+                s_key, s_title = derive_series_key(s_fn, s_pid)
+                exemplar_path = SERIES_BANK.get_exemplar_image(s_key, exclude_path=output_path)
+
                 # Run CPU-bound colorization in a thread without blocking main asyncio loop
                 res = await asyncio.to_thread(
                     colorizer_engine.colorize_page,
@@ -1404,6 +1446,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     denoise_screentone=getattr(req, "denoise_screentone", True),
                     denoise_sigma=getattr(req, "denoise_sigma", 25),
                     recognition_mode=getattr(req, "recognition_mode", "auto"),
+                    exemplar_image_path=exemplar_path,
                 )
 
                 # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -1433,6 +1476,25 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 page_info["engine_used"] = res.get("engine", req.model_provider)
                 if res.get("status") == "skipped_colored":
                     page_info["skipped_colored"] = True
+                if res.get("exemplar_used"):
+                    page_info["exemplar_used"] = res["exemplar_used"]
+
+                # Auto-seed initial series memory exemplar if this series has none yet
+                if res.get("status") not in ("skipped_colored", "failed") and os.path.exists(output_path):
+                    mem = SERIES_BANK.get_memory(s_key)
+                    if not mem or not mem.exemplar_pages:
+                        SERIES_BANK.record_learning(
+                            series_key=s_key,
+                            title=s_title,
+                            characters=[c.to_dict() for c in palette.characters] if palette else [],
+                            session_id=session_id,
+                            page_index=idx,
+                            approved_image_path=output_path,
+                            style=req.style,
+                            saturation=req.saturation,
+                            contrast=req.contrast,
+                            line_preserve=req.line_preserve,
+                        )
 
                 sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
                 save_session_meta(session_id)
@@ -1665,6 +1727,12 @@ async def preview_single_page(req: PreviewRequest):
                 c for c in palette.characters if c.name in req.active_character_names
             ]
 
+        # Resolve exemplar for preview
+        s_fn = sess.get("filename") or sess.get("folder_name") or ""
+        s_pid = (palette.preset_id if palette else None) or sess.get("detected_preset")
+        s_key, s_title = derive_series_key(s_fn, s_pid)
+        exemplar_path = SERIES_BANK.get_exemplar_image(s_key, exclude_path=output_path)
+
         res = await asyncio.to_thread(
             colorizer_engine.colorize_page,
             image_path=orig_path,
@@ -1682,6 +1750,7 @@ async def preview_single_page(req: PreviewRequest):
             denoise_sigma=getattr(req, "denoise_sigma", 25),
             recognition_mode=getattr(req, "recognition_mode", "auto"),
             skip_recognition=bool(getattr(req, "skip_recognition", False)),
+            exemplar_image_path=exemplar_path,
         )
 
         page_info["status"] = "colorized"
@@ -1689,6 +1758,8 @@ async def preview_single_page(req: PreviewRequest):
         page_info["engine_used"] = res.get("engine", req.model_provider)
         if res.get("status") == "skipped_colored":
             page_info["skipped_colored"] = True
+        if res.get("exemplar_used"):
+            page_info["exemplar_used"] = res["exemplar_used"]
         if "recognized_characters" in res:
             page_info["recognized_characters"] = res["recognized_characters"]
 
@@ -1720,6 +1791,8 @@ async def preview_single_page(req: PreviewRequest):
                 "engine": page_info["engine_used"],
                 "page_info": page_info,
                 "recognized_characters": res.get("recognized_characters", []),
+                "exemplar_used": res.get("exemplar_used"),
+                "series_key": s_key,
                 "processed_count": sess["processed_count"],
                 "total_pages": sess.get("total_pages", len(pages)),
             }
@@ -1872,6 +1945,21 @@ async def upsert_palette_character(req: PaletteUpsertRequest):
     palette.characters.append(new_entry)
     save_session_palette(req.session_id, palette)
 
+    # Automatically persist learned character trait into series memory
+    try:
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = palette.preset_id or sess.get("detected_preset")
+        s_key, s_title = derive_series_key(fn, pid)
+        SERIES_BANK.record_learning(
+            series_key=s_key,
+            title=s_title,
+            characters=[new_entry.to_dict()],
+            session_id=req.session_id,
+            page_index=0,
+        )
+    except Exception as e:
+        print(f"[SeriesMemory Learn Error] {e}")
+
     return JSONResponse(
         {"status": "ok", "session_id": req.session_id, "palette": palette.to_dict()}
     )
@@ -1910,6 +1998,114 @@ async def clear_palette(session_id: str):
     save_session_meta(session_id)
 
     return JSONResponse({"status": "ok", "session_id": session_id, "palette": {"characters": []}})
+
+
+# ── Series Memory Endpoints ─────────────────────────────────────────
+
+@app.get("/api/series-memory/{session_id}")
+async def get_series_memory_endpoint(session_id: str):
+    """Retrieves learned character traits and exemplars for this session's manga series."""
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    pal = _get_palette(session_id)
+    fn = sess.get("filename") or sess.get("folder_name") or ""
+    pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+    s_key, s_title = derive_series_key(fn, pid)
+    mem = SERIES_BANK.get_memory(s_key)
+    return JSONResponse({
+        "status": "ok",
+        "session_id": session_id,
+        "series_key": s_key,
+        "title": s_title,
+        "memory": mem.to_dict() if mem else None,
+    })
+
+
+@app.post("/api/series-memory/learn-page")
+async def learn_page_endpoint(req: LearnPageRequest):
+    """
+    Explicitly saves a user-approved or corrected colorized page into Series Memory:
+    - Learns active character traits for this page.
+    - Saves the page's colorized rendering as a visual exemplar for future pages.
+    """
+    sess = get_or_restore_session(req.session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    pages = sess.get("pages", [])
+    if req.page_index < 0 or req.page_index >= len(pages):
+        raise HTTPException(status_code=400, detail=f"Page index {req.page_index} out of range")
+
+    page_info = pages[req.page_index]
+    if page_info.get("status") != "colorized":
+        raise HTTPException(status_code=400, detail="Page is not yet colorized")
+
+    sess_dir = STORAGE_DIR / req.session_id
+    color_filename = Path(page_info["path"]).name
+    colorized_path = sess_dir / "colorized" / color_filename
+    if not colorized_path.exists():
+        stem = Path(page_info["path"]).stem
+        alt_png = sess_dir / "colorized" / f"{stem}.png"
+        alt_jpg = sess_dir / "colorized" / f"{stem}.jpg"
+        if alt_png.exists():
+            colorized_path = alt_png
+        elif alt_jpg.exists():
+            colorized_path = alt_jpg
+        else:
+            raise HTTPException(status_code=404, detail="Colorized image file not found")
+
+    palette = _get_palette(req.session_id)
+    fn = sess.get("filename") or sess.get("folder_name") or ""
+    pid = (palette.preset_id if palette else None) or sess.get("detected_preset")
+    s_key, s_title = derive_series_key(fn, pid)
+
+    chars_to_learn = []
+    if palette and palette.characters:
+        if req.character_names:
+            names_set = {n.lower().strip() for n in req.character_names}
+            chars_to_learn = [c.to_dict() for c in palette.characters if c.name.lower().strip() in names_set]
+        else:
+            rec = page_info.get("recognized_characters", [])
+            if rec:
+                rec_names = {r["name"].lower().strip() for r in rec if isinstance(r, dict) and "name" in r}
+                chars_to_learn = [c.to_dict() for c in palette.characters if c.name.lower().strip() in rec_names]
+            if not chars_to_learn:
+                chars_to_learn = [c.to_dict() for c in palette.characters]
+
+    mem = SERIES_BANK.record_learning(
+        series_key=s_key,
+        title=s_title,
+        characters=chars_to_learn,
+        session_id=req.session_id,
+        page_index=req.page_index,
+        approved_image_path=str(colorized_path) if req.exemplar else None,
+        style=sess.get("style"),
+        saturation=sess.get("saturation"),
+        contrast=sess.get("contrast"),
+        line_preserve=sess.get("line_preserve"),
+    )
+
+    page_info["learned_to_memory"] = True
+    save_session_meta(req.session_id)
+
+    return JSONResponse({
+        "status": "ok",
+        "series_key": s_key,
+        "title": s_title,
+        "message": f"Saved page {req.page_index + 1} into Series Memory for {s_title}",
+        "memory": mem.to_dict(),
+    })
+
+
+@app.post("/api/series-memory/reset/{series_key}")
+async def reset_series_memory_endpoint(series_key: str):
+    """Resets learned traits and exemplars for a given manga series key."""
+    success = SERIES_BANK.reset_series_memory(series_key)
+    return JSONResponse({
+        "status": "ok",
+        "series_key": series_key,
+        "reset": success,
+    })
 
 
 @app.post("/api/session/{session_id}/page/{page_index}/recognize")

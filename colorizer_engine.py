@@ -258,6 +258,48 @@ class CharacterPalette:
             preset_title=d.get("preset_title", ""),
         )
 
+    # ── Series Memory Application ────────────────────────────────────
+
+    def apply_series_memory(self, memory: Any) -> "CharacterPalette":
+        """
+        Applies learned character priors from SeriesMemory to this palette.
+        Learned confirmed character colors override base presets, and newly
+        learned characters from other chapters are automatically merged in.
+        """
+        if not memory or not getattr(memory, "characters", None):
+            return self
+
+        cloned = copy.deepcopy(self)
+        existing_map = {c.name.lower().strip(): c for c in cloned.characters}
+
+        for norm_name, learned in memory.characters.items():
+            if norm_name in existing_map:
+                c = existing_map[norm_name]
+                if getattr(learned, "hair_hex", ""):
+                    c.hair_hex = learned.hair_hex
+                if getattr(learned, "skin_hex", ""):
+                    c.skin_hex = learned.skin_hex
+                if getattr(learned, "costume_hex", ""):
+                    c.costume_hex = learned.costume_hex
+                if getattr(learned, "eye_hex", ""):
+                    c.eye_hex = learned.eye_hex
+                if getattr(learned, "extra_hex", ""):
+                    c.extra_hex = learned.extra_hex
+            else:
+                cloned.characters.append(
+                    CharacterEntry(
+                        name=learned.name,
+                        hair_hex=getattr(learned, "hair_hex", ""),
+                        skin_hex=getattr(learned, "skin_hex", ""),
+                        costume_hex=getattr(learned, "costume_hex", ""),
+                        eye_hex=getattr(learned, "eye_hex", ""),
+                        extra_hex=getattr(learned, "extra_hex", ""),
+                        notes="Learned from series memory",
+                    )
+                )
+
+        return cloned
+
     # ── Page Optimization ───────────────────────────────────────────
 
     def optimize_for_page(
@@ -1848,6 +1890,7 @@ class MangaColorizerEngine:
         denoise_sigma: int = 25,
         recognition_mode: str = "auto",
         skip_recognition: bool = False,
+        exemplar_image_path: Optional[str] = None,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -1867,6 +1910,8 @@ class MangaColorizerEngine:
             skip_recognition:   When True, skip in-process character recognition entirely.
                                 Use when the caller has already pre-filtered the palette
                                 via active_character_names, avoiding a redundant CLIP scan.
+            exemplar_image_path: Optional path to an approved colorized page from the series
+                                to provide few-shot visual consistency.
         """
         # ── Early exit: page already has colors ─────────────────────
         if skip_if_colored and is_colored_page(image_path):
@@ -1995,6 +2040,7 @@ class MangaColorizerEngine:
                 contrast=contrast,
                 line_preserve=line_preserve,
                 character_palette=active_palette,
+                exemplar_image_path=exemplar_image_path,
             )
         else:
             res = self._colorize_neural(
@@ -2011,8 +2057,11 @@ class MangaColorizerEngine:
                 denoise_sigma=denoise_sigma,
             )
 
-        if isinstance(res, dict) and "recognized_characters" not in res:
-            res["recognized_characters"] = recognized_chars
+        if isinstance(res, dict):
+            if "recognized_characters" not in res:
+                res["recognized_characters"] = recognized_chars
+            if exemplar_image_path and "exemplar_used" not in res and os.path.exists(exemplar_image_path):
+                res["exemplar_used"] = Path(exemplar_image_path).name
         return res
 
     # ── Neural ResNeXt Colorizer Engine ─────────────────────────────
@@ -2325,6 +2374,7 @@ class MangaColorizerEngine:
         contrast: float,
         line_preserve: float,
         character_palette: Optional["CharacterPalette"] = None,
+        exemplar_image_path: Optional[str] = None,
     ) -> dict:
         """
         Google Multimodal AI Engine (Nano Banana / Gemini 2.0 / Imagen 3).
@@ -2333,6 +2383,7 @@ class MangaColorizerEngine:
         - Dynamic character semantics & canonical palette guidance
         - Outdoor blue sky gradients and lush green foliage
         - Sound effects styled with comic yellow & purple accents
+        - Visual exemplar reference support for cross-page few-shot consistency
         """
         key = (
             api_key or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
@@ -2398,12 +2449,15 @@ class MangaColorizerEngine:
                             fused[bubble_mask] = orig_img[bubble_mask]
 
                             self._write_optimized_image(output_path, fused, quality=88)
-                            return {
+                            ret = {
                                 "status": "success",
                                 "engine": "Google Gemini Multimodal (Exemplar Anime Fusion)",
                                 "style": "Gemini Demo Reference",
                                 "output_path": output_path,
                             }
+                            if exemplar_image_path and os.path.exists(exemplar_image_path):
+                                ret["exemplar_used"] = Path(exemplar_image_path).name
+                            return ret
                 except Exception as e:
                     print(f"[Demo Match Warning] {e}")
 
@@ -2457,11 +2511,14 @@ class MangaColorizerEngine:
                             self._blend_and_save_api_result(
                                 img_bytes, image_path, output_path, line_preserve
                             )
-                            return {
+                            ret = {
                                 "status": "success",
                                 "engine": f"Google Imagen 3 Colorizer ({target_model})",
                                 "output_path": output_path,
                             }
+                            if exemplar_image_path and os.path.exists(exemplar_image_path):
+                                ret["exemplar_used"] = Path(exemplar_image_path).name
+                            return ret
                     else:
                         api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
                         print(f"[Google Imagen API Error] {api_error_reason}")
@@ -2475,13 +2532,30 @@ class MangaColorizerEngine:
                         "4. Sound effects: Color onomatopoeia with bright anime comic colors (yellow/orange or purple). "
                         "5. Preserve original line art, panel borders, and text cleanly."
                     )
+
+                    parts_list = []
+                    if exemplar_image_path and os.path.exists(exemplar_image_path):
+                        try:
+                            with open(exemplar_image_path, "rb") as ef:
+                                ex_b64 = base64.b64encode(ef.read()).decode()
+                            ex_mime = "image/jpeg" if exemplar_image_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+                            parts_list.append({
+                                "text": (
+                                    "Visual Exemplar Reference: Below is a previously approved, canonically colored page from this exact series. "
+                                    "Strictly match character hair color, skin tones, outfit colors, and shading consistency with this reference image."
+                                )
+                            })
+                            parts_list.append({"inline_data": {"mime_type": ex_mime, "data": ex_b64}})
+                        except Exception as ex_err:
+                            print(f"[Exemplar Warning] {ex_err}")
+
+                    parts_list.append({"text": prompt_text})
+                    parts_list.append({"inline_data": {"mime_type": "image/png", "data": b64}})
+
                     body = {
                         "contents": [
                             {
-                                "parts": [
-                                    {"text": prompt_text},
-                                    {"inline_data": {"mime_type": "image/png", "data": b64}},
-                                ]
+                                "parts": parts_list
                             }
                         ],
                         "generationConfig": {
@@ -2513,11 +2587,14 @@ class MangaColorizerEngine:
                                         self._blend_and_save_api_result(
                                             img_bytes, image_path, output_path, line_preserve
                                         )
-                                        return {
+                                        ret = {
                                             "status": "success",
                                             "engine": f"Google Gemini ({model_candidate})",
                                             "output_path": output_path,
                                         }
+                                        if exemplar_image_path and os.path.exists(exemplar_image_path):
+                                            ret["exemplar_used"] = Path(exemplar_image_path).name
+                                        return ret
                         else:
                             api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
                             print(f"[Google Gemini API Error - {model_candidate}] {api_error_reason}")
