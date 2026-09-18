@@ -34,6 +34,13 @@ BASE_DIR = Path(__file__).parent.resolve()
 NETWORKS_DIR = BASE_DIR / "networks"
 DENOISING_DIR = BASE_DIR / "denoising" / "models"
 
+try:
+    from series_adapter import SeriesAdapterTrainer, SeriesResidualAdapter
+    HAS_SERIES_ADAPTER = True
+except ImportError as e:
+    HAS_SERIES_ADAPTER = False
+
+
 
 # ─────────────────────────────────────────────────────────────────────
 #  Color Detection Utility
@@ -1887,6 +1894,9 @@ class MangaColorizerEngine:
         self.colorizer_model: Optional[Any] = None
         self.denoiser: Optional[Any] = None
         self.recognizer = MangaCharacterRecognizer()
+        self.adapter_trainer = (
+            SeriesAdapterTrainer(BASE_DIR / "storage") if HAS_SERIES_ADAPTER else None
+        )
         self._init_models()
 
     def _ensure_weights(self):
@@ -1979,6 +1989,8 @@ class MangaColorizerEngine:
         skip_recognition: bool = False,
         exemplar_image_path: Optional[str] = None,
         exemplar_image_paths: Optional[list[str]] = None,
+        series_key: Optional[str] = None,
+        use_series_adapter: bool = True,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -2157,6 +2169,8 @@ class MangaColorizerEngine:
                 denoise_screentone=denoise_screentone,
                 denoise_sigma=denoise_sigma,
                 exemplar_image_path=active_ex_path,
+                series_key=series_key,
+                use_series_adapter=use_series_adapter,
             )
 
         if isinstance(res, dict):
@@ -2166,6 +2180,20 @@ class MangaColorizerEngine:
                 res["exemplar_used"] = Path(active_ex_path).name
             if exemplar_image_paths and "exemplars_used" not in res:
                 res["exemplars_used"] = [Path(p).name for p in exemplar_image_paths if p and os.path.exists(p)]
+
+            # Phase 4: Automated Quality & Confidence Scoring
+            try:
+                from quality_scorer import calculate_quality_score
+                is_skipped = res.get("status") == "skipped_colored"
+                if os.path.exists(output_path):
+                    res["quality_score"] = calculate_quality_score(
+                        orig_img=image_path,
+                        color_img=output_path,
+                        is_skipped_colored=is_skipped,
+                    )
+            except Exception as e:
+                print(f"[MangaColorizer WARNING] Quality scoring error: {e}")
+
         return res
 
     # ── Neural ResNeXt Colorizer Engine ─────────────────────────────
@@ -2184,6 +2212,8 @@ class MangaColorizerEngine:
         denoise_screentone: bool = True,
         denoise_sigma: int = 25,
         exemplar_image_path: Optional[str] = None,
+        series_key: Optional[str] = None,
+        use_series_adapter: bool = True,
     ) -> dict:
         """
         High-Vibrancy Deep Neural Manga Colorization:
@@ -2252,9 +2282,21 @@ class MangaColorizerEngine:
             hint = torch.zeros(1, 4, pad_h, pad_w, dtype=torch.float32, device=self.device)
 
         # 4. Authentic Neural Inference (Automatic Manga Colorization)
+        adapter_used = False
         with torch.no_grad():
             fake_color, _ = self.colorizer_model(torch.cat([tens_in, hint], 1))
             fake_color = fake_color.detach()
+
+            # 4b. Apply Series LoRA / Residual Adapter if trained for this series (Phase 3)
+            if use_series_adapter and series_key and self.adapter_trainer is not None:
+                adapter = self.adapter_trainer.load_adapter(series_key, device=self.device)
+                if adapter is not None:
+                    try:
+                        fake_color = adapter(fake_color, tens_in[:, 0:1])
+                        adapter_used = True
+                        print(f"[MangaColorizer] Series LoRA Adapter applied for '{series_key}' ✅")
+                    except Exception as e:
+                        print(f"[MangaColorizer WARNING] Failed applying series adapter: {e}")
 
         # Unpad and convert back to RGB [0, 1]
         result_rn = fake_color[0].detach().cpu().permute(1, 2, 0) * 0.5 + 0.5
@@ -2411,12 +2453,15 @@ class MangaColorizerEngine:
         # Save to output file
         self._write_optimized_image(output_path, final_bgr, quality=88)
 
-        return {
+        ret = {
             "status": "success",
             "engine": f"ResNeXt-50/101 Generator + Vibrant Chroma ({self.device.upper()})",
             "style": profile["name"],
             "output_path": output_path,
         }
+        if adapter_used:
+            ret["adapter_used"] = True
+        return ret
 
     # ── Apple Silicon Neural Engine ─────────────────────────────────
 

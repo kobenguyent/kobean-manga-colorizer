@@ -397,6 +397,19 @@ class PinExemplarRequest(BaseModel):
     pinned: bool = True
 
 
+class TrainSeriesAdapterRequest(BaseModel):
+    series_key: Optional[str] = None
+    steps: int = 100
+    lr: float = 2e-4
+
+
+class AutoRefineSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    threshold: Optional[float] = None
+    interval: Optional[int] = None
+
+
+
 
 # In-memory palette store: session_id -> CharacterPalette
 SESSION_PALETTES: dict[str, CharacterPalette] = {}
@@ -1294,6 +1307,64 @@ async def stream_progress(session_id: str, auto_resume: bool = Query(False)):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+def _launch_auto_adapter_refine(series_key: str, title: str, session_id: str):
+    """
+    Asynchronously fine-tunes the SeriesResidualAdapter when enough high-confidence
+    pages are harvested through the active learning loop.
+    """
+    trainer = colorizer_engine.adapter_trainer
+    if trainer is None or series_key in trainer.active_trainers:
+        return
+
+    mem = SERIES_BANK.get_memory(series_key)
+    if not mem or len(mem.exemplar_pages) < 1:
+        return
+
+    train_images = []
+    for ex in mem.exemplar_pages:
+        p = ex.get("image_path")
+        if p and os.path.exists(p) and p not in train_images:
+            train_images.append(p)
+
+    if not train_images:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    def _worker():
+        try:
+            def _on_progress(progress_info):
+                for sid, s in SESSIONS.items():
+                    fn = s.get("filename") or s.get("folder_name") or ""
+                    pid = s.get("detected_preset")
+                    k, _ = derive_series_key(fn, pid)
+                    if k == series_key:
+                        asyncio.run_coroutine_threadsafe(
+                            notify_sse_listeners(sid, {
+                                "type": "adapter_training_progress",
+                                "auto_refine": True,
+                                **progress_info,
+                            }),
+                            loop,
+                        )
+
+            trainer.train_series_sync(
+                series_key=series_key,
+                image_paths=train_images,
+                total_steps=40,
+                lr=2e-4,
+                on_progress=_on_progress,
+            )
+            SERIES_BANK.reset_unrefined_counter(series_key)
+        except Exception as e:
+            print(f"[Auto-Refine Error] {e}")
+
+    asyncio.create_task(asyncio.to_thread(_worker))
+
+
 def run_colorization_worker(session_id: str, req: ColorizeRequest):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1467,6 +1538,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     recognition_mode=getattr(req, "recognition_mode", "auto"),
                     exemplar_image_path=exemplar_path,
                     exemplar_image_paths=exemplar_paths,
+                    series_key=s_key,
+                    use_series_adapter=True,
                 )
 
                 # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -1500,23 +1573,46 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     page_info["exemplar_used"] = res["exemplar_used"]
                 if res.get("exemplars_used"):
                     page_info["exemplars_used"] = res["exemplars_used"]
+                if res.get("adapter_used"):
+                    page_info["adapter_used"] = True
 
-                # Auto-seed initial series memory exemplar if this series has none yet
-                if res.get("status") not in ("skipped_colored", "failed") and os.path.exists(output_path):
-                    mem = SERIES_BANK.get_memory(s_key)
-                    if not mem or not mem.exemplar_pages:
-                        SERIES_BANK.record_learning(
+                # Phase 4: Automated Quality & Confidence-Gated Auto-Harvesting
+                q_score = res.get("quality_score")
+                if q_score:
+                    page_info["quality_score"] = q_score
+
+                if res.get("status") != "failed" and os.path.exists(output_path):
+                    if q_score:
+                        mem, should_refine = SERIES_BANK.record_auto_harvest(
                             series_key=s_key,
                             title=s_title,
-                            characters=[c.to_dict() for c in palette.characters] if palette else [],
                             session_id=session_id,
                             page_index=idx,
                             approved_image_path=output_path,
+                            quality_score=q_score,
+                            characters=[c.to_dict() for c in palette.characters] if palette else [],
                             style=req.style,
-                            saturation=req.saturation,
-                            contrast=req.contrast,
-                            line_preserve=req.line_preserve,
                         )
+                        if q_score.get("auto_learn_eligible"):
+                            page_info["auto_harvested"] = True
+
+                        if should_refine:
+                            _launch_auto_adapter_refine(s_key, s_title, session_id)
+                    else:
+                        mem = SERIES_BANK.get_memory(s_key)
+                        if not mem or not mem.exemplar_pages:
+                            SERIES_BANK.record_learning(
+                                series_key=s_key,
+                                title=s_title,
+                                characters=[c.to_dict() for c in palette.characters] if palette else [],
+                                session_id=session_id,
+                                page_index=idx,
+                                approved_image_path=output_path,
+                                style=req.style,
+                                saturation=req.saturation,
+                                contrast=req.contrast,
+                                line_preserve=req.line_preserve,
+                            )
 
                 sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
                 save_session_meta(session_id)
@@ -1532,6 +1628,9 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                         "engine": page_info["engine_used"],
                         "exemplar_used": page_info.get("exemplar_used"),
                         "exemplars_used": page_info.get("exemplars_used", []),
+                        "adapter_used": bool(page_info.get("adapter_used")),
+                        "quality_score": page_info.get("quality_score"),
+                        "auto_harvested": bool(page_info.get("auto_harvested")),
                         "processed_count": sess["processed_count"],
                         "total": sess["total_pages"],
                     },
@@ -1790,6 +1889,8 @@ async def preview_single_page(req: PreviewRequest):
             skip_recognition=bool(getattr(req, "skip_recognition", False)),
             exemplar_image_path=exemplar_path,
             exemplar_image_paths=exemplar_paths,
+            series_key=s_key,
+            use_series_adapter=True,
         )
 
         page_info["status"] = "colorized"
@@ -1801,6 +1902,10 @@ async def preview_single_page(req: PreviewRequest):
             page_info["exemplar_used"] = res["exemplar_used"]
         if res.get("exemplars_used"):
             page_info["exemplars_used"] = res["exemplars_used"]
+        if res.get("adapter_used"):
+            page_info["adapter_used"] = True
+        if res.get("quality_score"):
+            page_info["quality_score"] = res["quality_score"]
         if "recognized_characters" in res:
             page_info["recognized_characters"] = res["recognized_characters"]
 
@@ -1821,6 +1926,8 @@ async def preview_single_page(req: PreviewRequest):
                 "engine": page_info["engine_used"],
                 "exemplar_used": page_info.get("exemplar_used"),
                 "exemplars_used": page_info.get("exemplars_used", []),
+                "adapter_used": bool(page_info.get("adapter_used")),
+                "quality_score": page_info.get("quality_score"),
                 "processed_count": sess["processed_count"],
                 "total": sess.get("total_pages", len(pages)),
             },
@@ -1833,9 +1940,11 @@ async def preview_single_page(req: PreviewRequest):
                 "colorized_url": page_info["colorized_url"],
                 "engine": page_info["engine_used"],
                 "page_info": page_info,
+                "quality_score": page_info.get("quality_score"),
                 "recognized_characters": res.get("recognized_characters", []),
                 "exemplar_used": res.get("exemplar_used"),
                 "exemplars_used": res.get("exemplars_used", []),
+                "adapter_used": bool(res.get("adapter_used")),
                 "series_key": s_key,
                 "processed_count": sess["processed_count"],
                 "total_pages": sess.get("total_pages", len(pages)),
@@ -2085,16 +2194,35 @@ async def learn_page_endpoint(req: LearnPageRequest):
         raise HTTPException(status_code=400, detail="Page is not yet colorized")
 
     sess_dir = STORAGE_DIR / req.session_id
-    color_filename = Path(page_info["path"]).name
+    color_filename = (
+        page_info.get("filename")
+        or (Path(page_info["original_path"]).name if page_info.get("original_path") else None)
+        or (Path(page_info["path"]).name if page_info.get("path") else None)
+    )
+    if not color_filename and page_info.get("colorized_url"):
+        color_filename = Path(page_info["colorized_url"].split("?")[0]).name
+    if not color_filename:
+        color_filename = f"page_{req.page_index + 1:04d}.jpg"
+
     colorized_path = sess_dir / "colorized" / color_filename
     if not colorized_path.exists():
-        stem = Path(page_info["path"]).stem
+        stem = Path(color_filename).stem
         alt_png = sess_dir / "colorized" / f"{stem}.png"
         alt_jpg = sess_dir / "colorized" / f"{stem}.jpg"
+        alt_idx_jpg = sess_dir / "colorized" / f"page_{req.page_index + 1:04d}.jpg"
+        alt_idx_png = sess_dir / "colorized" / f"page_{req.page_index + 1:04d}.png"
         if alt_png.exists():
             colorized_path = alt_png
         elif alt_jpg.exists():
             colorized_path = alt_jpg
+        elif alt_idx_jpg.exists():
+            colorized_path = alt_idx_jpg
+        elif alt_idx_png.exists():
+            colorized_path = alt_idx_png
+        elif page_info.get("path") and Path(page_info["path"]).exists():
+            colorized_path = Path(page_info["path"])
+        elif page_info.get("original_path") and page_info.get("skipped_colored") and Path(page_info["original_path"]).exists():
+            colorized_path = Path(page_info["original_path"])
         else:
             raise HTTPException(status_code=404, detail="Colorized image file not found")
 
@@ -2251,6 +2379,286 @@ async def pin_series_exemplar_endpoint(req: PinExemplarRequest):
         "series_key": effective_key,
         "page_index": req.page_index,
         "pinned": req.pinned,
+    })
+
+
+# ── Series Style Adapter (LoRA Fine-Tuning) Endpoints ───────────────
+
+@app.post("/api/series-memory/{series_key}/train-adapter")
+async def train_series_adapter_endpoint(
+    series_key: str,
+    req: Optional[TrainSeriesAdapterRequest] = None,
+):
+    """
+    Launches background fine-tuning of a lightweight Series Style Adapter (~140 KB)
+    for this series using user-approved exemplar pages and color spreads.
+    """
+    effective_key = series_key
+    sess = get_or_restore_session(series_key)
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    trainer = colorizer_engine.adapter_trainer
+    if trainer is None:
+        raise HTTPException(status_code=500, detail="SeriesAdapterTrainer not initialized")
+
+    status = trainer.get_status(effective_key)
+    if status.get("status") == "training":
+        raise HTTPException(status_code=409, detail="Adapter training already in progress")
+
+    # Collect training images from Series Memory exemplars and colored session pages
+    train_images: list[str] = []
+    mem = SERIES_BANK.get_memory(effective_key)
+    if mem and mem.exemplar_pages:
+        for ex in mem.exemplar_pages:
+            p = ex.get("image_path")
+            if p and os.path.exists(p) and p not in train_images:
+                train_images.append(p)
+
+    # Also search SESSIONS for colorized/color pages matching this series
+    for sid, s in SESSIONS.items():
+        fn = s.get("filename") or s.get("folder_name") or ""
+        pid = s.get("detected_preset")
+        k, _ = derive_series_key(fn, pid)
+        if k == effective_key:
+            for page in s.get("pages", []):
+                if page.get("status") == "colorized" or page.get("skipped_colored"):
+                    color_p = page.get("path")
+                    if not color_p and page.get("status") == "colorized":
+                        fn = page.get("filename")
+                        if fn:
+                            cand = STORAGE_DIR / sid / "colorized" / fn
+                            if cand.exists():
+                                color_p = str(cand)
+                    if not color_p and page.get("skipped_colored"):
+                        color_p = page.get("original_path")
+                    if color_p and os.path.exists(color_p) and color_p not in train_images:
+                        train_images.append(color_p)
+
+    if not train_images:
+        raise HTTPException(
+            status_code=400,
+            detail="No training images available for this series. Please learn/approve at least one page or import a volume with color pages.",
+        )
+
+    steps = req.steps if req and req.steps else 100
+    lr = req.lr if req and req.lr else 2e-4
+
+    loop = asyncio.get_running_loop()
+
+    def _train_worker():
+        def _on_progress(progress_info):
+            for sid, s in SESSIONS.items():
+                fn = s.get("filename") or s.get("folder_name") or ""
+                pid = s.get("detected_preset")
+                k, _ = derive_series_key(fn, pid)
+                if k == effective_key:
+                    asyncio.run_coroutine_threadsafe(
+                        notify_sse_listeners(sid, {
+                            "type": "adapter_training_progress",
+                            **progress_info,
+                        }),
+                        loop,
+                    )
+
+        return trainer.train_series_sync(
+            series_key=effective_key,
+            image_paths=train_images,
+            total_steps=steps,
+            lr=lr,
+            on_progress=_on_progress,
+        )
+
+    # Launch in background thread without blocking FastAPI event loop
+    asyncio.create_task(asyncio.to_thread(_train_worker))
+
+    return JSONResponse({
+        "status": "training_started",
+        "series_key": effective_key,
+        "total_steps": steps,
+        "samples_count": len(train_images),
+    })
+
+
+@app.get("/api/series-memory/{series_key}/adapter-status")
+async def get_series_adapter_status_endpoint(series_key: str):
+    """Returns training progress or current checkpoint metadata for a series adapter."""
+    effective_key = series_key
+    sess = get_or_restore_session(series_key)
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    trainer = colorizer_engine.adapter_trainer
+    if trainer is None:
+        return JSONResponse({"status": "unavailable", "series_key": effective_key})
+
+    status_data = trainer.get_status(effective_key)
+    return JSONResponse(status_data)
+
+
+@app.post("/api/series-memory/{series_key}/cancel-training")
+async def cancel_series_adapter_training_endpoint(series_key: str):
+    """Cancels ongoing fine-tuning of a series style adapter."""
+    effective_key = series_key
+    sess = get_or_restore_session(series_key)
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    trainer = colorizer_engine.adapter_trainer
+    cancelled = trainer.cancel_training(effective_key) if trainer else False
+    return JSONResponse({
+        "status": "ok",
+        "series_key": effective_key,
+        "cancelled": cancelled,
+    })
+
+
+@app.delete("/api/series-memory/{series_key}/adapter")
+async def delete_series_adapter_endpoint(series_key: str):
+    """Deletes a trained series style adapter checkpoint and frees in-memory weights."""
+    effective_key = series_key
+    sess = get_or_restore_session(series_key)
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    trainer = colorizer_engine.adapter_trainer
+    deleted = trainer.delete_adapter(effective_key) if trainer else False
+    return JSONResponse({
+        "status": "ok",
+        "series_key": effective_key,
+        "deleted": deleted,
+    })
+
+
+@app.get("/api/session/{session_id}/page/{page_index}/quality")
+async def get_page_quality_score_endpoint(session_id: str, page_index: int):
+    """Returns detailed quality metrics and confidence breakdown for a colorized page."""
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    pages = sess.get("pages", [])
+    if page_index < 0 or page_index >= len(pages):
+        raise HTTPException(status_code=404, detail="Page index out of range")
+
+    page = pages[page_index]
+    if page.get("quality_score"):
+        return JSONResponse({"status": "ok", "page_index": page_index, "quality_score": page["quality_score"]})
+
+    # If not already stored but colorized page exists, compute on the fly
+    orig_path = page.get("original_path")
+    color_path = page.get("path")
+    if not color_path and orig_path:
+        fn = page.get("filename") or Path(orig_path).name
+        cand = STORAGE_DIR / session_id / "colorized" / fn
+        if cand.exists():
+            color_path = str(cand)
+    if orig_path and color_path and os.path.exists(orig_path) and os.path.exists(color_path):
+        from quality_scorer import calculate_quality_score
+        is_skipped = bool(page.get("skipped_colored"))
+        q = calculate_quality_score(orig_path, color_path, is_skipped_colored=is_skipped)
+        page["quality_score"] = q
+        save_session_meta(session_id)
+        return JSONResponse({"status": "ok", "page_index": page_index, "quality_score": q})
+
+    raise HTTPException(status_code=400, detail="Page is not yet colorized")
+
+
+@app.get("/api/series-memory/{series_key}/auto-refine")
+async def get_series_auto_refine_endpoint(series_key: str):
+    """Returns auto-refinement and confidence-gated active learning settings for a series."""
+    effective_key = series_key
+    sess = get_or_restore_session(series_key)
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    mem = SERIES_BANK.get_memory(effective_key)
+    return JSONResponse({
+        "status": "ok",
+        "series_key": effective_key,
+        "auto_refine_enabled": mem.auto_refine_enabled if mem else True,
+        "auto_harvest_threshold": mem.auto_harvest_threshold if mem else 0.82,
+        "auto_refine_interval": mem.auto_refine_interval if mem else 5,
+        "unrefined_pages_count": mem.unrefined_pages_count if mem else 0,
+        "auto_learned_count": mem.auto_learned_count if mem else 0,
+        "total_exemplars": len(mem.exemplar_pages) if mem else 0,
+    })
+
+
+@app.post("/api/series-memory/{series_key}/auto-refine")
+async def update_series_auto_refine_endpoint(
+    series_key: str,
+    req: AutoRefineSettingsRequest,
+):
+    """Updates auto-refinement and confidence thresholds for a series."""
+    effective_key = series_key
+    sess = get_or_restore_session(series_key)
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, _ = derive_series_key(fn, pid)
+
+    mem = SERIES_BANK.update_auto_refine_settings(
+        series_key=effective_key,
+        enabled=req.enabled,
+        threshold=req.threshold,
+        interval=req.interval,
+    )
+    return JSONResponse({
+        "status": "ok",
+        "series_key": effective_key,
+        "auto_refine_enabled": mem.auto_refine_enabled,
+        "auto_harvest_threshold": mem.auto_harvest_threshold,
+        "auto_refine_interval": mem.auto_refine_interval,
+        "unrefined_pages_count": mem.unrefined_pages_count,
+        "auto_learned_count": mem.auto_learned_count,
+    })
+
+
+@app.post("/api/series-memory/{series_key}/trigger-auto-refine")
+async def trigger_series_auto_refine_endpoint(series_key: str):
+    """Forces an immediate LoRA adapter refinement pass using harvested high-confidence pages."""
+    effective_key = series_key
+    effective_title = series_key
+    sess = get_or_restore_session(series_key)
+    session_id = series_key
+    if sess:
+        pal = _get_palette(series_key)
+        fn = sess.get("filename") or sess.get("folder_name") or ""
+        pid = (pal.preset_id if pal else None) or sess.get("detected_preset")
+        effective_key, effective_title = derive_series_key(fn, pid)
+        session_id = sess.get("session_id", series_key)
+
+    trainer = colorizer_engine.adapter_trainer
+    if trainer is None:
+        raise HTTPException(status_code=500, detail="Adapter trainer not initialized")
+    if effective_key in trainer.active_trainers:
+        raise HTTPException(status_code=409, detail="Adapter training already in progress")
+
+    mem = SERIES_BANK.get_memory(effective_key)
+    if not mem or not mem.exemplar_pages:
+        raise HTTPException(status_code=400, detail="No harvested exemplar pages found for this series")
+
+    _launch_auto_adapter_refine(effective_key, effective_title, session_id)
+    return JSONResponse({
+        "status": "auto_refine_started",
+        "series_key": effective_key,
+        "samples_count": len(mem.exemplar_pages),
     })
 
 

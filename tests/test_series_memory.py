@@ -428,3 +428,67 @@ def test_series_memory_exemplar_endpoints(client, tmp_path):
         res_exs3 = client.get(f"/api/series-memory/{session_id}/exemplars")
         assert len(res_exs3.json()["exemplars"]) == 0
 
+
+def test_learn_page_without_path_key_production_session_format(client, tmp_path, monkeypatch):
+    """
+    Verifies that POST /api/series-memory/learn-page works with realistic production session
+    dictionaries where pages only contain 'filename', 'original_path', and 'colorized_url'
+    (WITHOUT a 'path' key), preventing KeyError: 'path'.
+    """
+    storage_dir = tmp_path / "sessions"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("main.STORAGE_DIR", storage_dir)
+
+    session_id = "test-prod-session-format"
+    sess_dir = storage_dir / session_id
+    colorized_dir = sess_dir / "colorized"
+    original_dir = sess_dir / "original"
+    colorized_dir.mkdir(parents=True, exist_ok=True)
+    original_dir.mkdir(parents=True, exist_ok=True)
+
+    dummy_orig = original_dir / "page_0001.jpg"
+    dummy_color = colorized_dir / "page_0001.jpg"
+    Image.new("RGB", (60, 60), (240, 240, 240)).save(dummy_orig)
+    Image.new("RGB", (60, 60), (255, 120, 80)).save(dummy_color)
+
+    # Realistic production page structure (NO 'path' key)
+    SESSIONS[session_id] = {
+        "session_id": session_id,
+        "filename": "one_piece_ch1.cbz",
+        "detected_preset": "one_piece",
+        "preset_title": "One Piece",
+        "total_pages": 1,
+        "processed_count": 1,
+        "status": "completed",
+        "pages": [
+            {
+                "page_index": 0,
+                "display_name": "Page 1",
+                "filename": "page_0001.jpg",
+                "original_path": str(dummy_orig),
+                "width": 60,
+                "height": 60,
+                "type": "pdf_page",
+                "status": "colorized",
+                "colorized_url": f"/api/session/{session_id}/image/colorized/page_0001.jpg",
+                "engine_used": "ResNeXt-50/101 Generator + Vibrant Chroma (MPS)",
+                "recognized_characters": [{"name": "Monkey D. Luffy", "confidence": 0.95}],
+            }
+        ],
+    }
+
+    res_learn = client.post(
+        "/api/series-memory/learn-page",
+        json={
+            "session_id": session_id,
+            "page_index": 0,
+            "exemplar": True,
+        },
+    )
+    assert res_learn.status_code == 200, f"Expected 200, got {res_learn.status_code}: {res_learn.text}"
+    data = res_learn.json()
+    assert data["status"] == "ok"
+    assert data["series_key"] == "one_piece"
+    assert SESSIONS[session_id]["pages"][0]["learned_to_memory"] is True
+    assert len(data["memory"]["exemplar_pages"]) >= 1
+

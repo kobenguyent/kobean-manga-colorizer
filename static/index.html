@@ -362,9 +362,12 @@
                     <i class="ri-brain-line" style="color:var(--accent-purple,#a855f7);font-size:0.9rem;"></i>
                     <span>Series Memory: <strong id="series-memory-learned-count" style="color:var(--text-primary);">0</strong> learned (<span id="series-memory-exemplar-count">0</span> exemplars)</span>
                   </div>
-                  <button class="btn-icon" style="font-size:0.7rem;padding:2px 4px;color:var(--text-muted);" title="Reset Series Memory for this manga" onclick="resetCurrentSeriesMemory(event)">
-                    <i class="ri-refresh-line"></i>
-                  </button>
+                  <div style="display:flex;align-items:center;gap:4px;">
+                    <span class="badge" id="series-adapter-badge" style="display:none;cursor:pointer;font-size:0.65rem;padding:1px 5px;" onclick="openExemplarGalleryModal()" title="Series Style LoRA Adapter">LoRA: Ready</span>
+                    <button class="btn-icon" style="font-size:0.7rem;padding:2px 4px;color:var(--text-muted);" title="Reset Series Memory for this manga" onclick="resetCurrentSeriesMemory(event)">
+                      <i class="ri-refresh-line"></i>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -700,6 +703,11 @@
               <!-- Visual Exemplar Reference Chip -->
               <span class="badge" id="preview-exemplar-chip" style="display:none;cursor:pointer;background:rgba(59,130,246,0.18);color:#60a5fa;border:1px solid rgba(59,130,246,0.35);font-size:0.72rem;padding:3px 8px;gap:4px;align-items:center;" onclick="openExemplarGalleryModal()" title="View series exemplars">
                 <i class="ri-gallery-line"></i> <span id="preview-exemplar-label">Ref: None</span>
+              </span>
+
+              <!-- Quality & Confidence Score Chip -->
+              <span class="badge" id="preview-quality-chip" style="display:none;font-size:0.72rem;padding:3px 8px;gap:4px;align-items:center;" title="Colorization Quality & Confidence Score">
+                <i class="ri-shield-check-line" id="preview-quality-icon"></i> <span id="preview-quality-label">Quality: --</span>
               </span>
 
               <!-- Learn Page Button (saves page to Series Memory) -->
@@ -1358,6 +1366,60 @@
       </div>
 
       <div class="folder-import-body" style="padding: 1.25rem; max-height: 480px; overflow-y: auto;">
+        <!-- Series LoRA Fine-Tuning Card -->
+        <div id="adapter-control-card" style="margin-bottom: 1.25rem; padding: 0.75rem 1rem; background: rgba(168,85,247,0.06); border: 1px solid rgba(168,85,247,0.25); border-radius: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <i class="ri-cpu-line" style="font-size: 1.2rem; color: var(--accent-purple, #a855f7);"></i>
+              <div>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <strong style="font-size: 0.85rem;">Series Style Adapter (LoRA)</strong>
+                  <span class="badge" id="adapter-status-badge" style="font-size: 0.68rem; padding: 1px 6px;">Checking…</span>
+                </div>
+                <p style="font-size: 0.73rem; color: var(--text-secondary); margin: 2px 0 0 0;" id="adapter-status-subtext">
+                  Adapts neural generator weights to the artist's shading &amp; linework habits.
+                </p>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <button class="btn btn-sm" id="btn-train-adapter" onclick="triggerSeriesAdapterTraining()"
+                      style="background: linear-gradient(135deg, #7e22ce, #9333ea); border-color: #a855f7; color: #fff; font-size: 0.75rem; padding: 4px 10px;"
+                      title="Train or update LoRA adapter on approved pages and color spreads">
+                <i class="ri-sparkles-line"></i> Fine-Tune LoRA
+              </button>
+              <button class="btn btn-secondary btn-sm" id="btn-delete-adapter" onclick="deleteCurrentSeriesAdapter()"
+                      style="color: #ef4444; font-size: 0.75rem; padding: 4px 8px; display: none;"
+                      title="Delete trained LoRA adapter">
+                <i class="ri-delete-bin-line"></i>
+              </button>
+            </div>
+          </div>
+          <!-- Training Progress Bar -->
+          <div id="adapter-training-progress-container" style="display: none; margin-top: 0.65rem;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.72rem; margin-bottom: 3px; color: var(--text-secondary);">
+              <span id="adapter-training-step-text">Fine-tuning in progress…</span>
+              <span id="adapter-training-loss-text">Loss: --</span>
+            </div>
+            <div class="progress-bar-container" style="height: 6px;">
+              <div class="progress-bar-fill" id="adapter-training-progress-fill" style="width: 0%; background: linear-gradient(90deg, #a855f7, #60a5fa);"></div>
+            </div>
+          </div>
+          <!-- Auto-Refinement Status & Harvest Counter -->
+          <div id="adapter-auto-refine-row" style="margin-top: 0.65rem; padding-top: 0.5rem; border-top: 1px dashed rgba(168,85,247,0.2); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 0.74rem;">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <input type="checkbox" id="chk-auto-refine-adapter" onchange="toggleAutoRefineAdapter(this.checked)" style="cursor: pointer;" checked>
+              <label for="chk-auto-refine-adapter" style="cursor: pointer; color: var(--text-secondary); margin: 0;">
+                Auto-refine LoRA on high-confidence pages (<span id="auto-refine-counter-text">0 / 5 harvested</span>)
+              </label>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span id="auto-harvest-threshold-badge" style="background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; font-size: 0.68rem; color: var(--text-muted);" title="Minimum quality score for automatic harvesting">
+                Gate: ≥ 82% Quality
+              </span>
+            </div>
+          </div>
+        </div>
+
         <div id="exemplar-gallery-loading" style="display: none; text-align: center; padding: 2rem 0;">
           <div class="spinner" style="margin: 0 auto 0.75rem; width: 26px; height: 26px; border: 2px solid rgba(255,255,255,0.15); border-top-color: #60a5fa; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
           <span style="font-size: 0.85rem; color: var(--text-secondary);">Loading series exemplars...</span>

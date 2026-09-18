@@ -77,6 +77,12 @@ class SeriesMemory:
     characters: dict[str, LearnedCharacterTrait] = field(default_factory=dict)
     exemplar_pages: list[dict] = field(default_factory=list)  # list of {"session_id": ..., "page_index": ..., "image_path": ...}
     approved_pages_count: int = 0
+    auto_learned_count: int = 0
+    auto_refine_enabled: bool = True
+    auto_harvest_threshold: float = 0.82
+    auto_refine_interval: int = 5
+    unrefined_pages_count: int = 0
+    quality_scores: dict[str, float] = field(default_factory=dict)
     preferred_style: Optional[str] = None
     preferred_saturation: Optional[float] = None
     preferred_contrast: Optional[float] = None
@@ -90,6 +96,12 @@ class SeriesMemory:
             "characters": {k: v.to_dict() for k, v in self.characters.items()},
             "exemplar_pages": self.exemplar_pages,
             "approved_pages_count": self.approved_pages_count,
+            "auto_learned_count": self.auto_learned_count,
+            "auto_refine_enabled": self.auto_refine_enabled,
+            "auto_harvest_threshold": self.auto_harvest_threshold,
+            "auto_refine_interval": self.auto_refine_interval,
+            "unrefined_pages_count": self.unrefined_pages_count,
+            "quality_scores": self.quality_scores,
             "preferred_style": self.preferred_style,
             "preferred_saturation": self.preferred_saturation,
             "preferred_contrast": self.preferred_contrast,
@@ -108,6 +120,12 @@ class SeriesMemory:
             characters=chars,
             exemplar_pages=list(d.get("exemplar_pages", [])),
             approved_pages_count=int(d.get("approved_pages_count", 0)),
+            auto_learned_count=int(d.get("auto_learned_count", 0)),
+            auto_refine_enabled=bool(d.get("auto_refine_enabled", True)),
+            auto_harvest_threshold=float(d.get("auto_harvest_threshold", 0.82)),
+            auto_refine_interval=int(d.get("auto_refine_interval", 5)),
+            unrefined_pages_count=int(d.get("unrefined_pages_count", 0)),
+            quality_scores=dict(d.get("quality_scores", {})),
             preferred_style=d.get("preferred_style"),
             preferred_saturation=d.get("preferred_saturation"),
             preferred_contrast=d.get("preferred_contrast"),
@@ -180,9 +198,10 @@ class SeriesMemoryBank:
     def get_memory(self, series_key: str) -> Optional[SeriesMemory]:
         return self.memories.get(series_key)
 
-    def get_or_create(self, series_key: str, title: str) -> SeriesMemory:
+    def get_or_create(self, series_key: str, title: str = "") -> SeriesMemory:
         if series_key not in self.memories:
-            self.memories[series_key] = SeriesMemory(series_key=series_key, title=title)
+            display_title = title or " ".join(w.capitalize() for w in series_key.replace("_", " ").split())
+            self.memories[series_key] = SeriesMemory(series_key=series_key, title=display_title)
             self.save()
         return self.memories[series_key]
 
@@ -314,6 +333,78 @@ class SeriesMemoryBank:
 
         self.save()
         return mem
+
+    def record_auto_harvest(
+        self,
+        series_key: str,
+        title: str,
+        session_id: str,
+        page_index: int,
+        approved_image_path: str,
+        quality_score: dict,
+        characters: Optional[list] = None,
+        style: Optional[str] = None,
+    ) -> tuple[SeriesMemory, bool]:
+        """
+        Confidence-gated auto-harvest: when a colorized page exceeds the quality threshold,
+        automatically incorporates it into Series Memory as a high-confidence exemplar,
+        records metrics, increments unrefined counters, and determines if auto-refinement should trigger.
+        """
+        mem = self.get_or_create(series_key, title)
+        page_key = f"{session_id}_{page_index}"
+        overall_score = float(quality_score.get("overall_score", 0.0))
+        mem.quality_scores[page_key] = overall_score
+
+        if not quality_score.get("auto_learn_eligible", False):
+            self.save()
+            return mem, False
+
+        # Record learning into exemplars and character traits
+        self.record_learning(
+            series_key=series_key,
+            title=title,
+            characters=characters or [],
+            session_id=session_id,
+            page_index=page_index,
+            approved_image_path=approved_image_path,
+            style=style,
+        )
+
+        mem.auto_learned_count += 1
+        mem.unrefined_pages_count += 1
+        self.save()
+
+        should_refine = bool(
+            mem.auto_refine_enabled
+            and mem.unrefined_pages_count >= mem.auto_refine_interval
+        )
+        return mem, should_refine
+
+    def update_auto_refine_settings(
+        self,
+        series_key: str,
+        enabled: Optional[bool] = None,
+        threshold: Optional[float] = None,
+        interval: Optional[int] = None,
+    ) -> SeriesMemory:
+        """Updates auto-refine and active-learning thresholds for a series."""
+        mem = self.get_or_create(series_key)
+        if enabled is not None:
+            mem.auto_refine_enabled = bool(enabled)
+        if threshold is not None:
+            import numpy as np
+            mem.auto_harvest_threshold = float(np.clip(threshold, 0.50, 0.98))
+        if interval is not None:
+            mem.auto_refine_interval = max(1, int(interval))
+        self.save()
+        return mem
+
+    def reset_unrefined_counter(self, series_key: str) -> None:
+        """Resets unrefined pages counter after an adapter fine-tuning cycle completes."""
+        mem = self.get_memory(series_key)
+        if mem:
+            mem.unrefined_pages_count = 0
+            self.save()
 
     def find_best_exemplars(
         self,
