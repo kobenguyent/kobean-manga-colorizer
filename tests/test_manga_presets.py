@@ -14,7 +14,12 @@ import torch
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from colorizer_engine import CharacterEntry, CharacterPalette, MangaColorizerEngine
+from colorizer_engine import (
+    CharacterEntry,
+    CharacterPalette,
+    MangaColorizerEngine,
+    apply_character_palette_harmonization,
+)
 from main import (
     EVENT_QUEUES,
     SESSION_PALETTES,
@@ -788,8 +793,12 @@ def test_character_palette_optimize_for_page():
     # Luffy and Nami are omitted so their red/orange/blue colors do not bleed onto Zoro
     assert not any(c.name == "Monkey D. Luffy" for c in opt_pal.characters)
 
-    # Fallback when recognition is empty or below threshold
-    opt_fallback = palette.optimize_for_page([])
+    # When recognition is empty, returns empty palette to protect scenery/background pages
+    opt_empty = palette.optimize_for_page([])
+    assert len(opt_empty.characters) == 0
+
+    # Explicit fallback_to_all preserves all characters
+    opt_fallback = palette.optimize_for_page([], fallback_to_all=True)
     assert len(opt_fallback.characters) == 3
     assert opt_fallback.characters[0].name == "Monkey D. Luffy"
     assert opt_fallback.characters[0].bounding_box is None
@@ -1176,3 +1185,193 @@ def test_api_recognize_characters_with_mode_selection(tmp_path):
         shutil.rmtree(sess_dir, ignore_errors=True)
         SESSIONS.pop(session_id, None)
         SESSION_PALETTES.pop(session_id, None)
+
+
+def test_character_eye_hex_support():
+    """Verifies eye_hex is correctly stored, serialized, and deserialized."""
+    pc = PresetCharacter(
+        name="Arale Norimaki",
+        hair_hex="#8A2BE2",
+        skin_hex="#F4C5A0",
+        costume_hex="#2962FF",
+        extra_hex="#E53935",
+        eye_hex="#3E2723",
+    )
+    d = pc.to_dict()
+    assert d["eye_hex"] == "#3E2723"
+    pc2 = PresetCharacter.from_dict(d)
+    assert pc2.eye_hex == "#3E2723"
+
+    ce = CharacterEntry(
+        name="Arale Norimaki",
+        hair_hex="#8A2BE2",
+        eye_hex="#3E2723",
+    )
+    ced = ce.to_dict()
+    assert ced["eye_hex"] == "#3E2723"
+    ce2 = CharacterEntry.from_dict(ced)
+    assert ce2.eye_hex == "#3E2723"
+
+
+def test_build_hint_tensor_multiseed_adaptive():
+    """Verifies build_hint_tensor places seeds across screentone hair, skin, and eye regions."""
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Midori Yamabuki",
+                hair_hex="#4A148C",
+                skin_hex="#FFF0E5",
+                costume_hex="#E91E63",
+                eye_hex="#2E7D32",
+                bounding_box=(0.1, 0.1, 0.9, 0.9),
+            )
+        ]
+    )
+    h, w = 400, 400
+    sketch = np.full((h, w), 0.95, dtype=np.float32)
+    # Face skin region (0.75 brightness)
+    sketch[120:250, 120:280] = 0.75
+    # Hair screentone region (0.35 brightness)
+    sketch[40:130, 100:300] = 0.35
+    # Eyes dark spots (0.10 brightness)
+    sketch[160:175, 150:170] = 0.10
+    sketch[160:175, 230:250] = 0.10
+    # Costume region (0.45 brightness)
+    sketch[260:380, 80:320] = 0.45
+
+    hint = palette.build_hint_tensor(h, w, "cpu", sketch_gray=sketch)
+    assert hint.shape == (1, 4, h, w)
+    mask = hint[0, 3] > 0
+    total_seeds = mask.sum().item()
+    assert total_seeds > 0, "Hint tensor must place seeds"
+
+    # Verify colors placed match target canonical colors
+    colors = hint[0, :3, mask].numpy()
+    unique_colors = np.unique(colors, axis=1).T
+    assert len(unique_colors) >= 3, "Should place seeds for multiple features (hair, skin, costume, eye)"
+
+
+def test_character_palette_hair_and_eye_harmonization():
+    """Verifies apply_character_palette_harmonization successfully recolors hair and eyes."""
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Midori Yamabuki",
+                hair_hex="#4A148C",  # violet/indigo hair
+                skin_hex="#FFF0E5",
+                costume_hex="#E91E63",
+                eye_hex="#2E7D32",  # emerald green eyes
+                bounding_box=(0.1, 0.1, 0.9, 0.9),
+            )
+        ]
+    )
+    # Synthetic image where neural model outputted muddy brown hair (RGB: 90, 70, 80)
+    # peach face (RGB: 235, 195, 180), dark eye spots (RGB: 40, 40, 40), magenta dress (RGB: 140, 90, 120)
+    img = np.full((300, 300, 3), 245, dtype=np.uint8)
+    img[120:220, 90:210] = [235, 195, 180]  # face
+    img[40:115, 80:220] = [90, 70, 80]     # hair (muddy)
+    img[140:155, 120:135] = [40, 40, 40]   # left eye
+    img[140:155, 165:180] = [40, 40, 40]   # right eye
+    img[220:290, 70:230] = [140, 90, 120]  # dress
+
+    harmonized = apply_character_palette_harmonization(img, palette)
+
+    # Hair should be violet/indigo (blue > green, red significant)
+    hair_pixel = harmonized[70, 150]
+    assert hair_pixel[2] > hair_pixel[1], "Violet hair should have blue > green"
+    assert hair_pixel[0] > 40, "Violet hair should have visible red component"
+
+    # Eyes should be tinted green (green channel elevated)
+    eye_pixel = harmonized[147, 127]
+    assert eye_pixel[1] >= eye_pixel[0], "Green eye should have green >= red"
+
+
+def test_arale_violet_hair_blue_eye_multi_character_harmonization():
+    """
+    Verifies that in a multi-character two-shot panel:
+    1. Arale's bangs and crown hair harmonize to vibrant canonical violet (#8A2BE2).
+    2. Arale's eyes harmonize to canonical blue (#1565C0) rather than being hijacked by red cap.
+    3. Dr. Senbei on the left retains authentic black hair and is not overwritten by Arale.
+    4. optimize_for_page differentiates characters sharing family names ('Norimaki').
+    """
+    from colorizer_engine import RecognizedCharacter
+
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name="Arale Norimaki",
+                hair_hex="#8A2BE2",
+                skin_hex="#F4C5A0",
+                costume_hex="#2962FF",
+                extra_hex="#E53935",
+                eye_hex="#1565C0",
+            ),
+            CharacterEntry(
+                name="Dr. Senbei Norimaki",
+                hair_hex="#212121",
+                skin_hex="#F5C596",
+                costume_hex="#7E57C2",
+                extra_hex="#FFFFFF",
+                eye_hex="#212121",
+            ),
+        ],
+        preset_id="dr_slump",
+        preset_title="Dr. Slump",
+    )
+
+    # 1. Test optimize_for_page name matching with shared last name "Norimaki"
+    recs = [
+        RecognizedCharacter(
+            name="Dr. Senbei Norimaki",
+            confidence=0.88,
+            bounding_box=(0.18, 0.02, 0.95, 0.49),
+        ),
+        RecognizedCharacter(
+            name="Arale Norimaki",
+            confidence=0.92,
+            bounding_box=(0.18, 0.41, 0.95, 0.93),
+        ),
+    ]
+    opt_palette = palette.optimize_for_page(recs)
+    assert len(opt_palette.characters) == 2
+    assert opt_palette.characters[0].name == "Dr. Senbei Norimaki"
+    assert opt_palette.characters[0].hair_hex == "#212121"
+    assert opt_palette.characters[1].name == "Arale Norimaki"
+    assert opt_palette.characters[1].hair_hex == "#8A2BE2"
+
+    # 2. Test harmonization on two-shot image
+    # Senbei on left half (x < 150), Arale on right half (x >= 150)
+    H, W = 300, 300
+    img = np.full((H, W, 3), 245, dtype=np.uint8)
+    orig_gray = np.full((H, W), 0.95, dtype=np.float32)
+
+    # Dr. Senbei on left (x: 20..130): black hair, neutral face
+    img[60:120, 20:130] = [30, 30, 30]  # black hair
+    orig_gray[60:120, 20:130] = 0.20
+
+    # Arale on right (x: 150..280)
+    # Bangs / hair: neural gave orange (RGB: 220, 130, 70)
+    img[60:120, 160:270] = [220, 130, 70]
+    orig_gray[60:120, 160:270] = 0.60
+    # Eye spot: neural gave dark brown (RGB: 70, 35, 20)
+    img[140:155, 190:205] = [70, 35, 20]
+    orig_gray[140:155, 190:205] = 0.30
+
+    harmonized = apply_character_palette_harmonization(
+        img, opt_palette, orig_gray=orig_gray
+    )
+
+    # Arale hair (x=210, y=90) must be violet: B > G and R > G
+    arale_hair = harmonized[90, 210]
+    assert arale_hair[2] > arale_hair[1], f"Arale hair should be violet with B > G: {arale_hair}"
+    assert arale_hair[0] > arale_hair[1], f"Arale hair should have prominent red: {arale_hair}"
+
+    # Arale eye (x=197, y=147) must be blue: B > R
+    arale_eye = harmonized[147, 197]
+    assert arale_eye[2] > arale_eye[0], f"Arale eye should be blue with B > R: {arale_eye}"
+
+    # Dr. Senbei hair (x=70, y=90) must remain authentic dark neutral (not violet)
+    senbei_hair = harmonized[90, 70]
+    assert abs(int(senbei_hair[0]) - int(senbei_hair[2])) < 25, f"Dr. Senbei hair must stay neutral: {senbei_hair}"
+
+

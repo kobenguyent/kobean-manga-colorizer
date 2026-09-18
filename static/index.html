@@ -417,10 +417,14 @@
                 <div class="form-group" style="margin-bottom:0.5rem;">
                   <input type="text" id="pal-char-name" placeholder="Character name (e.g. Arale)" class="form-input" style="font-size:0.82rem;" />
                 </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.5rem;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.4rem;">
                   <label style="font-size:0.75rem;color:var(--text-secondary);">
                     Hair
                     <input type="color" id="pal-hair" value="#8B2BE2" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+                  </label>
+                  <label style="font-size:0.75rem;color:var(--text-secondary);">
+                    Eyes
+                    <input type="color" id="pal-eye" value="#3E2723" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
                   </label>
                   <label style="font-size:0.75rem;color:var(--text-secondary);">
                     Skin
@@ -430,9 +434,11 @@
                     Costume
                     <input type="color" id="pal-costume" value="#3A7BFF" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
                   </label>
-                  <label style="font-size:0.75rem;color:var(--text-secondary);">
-                    Extra
-                    <input type="color" id="pal-extra" value="#FFCE47" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+                </div>
+                <div style="margin-bottom:0.5rem;">
+                  <label style="font-size:0.75rem;color:var(--text-secondary);display:flex;align-items:center;justify-content:space-between;">
+                    <span>Extra / Accents:</span>
+                    <input type="color" id="pal-extra" value="#FFCE47" style="width:40px;height:22px;border:none;background:none;cursor:pointer;" />
                   </label>
                 </div>
                 <button class="btn btn-secondary btn-sm btn-block" onclick="paletteAddCharacter()">
@@ -1198,6 +1204,6 @@
   </div>
 
   <!-- Main JavaScript File -->
-  <script src="app.js?v=20260917i"></script>
+  <script src="app.js?v=20260918a"></script>
 </body>
 </html>

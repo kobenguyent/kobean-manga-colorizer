@@ -4475,7 +4475,7 @@ function paletteRender() {
   }
 
   list.innerHTML = paletteCharacters.map((ch, i) => {
-    const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+    const swatches = [ch.hair_hex, ch.eye_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
       .filter(Boolean)
       .map(hx => `<span title="${hx}" style="
         display:inline-block;width:14px;height:14px;border-radius:3px;
@@ -4522,7 +4522,7 @@ function paletteRenderListOnly() {
   }
 
   list.innerHTML = paletteCharacters.map((ch, i) => {
-    const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+    const swatches = [ch.hair_hex, ch.eye_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
       .filter(Boolean)
       .map(hx => `<span title="${hx}" style="display:inline-block;width:14px;height:14px;border-radius:3px;background:${hx};border:1px solid rgba(255,255,255,0.2);vertical-align:middle;"></span>`)
       .join(" ");
@@ -4549,6 +4549,7 @@ async function paletteAddCharacter() {
   if (!name) { showToast("Please enter a character name.", "warning"); return; }
 
   const hairHex    = document.getElementById("pal-hair")?.value    || "";
+  const eyeHex     = document.getElementById("pal-eye")?.value     || "";
   const skinHex    = document.getElementById("pal-skin")?.value    || "";
   const costumeHex = document.getElementById("pal-costume")?.value || "";
   const extraHex   = document.getElementById("pal-extra")?.value   || "";
@@ -4559,7 +4560,7 @@ async function paletteAddCharacter() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         session_id: currentSession.session_id,
-        character: { name, hair_hex: hairHex, skin_hex: skinHex, costume_hex: costumeHex, extra_hex: extraHex }
+        character: { name, hair_hex: hairHex, eye_hex: eyeHex, skin_hex: skinHex, costume_hex: costumeHex, extra_hex: extraHex }
       })
     });
     if (!resp.ok) throw new Error((await resp.json()).detail || "Failed");
@@ -4803,8 +4804,8 @@ function renderPageCharacterChips(recognizedList) {
         }
       });
     } else {
-      // Empty recognizedList means scanned with no specific characters found
-      activePageCharacterNames = new Set(paletteCharacters.map(c => c.name));
+      // Empty recognizedList means scanned with no specific characters found on this page
+      activePageCharacterNames.clear();
     }
   } else if (recognizedList === null && activePageCharacterNames.size === 0) {
     activePageCharacterNames = new Set(paletteCharacters.map(c => c.name));
@@ -4946,7 +4947,7 @@ function openCharacterPickerModal() {
     paletteCharacters.forEach(ch => {
       const isChecked = activePageCharacterNames.has(ch.name);
       const dotColor = ch.costume_hex || ch.hair_hex || "#a855f7";
-      const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+      const swatches = [ch.hair_hex, ch.eye_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
         .filter(Boolean)
         .map(hx => `<span title="${hx}" style="display:inline-block;width:12px;height:12px;border-radius:2px;background:${hx};border:1px solid rgba(255,255,255,0.2);flex-shrink:0;"></span>`)
         .join("");

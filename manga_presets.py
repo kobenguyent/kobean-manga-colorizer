@@ -27,6 +27,7 @@ class PresetCharacter:
     skin_hex: str = ""
     costume_hex: str = ""
     extra_hex: str = ""
+    eye_hex: str = ""  # Canonical eye / iris color (e.g. #3E2723, #1E88E5, #2E7D32)
     notes: str = ""
     visual_traits: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
@@ -86,6 +87,7 @@ class PresetCharacter:
             "skin_hex": self.skin_hex,
             "costume_hex": self.costume_hex,
             "extra_hex": self.extra_hex,
+            "eye_hex": self.eye_hex,
             "notes": self.notes,
             "visual_traits": self.visual_traits,
             "keywords": self.keywords,
@@ -99,6 +101,7 @@ class PresetCharacter:
             skin_hex=d.get("skin_hex", ""),
             costume_hex=d.get("costume_hex", ""),
             extra_hex=d.get("extra_hex", ""),
+            eye_hex=d.get("eye_hex", ""),
             notes=d.get("notes", ""),
             visual_traits=d.get("visual_traits", []),
             keywords=d.get("keywords", []),
@@ -429,15 +432,17 @@ BUILTIN_PRESETS: list[MangaPreset] = [
                 skin_hex="#F4C5A0",
                 costume_hex="#2962FF",
                 extra_hex="#E53935",
-                notes="Vivid violet/purple hair, warm peach skin, cobalt blue overalls, red ARALE cap with white wings",
+                eye_hex="#1565C0",
+                notes="Little robot girl with big round eyes and purple hair, peach skin, blue eyes",
             ),
             PresetCharacter(
                 name="Dr. Senbei Norimaki",
-                hair_hex="#263238",
+                hair_hex="#212121",
                 skin_hex="#F5C596",
                 costume_hex="#7E57C2",
                 extra_hex="#FFFFFF",
-                notes="Messy black hair, warm skin, purple/grey vest, white lab coat",
+                eye_hex="#212121",
+                notes="Adult man inventor with mustache, messy black hair, white lab coat or vest, dark eyes",
             ),
             PresetCharacter(
                 name="Gatchan",
@@ -445,7 +450,8 @@ BUILTIN_PRESETS: list[MangaPreset] = [
                 skin_hex="#FFE0B2",
                 costume_hex="#FFEE58",
                 extra_hex="#F48FB1",
-                notes="Emerald green hair, light peach skin, yellow jumpsuit, pink fairy wings",
+                eye_hex="#1565C0",
+                notes="Baby angel with small wings, emerald green hair, yellow jumpsuit, bright blue eyes",
             ),
             PresetCharacter(
                 name="Midori Yamabuki",
@@ -453,7 +459,8 @@ BUILTIN_PRESETS: list[MangaPreset] = [
                 skin_hex="#FFF0E5",
                 costume_hex="#E91E63",
                 extra_hex="#FFEB3B",
-                notes="Indigo/purple hair, fair porcelain skin, magenta dress, yellow apron",
+                eye_hex="#2E7D32",
+                notes="Tall adult woman school teacher, indigo or purple hair, fair porcelain skin, magenta dress, green eyes",
             ),
             PresetCharacter(
                 name="Taro Soramame",
@@ -461,7 +468,8 @@ BUILTIN_PRESETS: list[MangaPreset] = [
                 skin_hex="#F5C596",
                 costume_hex="#1565C0",
                 extra_hex="#B71C1C",
-                notes="Black slicked hair, tan skin, blue denim jacket, red t-shirt",
+                eye_hex="#212121",
+                notes="Teenage boy delinquent with slicked black hair, leather jacket, dark eyes",
             ),
         ],
         prompt_guidance=(

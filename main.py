@@ -309,10 +309,12 @@ class CharacterEntryModel(BaseModel):
     skin_hex: str = ""
     costume_hex: str = ""
     extra_hex: str = ""
+    eye_hex: str = ""
     notes: str = ""
     visual_traits: Optional[list[str]] = None
     keywords: Optional[list[str]] = None
     bounding_box: Optional[list[float]] = None
+
 
 
 class CharacterRecognizeRequest(BaseModel):
@@ -361,9 +363,26 @@ def _get_palette(session_id: str) -> CharacterPalette:
     """Returns the palette for a session, restoring from disk if needed."""
     if session_id in SESSION_PALETTES:
         pal = SESSION_PALETTES[session_id]
-        if pal.characters:
-            return pal
         sess = SESSIONS.get(session_id)
+        if pal.characters:
+            # Backfill eye_hex if missing from older sessions
+            preset_ref = None
+            if pal.preset_id:
+                preset_ref = get_preset_by_id(pal.preset_id)
+            elif sess and sess.get("detected_preset"):
+                preset_ref = get_preset_by_id(sess["detected_preset"])
+            if preset_ref:
+                preset_map = {pc.name.lower().strip(): pc for pc in preset_ref.characters}
+                need_save = False
+                for c in pal.characters:
+                    if not getattr(c, "eye_hex", ""):
+                        match = preset_map.get(c.name.lower().strip())
+                        if match and getattr(match, "eye_hex", ""):
+                            c.eye_hex = match.eye_hex
+                            need_save = True
+                if need_save:
+                    save_session_palette(session_id, pal)
+            return pal
         detected = None
         if pal.preset_id:
             detected = get_preset_by_id(pal.preset_id)
@@ -380,6 +399,7 @@ def _get_palette(session_id: str) -> CharacterPalette:
                         skin_hex=c.skin_hex,
                         costume_hex=c.costume_hex,
                         extra_hex=c.extra_hex,
+                        eye_hex=getattr(c, "eye_hex", ""),
                     )
                     for c in detected.characters
                 ],
@@ -398,8 +418,8 @@ def _get_palette(session_id: str) -> CharacterPalette:
             with open(pal_path, "r", encoding="utf-8") as f:
                 d = json.load(f)
                 pal = CharacterPalette.from_dict(d)
+                sess = SESSIONS.get(session_id)
                 if not pal.characters:
-                    sess = SESSIONS.get(session_id)
                     detected = None
                     if pal.preset_id:
                         detected = get_preset_by_id(pal.preset_id)
@@ -416,6 +436,7 @@ def _get_palette(session_id: str) -> CharacterPalette:
                                     skin_hex=c.skin_hex,
                                     costume_hex=c.costume_hex,
                                     extra_hex=c.extra_hex,
+                                    eye_hex=getattr(c, "eye_hex", ""),
                                 )
                                 for c in detected.characters
                             ],
@@ -423,6 +444,24 @@ def _get_palette(session_id: str) -> CharacterPalette:
                             preset_title=detected.title,
                         )
                         save_session_palette(session_id, pal)
+                else:
+                    # Backfill eye_hex if missing from existing palette.json
+                    preset_ref = None
+                    if pal.preset_id:
+                        preset_ref = get_preset_by_id(pal.preset_id)
+                    elif sess and sess.get("detected_preset"):
+                        preset_ref = get_preset_by_id(sess["detected_preset"])
+                    if preset_ref:
+                        preset_map = {pc.name.lower().strip(): pc for pc in preset_ref.characters}
+                        need_save = False
+                        for c in pal.characters:
+                            if not getattr(c, "eye_hex", ""):
+                                match = preset_map.get(c.name.lower().strip())
+                                if match and getattr(match, "eye_hex", ""):
+                                    c.eye_hex = match.eye_hex
+                                    need_save = True
+                        if need_save:
+                            save_session_palette(session_id, pal)
                 SESSION_PALETTES[session_id] = pal
                 return pal
         except Exception as e:
@@ -441,6 +480,7 @@ def _get_palette(session_id: str) -> CharacterPalette:
                         skin_hex=c.skin_hex,
                         costume_hex=c.costume_hex,
                         extra_hex=c.extra_hex,
+                        eye_hex=getattr(c, "eye_hex", ""),
                     )
                     for c in detected.characters
                 ],
@@ -550,6 +590,7 @@ async def upload_files(
                         skin_hex=c.skin_hex,
                         costume_hex=c.costume_hex,
                         extra_hex=c.extra_hex,
+                        eye_hex=getattr(c, "eye_hex", ""),
                     )
                     for c in detected.characters
                 ],
@@ -712,6 +753,7 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
                                 skin_hex=c.skin_hex,
                                 costume_hex=c.costume_hex,
                                 extra_hex=c.extra_hex,
+                                eye_hex=getattr(c, "eye_hex", ""),
                             )
                             for c in detected.characters
                         ],
@@ -1180,7 +1222,6 @@ async def preview_single_page(req: PreviewRequest):
             palette = None
 
         # Track whether the caller has already declared active characters,
-        # so we can skip the redundant in-engine recognition pass.
         has_active_names = bool(getattr(req, "active_character_names", None))
 
         if palette and has_active_names:
@@ -1205,8 +1246,7 @@ async def preview_single_page(req: PreviewRequest):
             denoise_screentone=getattr(req, "denoise_screentone", True),
             denoise_sigma=getattr(req, "denoise_sigma", 25),
             recognition_mode=getattr(req, "recognition_mode", "auto"),
-            # Skip re-running recognition when caller already pre-filtered palette
-            skip_recognition=has_active_names,
+            skip_recognition=bool(getattr(req, "skip_recognition", False)),
         )
 
         page_info["status"] = "colorized"
@@ -1291,6 +1331,7 @@ async def apply_preset_to_session(req: PaletteApplyPresetRequest):
                 skin_hex=c.skin_hex,
                 costume_hex=c.costume_hex,
                 extra_hex=c.extra_hex,
+                eye_hex=getattr(c, "eye_hex", ""),
             )
             for c in preset.characters
         ],
@@ -1333,6 +1374,7 @@ async def search_online_preset_endpoint(req: PaletteOnlineSearchRequest):
                         skin_hex=c.skin_hex,
                         costume_hex=c.costume_hex,
                         extra_hex=c.extra_hex,
+                        eye_hex=getattr(c, "eye_hex", ""),
                     )
                     for c in preset.characters
                 ],
@@ -1384,6 +1426,7 @@ async def upsert_palette_character(req: PaletteUpsertRequest):
         skin_hex=req.character.skin_hex,
         costume_hex=req.character.costume_hex,
         extra_hex=req.character.extra_hex,
+        eye_hex=req.character.eye_hex or "",
         notes=req.character.notes or "",
         visual_traits=req.character.visual_traits or [],
         keywords=req.character.keywords or [],
