@@ -659,18 +659,40 @@
         <div class="card split-preview-card hidden" id="split-preview-card">
           <div class="card-header space-between">
             <div class="header-left">
-              <i class="ri-drag-move-fill"></i>
-              <h3>Interactive Before / After Comparator</h3>
+              <button class="btn-icon btn-toggle-comparator-thumbs" id="btn-toggle-comparator-thumbs" onclick="toggleComparatorThumbPanel()" title="Toggle Page Thumbnails (T)" aria-label="Toggle Page Thumbnails">
+                <i class="ri-side-bar-line"></i>
+              </button>
+              <div class="comparator-title-wrap">
+                <h3 class="comparator-title">Before / After</h3>
+                <span class="badge badge-meta" id="preview-page-title">Page 1</span>
+              </div>
             </div>
-            <div class="header-right preview-controls-group">
-              <button class="btn-icon btn-nav-preview" id="btn-prev-page" title="Previous Page (Left Arrow)" onclick="navigatePreviewPage(-1)">
-                <i class="ri-arrow-left-s-line"></i>
-              </button>
-              <span class="badge" id="preview-page-title">Page 1</span>
-              <button class="btn-icon btn-nav-preview" id="btn-next-page" title="Next Page (Right Arrow)" onclick="navigatePreviewPage(1)">
-                <i class="ri-arrow-right-s-line"></i>
-              </button>
 
+            <!-- Unified Page Navigation Stepper & Counter (e.g. < [ 02 ] / 11 >) -->
+            <div class="header-center comparator-page-counter" id="comparator-page-counter">
+              <div class="comparator-nav-stepper">
+                <button class="btn-nav-step" id="btn-prev-page" title="Previous Page (Left Arrow)" onclick="navigatePreviewPage(-1)" aria-label="Previous Page">
+                  <i class="ri-arrow-left-s-line"></i>
+                </button>
+                <div class="page-counter-box" title="Type a page number and press Enter to jump">
+                  <input type="text"
+                         id="comparator-page-input"
+                         class="comparator-page-input"
+                         value="01"
+                         inputmode="numeric"
+                         pattern="[0-9]*"
+                         maxlength="4"
+                         aria-label="Current Page Number" />
+                  <span class="page-counter-sep">/</span>
+                  <span class="page-counter-total" id="comparator-page-total">0</span>
+                </div>
+                <button class="btn-nav-step" id="btn-next-page" title="Next Page (Right Arrow)" onclick="navigatePreviewPage(1)" aria-label="Next Page">
+                  <i class="ri-arrow-right-s-line"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="header-right preview-controls-group">
               <!-- Zoom Controls Group -->
               <div class="comparator-zoom-group" title="Zoom image (Double-click, Pinch, or +/-)">
                 <button class="btn-zoom" id="btn-zoom-out" onclick="changeComparatorZoom(-0.25)" title="Zoom Out (-)">
@@ -704,71 +726,87 @@
                 <i class="ri-brain-line"></i> Learn Page
               </button>
 
-              <button class="btn btn-sm" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
-                      style="background:var(--accent-orange,#f97316);border-color:var(--accent-orange,#f97316);color:#fff;"
+              <div class="header-divider"></div>
+
+              <button class="btn btn-sm btn-recolorize-accent" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
                       title="Force re-colorize this page from scratch">
                 <i class="ri-magic-line"></i> Recolorize
               </button>
               <button class="btn-icon btn-danger-icon" title="Delete this page" onclick="deleteCurrentPreviewPage(event)">
                 <i class="ri-delete-bin-line"></i>
               </button>
-              <button class="btn-icon" onclick="closeSplitPreview()" title="Close Comparator (Esc)"><i class="ri-close-line"></i></button>
+              <button class="btn-icon btn-close-comparator" onclick="closeSplitPreview()" title="Close Comparator (Esc)"><i class="ri-close-line"></i></button>
             </div>
           </div>
 
-          <div class="split-slider-wrapper">
-            <!-- Chevron navigation buttons on the left & right of the preview -->
-            <button class="preview-nav-chevron preview-nav-prev" onclick="navigatePreviewPage(-1)" title="Previous Page (Left Arrow)">
-              <i class="ri-arrow-left-s-line"></i>
-            </button>
-            <button class="preview-nav-chevron preview-nav-next" onclick="navigatePreviewPage(1)" title="Next Page (Right Arrow)">
-              <i class="ri-arrow-right-s-line"></i>
-            </button>
+          <!-- Comparator Workspace (Left Navigation Strip + Split Slider) -->
+          <div class="comparator-workspace" id="comparator-workspace">
+            <!-- Left Side: Page Thumbnail Navigation Panel -->
+            <aside class="comparator-nav-panel" id="comparator-nav-panel" aria-label="Page Thumbnails">
+              <div class="comparator-nav-header">
+                <span class="comparator-nav-title"><i class="ri-pages-line"></i> Pages</span>
+                <span class="comparator-nav-count" id="comparator-nav-count">0</span>
+              </div>
+              <div class="comparator-nav-list" id="comparator-nav-list">
+                <!-- Dynamically populated page thumbnails -->
+              </div>
+            </aside>
 
-            <!-- Floating Viewer Quick Controls Pill -->
-            <div class="comparator-floating-toolbar" id="comparator-floating-toolbar">
-              <button class="float-btn" onclick="changeComparatorZoom(-0.25)" title="Zoom Out (-)">
-                <i class="ri-subtract-line"></i>
+            <!-- Center/Right: Split Slider Wrapper -->
+            <div class="split-slider-wrapper">
+              <!-- Chevron navigation buttons on the left & right of the preview -->
+              <button class="preview-nav-chevron preview-nav-prev" onclick="navigatePreviewPage(-1)" title="Previous Page (Left Arrow)">
+                <i class="ri-arrow-left-s-line"></i>
               </button>
-              <div class="zoom-dropdown-wrapper" id="float-zoom-wrapper">
-                <button class="float-btn float-zoom-text" id="float-zoom-text" onclick="toggleZoomMenu('float', event)" title="Choose Zoom Level (Click for presets)">
-                  <span id="float-zoom-label">100%</span>
+              <button class="preview-nav-chevron preview-nav-next" onclick="navigatePreviewPage(1)" title="Next Page (Right Arrow)">
+                <i class="ri-arrow-right-s-line"></i>
+              </button>
+
+              <!-- Floating Viewer Quick Controls Pill -->
+              <div class="comparator-floating-toolbar" id="comparator-floating-toolbar">
+                <button class="float-btn" onclick="changeComparatorZoom(-0.25)" title="Zoom Out (-)">
+                  <i class="ri-subtract-line"></i>
                 </button>
-                <div class="zoom-presets-menu zoom-menu-upwards" id="float-zoom-menu"></div>
-              </div>
-              <button class="float-btn" onclick="changeComparatorZoom(0.25)" title="Zoom In (+)">
-                <i class="ri-add-line"></i>
-              </button>
-              <div class="float-divider"></div>
-              <button class="float-btn" onclick="toggleComparatorFullscreen()" title="Toggle Full Screen (F)">
-                <i class="ri-fullscreen-line" id="float-fullscreen-icon"></i>
-              </button>
-            </div>
-
-            <div class="split-image-container" id="split-container">
-              <!-- Colorized Base Image (Bottom/Right) -->
-              <img id="split-img-colorized" src="" alt="Colorized Page" draggable="false" />
-              
-              <!-- Original B&W Overlay (Top/Left - Clipped by Slider) -->
-              <div class="split-image-overlay" id="split-overlay">
-                <img id="split-img-original" src="" alt="Original B&W Page" draggable="false" />
-              </div>
-
-              <!-- Slider Handle -->
-              <div class="split-handle" id="split-handle">
-                <div class="split-handle-line"></div>
-                <div class="split-handle-button">
-                  <i class="ri-code-line"></i>
+                <div class="zoom-dropdown-wrapper" id="float-zoom-wrapper">
+                  <button class="float-btn float-zoom-text" id="float-zoom-text" onclick="toggleZoomMenu('float', event)" title="Choose Zoom Level (Click for presets)">
+                    <span id="float-zoom-label">100%</span>
+                  </button>
+                  <div class="zoom-presets-menu zoom-menu-upwards" id="float-zoom-menu"></div>
                 </div>
+                <button class="float-btn" onclick="changeComparatorZoom(0.25)" title="Zoom In (+)">
+                  <i class="ri-add-line"></i>
+                </button>
+                <div class="float-divider"></div>
+                <button class="float-btn" onclick="toggleComparatorFullscreen()" title="Toggle Full Screen (F)">
+                  <i class="ri-fullscreen-line" id="float-fullscreen-icon"></i>
+                </button>
               </div>
 
-              <!-- Page Labels / Quick Click Switchers -->
-              <button type="button" class="split-label label-left clickable" onclick="setComparatorView('bw')" title="Click to view full Black & White">
-                <i class="ri-contrast-line"></i> Black & White
-              </button>
-              <button type="button" class="split-label label-right clickable" id="split-label-right" onclick="setComparatorView('color')" title="Click to view full Colorized AI">
-                <i class="ri-palette-line"></i> Colorized AI
-              </button>
+              <div class="split-image-container" id="split-container">
+                <!-- Colorized Base Image (Bottom/Right) -->
+                <img id="split-img-colorized" src="" alt="Colorized Page" draggable="false" />
+                
+                <!-- Original B&W Overlay (Top/Left - Clipped by Slider) -->
+                <div class="split-image-overlay" id="split-overlay">
+                  <img id="split-img-original" src="" alt="Original B&W Page" draggable="false" />
+                </div>
+
+                <!-- Slider Handle -->
+                <div class="split-handle" id="split-handle">
+                  <div class="split-handle-line"></div>
+                  <div class="split-handle-button">
+                    <i class="ri-code-line"></i>
+                  </div>
+                </div>
+
+                <!-- Page Labels / Quick Click Switchers -->
+                <button type="button" class="split-label label-left clickable" onclick="setComparatorView('bw')" title="Click to view full Black & White">
+                  <i class="ri-contrast-line"></i> Black & White
+                </button>
+                <button type="button" class="split-label label-right clickable" id="split-label-right" onclick="setComparatorView('color')" title="Click to view full Colorized AI">
+                  <i class="ri-palette-line"></i> Colorized AI
+                </button>
+              </div>
             </div>
           </div>
         </div>

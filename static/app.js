@@ -537,6 +537,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadMangaPresets();
   initSidebarCollapsibleCards();
   initSidebarDrawer();
+  initComparatorPageCounter();
 
   // Auto-restore session from sessionStorage or fetch the latest active session
   const savedSessionId = sessionStorage.getItem("active_session_id");
@@ -849,6 +850,9 @@ function setupEventListeners() {
     } else if (e.key === "f" || e.key === "F") {
       e.preventDefault();
       toggleComparatorFullscreen();
+    } else if (e.key === "t" || e.key === "T") {
+      e.preventDefault();
+      toggleComparatorThumbPanel();
     } else if (e.key === "+" || e.key === "=") {
       e.preventDefault();
       changeComparatorZoom(0.25);
@@ -2350,6 +2354,7 @@ function renderDashboard() {
   document.getElementById("gallery-total-count").innerText = currentSession.total_pages;
   renderGalleryGrid();
   renderDocumentQueue();
+  renderComparatorNavPanel();
 
   // Show palette card and load existing characters for this session
   const paletteCard = document.getElementById("palette-card");
@@ -3146,6 +3151,14 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   // Reset handle with container dimensions applied
   requestAnimationFrame(() => setSplitPosition(currentSplitPct));
 
+  // Update left thumbnail navigation panel and editable page counter
+  updateComparatorPageCounter(pageIdx, totalPages);
+  updateComparatorNavActive(pageIdx);
+  const thumbList = document.getElementById("comparator-nav-list");
+  if (thumbList && thumbList.children.length === 0) {
+    renderComparatorNavPanel();
+  }
+
   if (typeof updatePageCharacterChips === "function") {
     updatePageCharacterChips(pageIdx);
   }
@@ -3653,6 +3666,218 @@ function navigatePreviewPage(direction) {
   }
 }
 window.navigatePreviewPage = navigatePreviewPage;
+
+// --- Comparator Thumbnail Navigation Panel & Editable Page Counter ---
+
+let isComparatorPageCounterInitialized = false;
+
+/**
+ * Initializes listeners for the editable page counter input (Enter, Arrows, Escape, Focus, Blur).
+ */
+function initComparatorPageCounter() {
+  const input = document.getElementById("comparator-page-input");
+  if (!input || isComparatorPageCounterInitialized) return;
+  isComparatorPageCounterInitialized = true;
+
+  // Select all characters on focus for instant replacement
+  input.addEventListener("focus", () => {
+    input.select();
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitPageCounterJump();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      navigatePreviewPage(1);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      navigatePreviewPage(-1);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      revertPageCounterInput();
+      input.blur();
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    revertPageCounterInput();
+  });
+}
+window.initComparatorPageCounter = initComparatorPageCounter;
+
+/**
+ * Commits the user's typed page number and jumps to that page if valid.
+ */
+function commitPageCounterJump() {
+  const input = document.getElementById("comparator-page-input");
+  if (!input || !currentSession || !currentSession.pages || currentSession.pages.length === 0) return;
+
+  const totalPages = currentSession.pages.length;
+  const rawVal = input.value.trim();
+  const parsed = parseInt(rawVal, 10);
+
+  if (!isNaN(parsed) && parsed >= 1 && parsed <= totalPages) {
+    const targetIdx = parsed - 1;
+    openSplitPreview(targetIdx, true);
+    input.blur();
+  } else {
+    input.classList.add("input-error");
+    setTimeout(() => input.classList.remove("input-error"), 500);
+    showToast(`Please enter a page number between 1 and ${totalPages}`, "warning");
+    revertPageCounterInput();
+  }
+}
+
+/**
+ * Restores the page counter input value to the current active page formatted.
+ */
+function revertPageCounterInput() {
+  const input = document.getElementById("comparator-page-input");
+  if (!input || !currentSession || !currentSession.pages || currentSession.pages.length === 0) return;
+  const totalPages = currentSession.pages.length;
+  const padDigits = totalPages >= 10 ? 2 : 1;
+  input.value = String(currentPreviewPageIndex + 1).padStart(padDigits, "0");
+}
+
+/**
+ * Updates the page counter displays (input and total) in the comparator header.
+ */
+function updateComparatorPageCounter(pageIdx, totalPages) {
+  const input = document.getElementById("comparator-page-input");
+  const total = document.getElementById("comparator-page-total");
+  if (!input || !total) return;
+
+  const count = typeof totalPages === "number" ? totalPages : (currentSession?.pages?.length || 0);
+  const padDigits = count >= 10 ? 2 : 1;
+
+  if (document.activeElement !== input) {
+    input.value = String(pageIdx + 1).padStart(padDigits, "0");
+  }
+  total.innerText = String(count).padStart(padDigits, "0");
+}
+window.updateComparatorPageCounter = updateComparatorPageCounter;
+
+/**
+ * Renders the full list of page thumbnails in the left navigation panel.
+ */
+function renderComparatorNavPanel() {
+  const navList = document.getElementById("comparator-nav-list");
+  const countBadge = document.getElementById("comparator-nav-count");
+  if (!navList || !currentSession || !currentSession.pages) return;
+
+  const pages = currentSession.pages;
+  const totalPages = pages.length;
+  if (countBadge) countBadge.innerText = totalPages;
+
+  navList.innerHTML = "";
+  const padDigits = totalPages >= 10 ? 2 : 1;
+
+  pages.forEach((page, idx) => {
+    const item = document.createElement("div");
+    item.className = "comparator-thumb-item" + (idx === currentPreviewPageIndex ? " active" : "");
+    item.dataset.pageIndex = idx;
+    item.title = `Jump to ${page.display_name || 'Page ' + (idx + 1)}`;
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `Page ${idx + 1}`);
+
+    const origUrl = `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
+    const thumbUrl = page.colorized_url || origUrl;
+
+    const imgWrapper = document.createElement("div");
+    imgWrapper.className = "comp-thumb-img-wrapper";
+
+    const img = document.createElement("img");
+    img.className = "comp-thumb-img";
+    img.id = `comp-thumb-img-${idx}`;
+    img.src = thumbUrl;
+    img.alt = page.display_name || `Page ${idx + 1}`;
+    img.loading = "lazy";
+    img.draggable = false;
+
+    const badge = document.createElement("span");
+    badge.className = "comp-thumb-badge";
+    badge.innerText = String(idx + 1).padStart(padDigits, "0");
+
+    imgWrapper.appendChild(img);
+    imgWrapper.appendChild(badge);
+    item.appendChild(imgWrapper);
+
+    item.addEventListener("click", () => {
+      openSplitPreview(idx, true);
+    });
+
+    item.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openSplitPreview(idx, true);
+      }
+    });
+
+    navList.appendChild(item);
+  });
+
+  // Restore collapsed state from localStorage preference
+  const isCollapsed = localStorage.getItem("kobean_comparator_nav_collapsed") === "true";
+  const navPanel = document.getElementById("comparator-nav-panel");
+  const toggleBtn = document.getElementById("btn-toggle-comparator-thumbs");
+  if (navPanel) {
+    navPanel.classList.toggle("collapsed", isCollapsed);
+  }
+  if (toggleBtn) {
+    toggleBtn.classList.toggle("active", !isCollapsed);
+    toggleBtn.title = isCollapsed ? "Show Page Thumbnails (T)" : "Hide Page Thumbnails (T)";
+  }
+
+  // Ensure active thumbnail is highlighted and visible
+  updateComparatorNavActive(currentPreviewPageIndex);
+}
+window.renderComparatorNavPanel = renderComparatorNavPanel;
+
+/**
+ * Synchronizes active class and smoothly scrolls active thumbnail into view.
+ */
+function updateComparatorNavActive(pageIdx) {
+  const navList = document.getElementById("comparator-nav-list");
+  if (!navList) return;
+
+  const items = navList.querySelectorAll(".comparator-thumb-item");
+  items.forEach((item) => {
+    const idx = parseInt(item.dataset.pageIndex, 10);
+    const isActive = idx === pageIdx;
+    item.classList.toggle("active", isActive);
+    if (isActive) {
+      item.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    }
+  });
+}
+window.updateComparatorNavActive = updateComparatorNavActive;
+
+/**
+ * Toggles the left thumbnail panel between expanded and collapsed states.
+ */
+function toggleComparatorThumbPanel(forceState) {
+  const panel = document.getElementById("comparator-nav-panel");
+  const btn = document.getElementById("btn-toggle-comparator-thumbs");
+  if (!panel) return;
+
+  const willBeCollapsed = typeof forceState === "boolean" ? !forceState : !panel.classList.contains("collapsed");
+  panel.classList.toggle("collapsed", willBeCollapsed);
+
+  if (btn) {
+    btn.classList.toggle("active", !willBeCollapsed);
+    btn.title = willBeCollapsed ? "Show Page Thumbnails (T)" : "Hide Page Thumbnails (T)";
+  }
+
+  localStorage.setItem("kobean_comparator_nav_collapsed", willBeCollapsed ? "true" : "false");
+
+  if (!willBeCollapsed) {
+    updateComparatorNavActive(currentPreviewPageIndex);
+  }
+}
+window.toggleComparatorThumbPanel = toggleComparatorThumbPanel;
 
 async function exportDocument(format = "auto") {
   if (!currentSession) return;
@@ -5884,6 +6109,10 @@ async function recolorizePage(pageIdx) {
       // Update gallery thumbnail
       const imgElem = document.getElementById(`page-img-${pageIdx}`);
       if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
+
+      // Update comparator navigation thumbnail if rendered
+      const compThumbImg = document.getElementById(`comp-thumb-img-${pageIdx}`);
+      if (compThumbImg) compThumbImg.src = `${data.colorized_url}?t=${ts}`;
 
       if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
 
