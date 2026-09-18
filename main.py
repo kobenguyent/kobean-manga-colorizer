@@ -18,6 +18,7 @@ if __name__ == "__main__":
 
 
 import asyncio
+import copy
 import json
 import re
 import shutil
@@ -25,6 +26,7 @@ import uuid
 from typing import Any, Optional
 
 from fastapi import (
+    BackgroundTasks,
     Body,
     FastAPI,
     File,
@@ -45,6 +47,12 @@ from colorizer_engine import (
     is_colored_page,
 )
 from file_processor import MangaFileProcessor
+from manga_presets import (
+    detect_manga_preset,
+    get_all_presets,
+    get_preset_by_id,
+    search_online_manga_preset,
+)
 
 app = FastAPI(title="Manga Colorizer Pro", version="1.0.0")
 
@@ -66,6 +74,16 @@ STATIC_DIR = BASE_DIR / "static"
 for d in [UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR, STATIC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# Increase open file descriptors limit for handling +1076 ebook files simultaneously
+try:
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(hard, 65536) if hard > 0 else 65536
+    resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+except Exception as e:
+    print(f"[Resource Note] RLIMIT_NOFILE could not be raised: {e}")
+
 # Instantiate core engines
 file_processor = MangaFileProcessor(storage_dir=str(STORAGE_DIR))
 colorizer_engine = MangaColorizerEngine()
@@ -75,6 +93,10 @@ colorizer_engine = MangaColorizerEngine()
 SESSIONS: dict[str, dict] = {}
 # session_id -> asyncio.Queue for SSE events
 EVENT_QUEUES: dict[str, list[asyncio.Queue]] = {}
+
+# Background Directory Import Tasks tracker
+# import_id -> { "import_id": str, "status": "running"|"completed"|"cancelled"|"failed", ... }
+IMPORT_TASKS: dict[str, Any] = {}
 
 # Global Active Batch Tracking
 CURRENT_BATCH: dict[str, Any] = {
@@ -125,8 +147,15 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
                     sess["processed_count"] = sum(
                         1 for p in sess["pages"] if p.get("status") == "colorized"
                     )
-                    if sess.get("total_pages") and sess["processed_count"] == sess["total_pages"]:
-                        sess["status"] = "completed"
+                if not sess.get("detected_preset") and sess.get("filename"):
+                    detected = detect_manga_preset(sess["filename"])
+                    if detected:
+                        sess["detected_preset"] = detected.id
+                        sess["preset_title"] = detected.title
+                        if not sess.get("recommended_style") and detected.recommended_style:
+                            sess["recommended_style"] = detected.recommended_style
+                if session_id not in SESSION_PALETTES:
+                    _get_palette(session_id)
                 SESSIONS[session_id] = sess
                 if session_id not in EVENT_QUEUES:
                     EVENT_QUEUES[session_id] = []
@@ -191,6 +220,9 @@ class ColorizeRequest(BaseModel):
     selected_pages: Optional[list[int]] = None
     skip_if_colored: bool = False
     force_recolorize: bool = False  # when True, re-run even if page already has a colorized file
+    denoise_screentone: bool = True
+    denoise_sigma: int = 25
+    recognition_mode: Optional[str] = "auto"
 
 
 class BatchColorizeRequest(BaseModel):
@@ -203,6 +235,9 @@ class BatchColorizeRequest(BaseModel):
     contrast: float = 1.1
     line_preserve: float = 0.85
     skip_if_colored: bool = False
+    denoise_screentone: bool = True
+    denoise_sigma: int = 25
+    recognition_mode: Optional[str] = "auto"
 
 
 class BatchExportRequest(BaseModel):
@@ -223,6 +258,9 @@ class CombinedExportRequest(BaseModel):
     colorsoft_tune: Optional[bool] = (
         False  # true for Kindle Colorsoft / Color E-Ink vibrancy & contrast boost
     )
+    export_original: Optional[bool] = (
+        False  # true to export original manga pages directly without colorization
+    )
 
 
 class TestCleanupRequest(BaseModel):
@@ -234,6 +272,14 @@ class TestCleanupRequest(BaseModel):
 class BulkDeleteSessionsRequest(BaseModel):
     session_ids: Optional[list[str]] = None
     delete_all: Optional[bool] = False
+
+
+class DirectoryImportRequest(BaseModel):
+    directory_path: str
+    recursive: Optional[bool] = False
+    batch_id: Optional[str] = None
+    max_files: Optional[int] = 5000
+    run_async: Optional[bool] = True
 
 
 class PreviewRequest(BaseModel):
@@ -248,6 +294,10 @@ class PreviewRequest(BaseModel):
     line_preserve: float = 0.85
     skip_if_colored: bool = False
     force_recolorize: bool = False
+    denoise_screentone: bool = True
+    denoise_sigma: int = 25
+    active_character_names: Optional[list[str]] = None
+    recognition_mode: Optional[str] = "auto"
 
 
 # ── Character Palette models ─────────────────────────────────────────
@@ -259,6 +309,16 @@ class CharacterEntryModel(BaseModel):
     skin_hex: str = ""
     costume_hex: str = ""
     extra_hex: str = ""
+    notes: str = ""
+    visual_traits: Optional[list[str]] = None
+    keywords: Optional[list[str]] = None
+    bounding_box: Optional[list[float]] = None
+
+
+class CharacterRecognizeRequest(BaseModel):
+    api_key: Optional[str] = ""
+    model_name: Optional[str] = ""
+    recognition_mode: Optional[str] = "auto"
 
 
 class PaletteUpsertRequest(BaseModel):
@@ -271,15 +331,131 @@ class PaletteDeleteRequest(BaseModel):
     character_name: str
 
 
+class PaletteApplyPresetRequest(BaseModel):
+    session_id: str
+    preset_id: str
+
+
+class PaletteOnlineSearchRequest(BaseModel):
+    query: str
+    session_id: Optional[str] = None
+
+
 # In-memory palette store: session_id -> CharacterPalette
 SESSION_PALETTES: dict[str, CharacterPalette] = {}
 
 
+def save_session_palette(session_id: str, palette: CharacterPalette):
+    """Saves the palette to palette.json in the session directory."""
+    sess_dir = STORAGE_DIR / session_id
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    pal_path = sess_dir / "palette.json"
+    try:
+        with open(pal_path, "w", encoding="utf-8") as f:
+            json.dump(palette.to_dict(), f, indent=2)
+    except Exception as e:
+        print(f"[Palette Warning] Failed to write palette.json for {session_id}: {e}")
+
+
 def _get_palette(session_id: str) -> CharacterPalette:
-    """Returns the palette for a session, creating an empty one if not present."""
-    if session_id not in SESSION_PALETTES:
-        SESSION_PALETTES[session_id] = CharacterPalette()
-    return SESSION_PALETTES[session_id]
+    """Returns the palette for a session, restoring from disk if needed."""
+    if session_id in SESSION_PALETTES:
+        pal = SESSION_PALETTES[session_id]
+        if pal.characters:
+            return pal
+        sess = SESSIONS.get(session_id)
+        detected = None
+        if pal.preset_id:
+            detected = get_preset_by_id(pal.preset_id)
+        elif sess and sess.get("detected_preset"):
+            detected = get_preset_by_id(sess["detected_preset"])
+        elif sess and sess.get("filename"):
+            detected = detect_manga_preset(sess["filename"])
+        if detected:
+            pal = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in detected.characters
+                ],
+                preset_id=detected.id,
+                preset_title=detected.title,
+            )
+            SESSION_PALETTES[session_id] = pal
+            save_session_palette(session_id, pal)
+            return pal
+        return pal
+
+    # Try loading from disk
+    pal_path = STORAGE_DIR / session_id / "palette.json"
+    if pal_path.exists():
+        try:
+            with open(pal_path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                pal = CharacterPalette.from_dict(d)
+                if not pal.characters:
+                    sess = SESSIONS.get(session_id)
+                    detected = None
+                    if pal.preset_id:
+                        detected = get_preset_by_id(pal.preset_id)
+                    elif sess and sess.get("detected_preset"):
+                        detected = get_preset_by_id(sess["detected_preset"])
+                    elif sess and sess.get("filename"):
+                        detected = detect_manga_preset(sess["filename"])
+                    if detected:
+                        pal = CharacterPalette(
+                            characters=[
+                                CharacterEntry(
+                                    name=c.name,
+                                    hair_hex=c.hair_hex,
+                                    skin_hex=c.skin_hex,
+                                    costume_hex=c.costume_hex,
+                                    extra_hex=c.extra_hex,
+                                )
+                                for c in detected.characters
+                            ],
+                            preset_id=detected.id,
+                            preset_title=detected.title,
+                        )
+                        save_session_palette(session_id, pal)
+                SESSION_PALETTES[session_id] = pal
+                return pal
+        except Exception as e:
+            print(f"[Palette Warning] Failed to read palette.json for {session_id}: {e}")
+
+    # Fallback: check if session has a filename and auto-detect
+    sess = SESSIONS.get(session_id)
+    if sess and sess.get("filename"):
+        detected = detect_manga_preset(sess["filename"])
+        if detected:
+            pal = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in detected.characters
+                ],
+                preset_id=detected.id,
+                preset_title=detected.title,
+            )
+            SESSION_PALETTES[session_id] = pal
+            save_session_palette(session_id, pal)
+            sess["detected_preset"] = detected.id
+            sess["preset_title"] = detected.title
+            return pal
+
+    new_pal = CharacterPalette()
+    SESSION_PALETTES[session_id] = new_pal
+    return new_pal
 
 
 @app.post("/api/upload")
@@ -308,6 +484,7 @@ async def upload_files(
         ".gif",
         ".tiff",
         ".zip",
+        ".cbz",
     ]
     effective_batch_id = batch_id or str(uuid.uuid4())
     created_sessions = []
@@ -318,23 +495,34 @@ async def upload_files(
             continue
 
         session_id = str(uuid.uuid4())
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         upload_path = UPLOAD_DIR / f"{session_id}_{uploaded_file.filename}"
 
         with open(upload_path, "wb") as buffer:
-            content = await uploaded_file.read()
-            buffer.write(content)
+            while chunk := await uploaded_file.read(1024 * 1024):
+                buffer.write(chunk)
 
         try:
             pages_meta = file_processor.process_input_file(str(upload_path), session_id)
         except Exception as e:
             if upload_path.exists():
-                upload_path.unlink()
+                upload_path.unlink(missing_ok=True)
             print(f"[Upload Parse Error] {uploaded_file.filename}: {e}")
+            continue
+
+        if not pages_meta:
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+            print(f"[Upload Warning] No readable pages found in {uploaded_file.filename}")
             continue
 
         for page in pages_meta:
             page["status"] = "pending"
             page["colorized_url"] = None
+
+        detected = detect_manga_preset(uploaded_file.filename)
+        detected_preset_id = detected.id if detected else None
+        preset_title = detected.title if detected else None
 
         sess_obj = {
             "session_id": session_id,
@@ -348,7 +536,29 @@ async def upload_files(
             "processed_count": 0,
             "model_provider": "google_nano",
             "model_name": "nano-banana",
+            "detected_preset": detected_preset_id,
+            "preset_title": preset_title,
         }
+        if detected:
+            if detected.recommended_style:
+                sess_obj["recommended_style"] = detected.recommended_style
+            pal = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in detected.characters
+                ],
+                preset_id=detected.id,
+                preset_title=detected.title,
+            )
+            SESSION_PALETTES[session_id] = pal
+            save_session_palette(session_id, pal)
+
         SESSIONS[session_id] = sess_obj
         EVENT_QUEUES[session_id] = []
         save_session_meta(session_id)
@@ -368,6 +578,8 @@ async def upload_files(
                 "total_pages": s["total_pages"],
                 "status": s["status"],
                 "processed_count": s["processed_count"],
+                "detected_preset": s.get("detected_preset"),
+                "preset_title": s.get("preset_title"),
             }
         )
 
@@ -385,6 +597,211 @@ async def upload_files(
             "pages": primary["pages"],
         }
     )
+
+
+@app.post("/api/import/directory")
+async def import_directory_endpoint(req: DirectoryImportRequest, background_tasks: BackgroundTasks):
+    """
+    Imports all supported ebook files (.epub, .pdf, .cbz, .zip, etc.) directly from a local directory path.
+    Supports +1076 files, recursive scanning, natural sorting, and asynchronous background progress tracking.
+    """
+    dir_path = Path(req.directory_path).expanduser().resolve()
+    if not dir_path.exists() or not dir_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Directory does not exist or is not a directory: {req.directory_path}")
+
+    ALLOWED_EXTENSIONS = {".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"}
+
+    discovered_files = []
+    if req.recursive:
+        for root, _, files in os.walk(str(dir_path)):
+            for f in files:
+                if f.startswith(".") or f.startswith("__MACOSX"):
+                    continue
+                p = Path(root) / f
+                if p.suffix.lower() in ALLOWED_EXTENSIONS:
+                    discovered_files.append(p)
+    else:
+        for item in dir_path.iterdir():
+            if item.is_file() and not item.name.startswith("."):
+                if item.suffix.lower() in ALLOWED_EXTENSIONS:
+                    discovered_files.append(item)
+
+    def _sort_key(p: Path):
+        fn = p.name.lower()
+        parts = [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', fn)]
+        return parts
+
+    discovered_files.sort(key=_sort_key)
+
+    if req.max_files and len(discovered_files) > req.max_files:
+        discovered_files = discovered_files[:req.max_files]
+
+    if not discovered_files:
+        raise HTTPException(status_code=404, detail=f"No supported ebook files found in {dir_path}")
+
+    import_id = str(uuid.uuid4())
+    effective_batch_id = req.batch_id or str(uuid.uuid4())
+
+    task_state = {
+        "import_id": import_id,
+        "batch_id": effective_batch_id,
+        "directory": str(dir_path),
+        "status": "running",
+        "total_files": len(discovered_files),
+        "imported_files": 0,
+        "failed_files": 0,
+        "current_file": None,
+        "created_sessions": [],
+        "error": None,
+        "cancel_requested": False
+    }
+    IMPORT_TASKS[import_id] = task_state
+
+    def _process_import():
+        for file_p in discovered_files:
+            if task_state.get("cancel_requested"):
+                task_state["status"] = "cancelled"
+                break
+
+            task_state["current_file"] = file_p.name
+            ext = file_p.suffix.lower()
+            session_id = str(uuid.uuid4())
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            upload_path = UPLOAD_DIR / f"{session_id}_{file_p.name}"
+
+            try:
+                shutil.copy2(str(file_p), str(upload_path))
+                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+                if not pages_meta:
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                    task_state["failed_files"] += 1
+                    continue
+
+                for page in pages_meta:
+                    page["status"] = "pending"
+                    page["colorized_url"] = None
+
+                detected = detect_manga_preset(file_p.name)
+                detected_preset_id = detected.id if detected else None
+                preset_title = detected.title if detected else None
+
+                sess_obj = {
+                    "session_id": session_id,
+                    "batch_id": effective_batch_id,
+                    "filename": file_p.name,
+                    "file_path": str(upload_path),
+                    "ext": ext,
+                    "total_pages": len(pages_meta),
+                    "pages": pages_meta,
+                    "status": "idle",
+                    "processed_count": 0,
+                    "model_provider": "google_nano",
+                    "model_name": "nano-banana",
+                    "detected_preset": detected_preset_id,
+                    "preset_title": preset_title,
+                }
+                if detected:
+                    if detected.recommended_style:
+                        sess_obj["recommended_style"] = detected.recommended_style
+                    pal = CharacterPalette(
+                        characters=[
+                            CharacterEntry(
+                                name=c.name,
+                                hair_hex=c.hair_hex,
+                                skin_hex=c.skin_hex,
+                                costume_hex=c.costume_hex,
+                                extra_hex=c.extra_hex,
+                            )
+                            for c in detected.characters
+                        ],
+                        preset_id=detected.id,
+                        preset_title=detected.title,
+                    )
+                    SESSION_PALETTES[session_id] = pal
+                    save_session_palette(session_id, pal)
+
+                SESSIONS[session_id] = sess_obj
+                EVENT_QUEUES[session_id] = []
+                save_session_meta(session_id)
+                task_state["imported_files"] += 1
+                task_state["created_sessions"].append({
+                    "session_id": session_id,
+                    "batch_id": effective_batch_id,
+                    "filename": file_p.name,
+                    "ext": ext,
+                    "total_pages": len(pages_meta),
+                    "status": "idle",
+                    "processed_count": 0,
+                    "detected_preset": detected_preset_id,
+                    "preset_title": preset_title,
+                })
+            except Exception as e:
+                task_state["failed_files"] += 1
+                print(f"[Directory Import Error] {file_p.name}: {e}")
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+
+        if task_state["status"] != "cancelled":
+            task_state["status"] = "completed"
+        task_state["current_file"] = None
+
+    if req.run_async:
+        background_tasks.add_task(_process_import)
+        return JSONResponse({
+            "status": "started",
+            "import_id": import_id,
+            "batch_id": effective_batch_id,
+            "total_files": len(discovered_files),
+            "total_scanned_files": len(discovered_files),
+            "message": f"Started background import of {len(discovered_files)} files from {dir_path.name}"
+        })
+    else:
+        _process_import()
+        return JSONResponse({
+            "status": "completed",
+            "import_id": import_id,
+            "batch_id": effective_batch_id,
+            "total_files": len(discovered_files),
+            "total_scanned_files": len(discovered_files),
+            "imported_files": task_state["imported_files"],
+            "processed_files": task_state["imported_files"] + task_state["failed_files"],
+            "failed_files": task_state["failed_files"],
+            "created_sessions": task_state["created_sessions"],
+            "created_session_ids": [s["session_id"] for s in task_state["created_sessions"]]
+        })
+
+
+@app.get("/api/import/status/{import_id}")
+async def get_import_status(import_id: str):
+    task = IMPORT_TASKS.get(import_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Import task not found")
+    total = task.get("total_files", 0)
+    imported = task.get("imported_files", 0)
+    failed = task.get("failed_files", 0)
+    percent = round(((imported + failed) / total * 100), 1) if total > 0 else 0
+    return JSONResponse({
+        **task,
+        "percent": percent,
+        "progress_percent": percent,
+        "total_scanned_files": total,
+        "processed_files": imported + failed,
+        "created_session_ids": [s["session_id"] for s in task.get("created_sessions", [])]
+    })
+
+
+@app.post("/api/import/cancel/{import_id}")
+async def cancel_import_task(import_id: str):
+    task = IMPORT_TASKS.get(import_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Import task not found")
+    task["cancel_requested"] = True
+    task["status"] = "cancelled"
+    return JSONResponse({
+        "status": "success",
+        "message": f"Import task {import_id} cancelled"
+    })
 
 
 @app.get("/api/session/latest")
@@ -604,7 +1021,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
 
         try:
             # Resolve palette for this session (if any characters are defined)
-            palette = SESSION_PALETTES.get(session_id)
+            palette = _get_palette(session_id)
             if palette and not palette.characters:
                 palette = None
 
@@ -622,6 +1039,9 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 line_preserve=req.line_preserve,
                 skip_if_colored=req.skip_if_colored,
                 character_palette=palette,
+                denoise_screentone=getattr(req, "denoise_screentone", True),
+                denoise_sigma=getattr(req, "denoise_sigma", 25),
+                recognition_mode=getattr(req, "recognition_mode", "auto"),
             )
 
             # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -755,9 +1175,19 @@ async def preview_single_page(req: PreviewRequest):
     output_path = str(colorized_dir / color_filename)
 
     try:
-        palette = SESSION_PALETTES.get(session_id)
+        palette = _get_palette(session_id)
         if palette and not palette.characters:
             palette = None
+
+        # Track whether the caller has already declared active characters,
+        # so we can skip the redundant in-engine recognition pass.
+        has_active_names = bool(getattr(req, "active_character_names", None))
+
+        if palette and has_active_names:
+            palette = copy.deepcopy(palette)
+            palette.characters = [
+                c for c in palette.characters if c.name in req.active_character_names
+            ]
 
         res = await asyncio.to_thread(
             colorizer_engine.colorize_page,
@@ -772,6 +1202,11 @@ async def preview_single_page(req: PreviewRequest):
             line_preserve=req.line_preserve,
             skip_if_colored=req.skip_if_colored,
             character_palette=palette,
+            denoise_screentone=getattr(req, "denoise_screentone", True),
+            denoise_sigma=getattr(req, "denoise_sigma", 25),
+            recognition_mode=getattr(req, "recognition_mode", "auto"),
+            # Skip re-running recognition when caller already pre-filtered palette
+            skip_recognition=has_active_names,
         )
 
         page_info["status"] = "colorized"
@@ -779,6 +1214,8 @@ async def preview_single_page(req: PreviewRequest):
         page_info["engine_used"] = res.get("engine", req.model_provider)
         if res.get("status") == "skipped_colored":
             page_info["skipped_colored"] = True
+        if "recognized_characters" in res:
+            page_info["recognized_characters"] = res["recognized_characters"]
 
         # Update processed_count and status
         sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
@@ -807,12 +1244,112 @@ async def preview_single_page(req: PreviewRequest):
                 "colorized_url": page_info["colorized_url"],
                 "engine": page_info["engine_used"],
                 "page_info": page_info,
+                "recognized_characters": res.get("recognized_characters", []),
                 "processed_count": sess["processed_count"],
                 "total_pages": sess.get("total_pages", len(pages)),
             }
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+
+
+@app.get("/api/palette/presets")
+async def list_manga_presets():
+    """Returns all registered manga presets with canonical character colors."""
+    presets = get_all_presets()
+    return JSONResponse({
+        "presets": [p.to_dict() for p in presets],
+        "count": len(presets),
+    })
+
+
+@app.get("/api/palette/preset/{preset_id}")
+async def get_manga_preset(preset_id: str):
+    """Returns a specific manga preset by its ID."""
+    preset = get_preset_by_id(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return JSONResponse({"preset": preset.to_dict()})
+
+
+@app.post("/api/palette/apply-preset")
+async def apply_preset_to_session(req: PaletteApplyPresetRequest):
+    """Applies all characters from a manga preset to the session palette."""
+    sess = get_or_restore_session(req.session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    preset = get_preset_by_id(req.preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail=f"Preset '{req.preset_id}' not found")
+
+    palette = CharacterPalette(
+        characters=[
+            CharacterEntry(
+                name=c.name,
+                hair_hex=c.hair_hex,
+                skin_hex=c.skin_hex,
+                costume_hex=c.costume_hex,
+                extra_hex=c.extra_hex,
+            )
+            for c in preset.characters
+        ],
+        preset_id=preset.id,
+        preset_title=preset.title,
+    )
+    SESSION_PALETTES[req.session_id] = palette
+    save_session_palette(req.session_id, palette)
+
+    sess["detected_preset"] = preset.id
+    sess["preset_title"] = preset.title
+    if preset.recommended_style:
+        sess["recommended_style"] = preset.recommended_style
+    save_session_meta(req.session_id)
+
+    return JSONResponse({
+        "status": "ok",
+        "session_id": req.session_id,
+        "preset_id": preset.id,
+        "preset_title": preset.title,
+        "palette": palette.to_dict(),
+    })
+
+
+@app.post("/api/palette/search-online")
+async def search_online_preset_endpoint(req: PaletteOnlineSearchRequest):
+    """Searches online sources for character color palettes and generates a preset."""
+    preset = search_online_manga_preset(req.query)
+    if not preset:
+        raise HTTPException(status_code=404, detail=f"No color palette found online for '{req.query}'")
+
+    if req.session_id:
+        sess = get_or_restore_session(req.session_id)
+        if sess:
+            palette = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                    )
+                    for c in preset.characters
+                ],
+                preset_id=preset.id,
+                preset_title=preset.title,
+            )
+            SESSION_PALETTES[req.session_id] = palette
+            save_session_palette(req.session_id, palette)
+            sess["detected_preset"] = preset.id
+            sess["preset_title"] = preset.title
+            save_session_meta(req.session_id)
+
+    return JSONResponse({
+        "status": "ok",
+        "preset": preset.to_dict(),
+        "applied_to_session": req.session_id if req.session_id else None,
+    })
 
 
 @app.get("/api/palette/{session_id}")
@@ -822,7 +1359,12 @@ async def get_palette(session_id: str):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
     palette = _get_palette(session_id)
-    return JSONResponse({"session_id": session_id, "palette": palette.to_dict()})
+    return JSONResponse({
+        "session_id": session_id,
+        "preset_id": palette.preset_id or sess.get("detected_preset", ""),
+        "preset_title": palette.preset_title or sess.get("preset_title", ""),
+        "palette": palette.to_dict(),
+    })
 
 
 @app.post("/api/palette/upsert")
@@ -842,10 +1384,15 @@ async def upsert_palette_character(req: PaletteUpsertRequest):
         skin_hex=req.character.skin_hex,
         costume_hex=req.character.costume_hex,
         extra_hex=req.character.extra_hex,
+        notes=req.character.notes or "",
+        visual_traits=req.character.visual_traits or [],
+        keywords=req.character.keywords or [],
+        bounding_box=tuple(req.character.bounding_box) if req.character.bounding_box else None,
     )
     # Replace existing entry by name, or append
     palette.characters = [c for c in palette.characters if c.name.lower() != new_entry.name.lower()]
     palette.characters.append(new_entry)
+    save_session_palette(req.session_id, palette)
 
     return JSONResponse(
         {"status": "ok", "session_id": req.session_id, "palette": palette.to_dict()}
@@ -863,6 +1410,7 @@ async def delete_palette_character(session_id: str, character_name: str):
     before = len(palette.characters)
     palette.characters = [c for c in palette.characters if c.name.lower() != character_name.lower()]
     removed = before - len(palette.characters)
+    save_session_palette(session_id, palette)
 
     return JSONResponse(
         {"status": "ok", "removed": removed, "session_id": session_id, "palette": palette.to_dict()}
@@ -876,8 +1424,72 @@ async def clear_palette(session_id: str):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    SESSION_PALETTES[session_id] = CharacterPalette()
+    empty_pal = CharacterPalette()
+    SESSION_PALETTES[session_id] = empty_pal
+    save_session_palette(session_id, empty_pal)
+    sess["detected_preset"] = None
+    sess["preset_title"] = None
+    save_session_meta(session_id)
+
     return JSONResponse({"status": "ok", "session_id": session_id, "palette": {"characters": []}})
+
+
+@app.post("/api/session/{session_id}/page/{page_index}/recognize")
+async def recognize_characters_for_page(
+    session_id: str,
+    page_index: int,
+    req: Optional[CharacterRecognizeRequest] = None,
+):
+    """
+    Analyzes the specified manga page against the session's active character palette
+    and returns detected characters with confidences and bounding boxes.
+    """
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    pages = sess.get("pages", [])
+    if page_index < 0 or page_index >= len(pages):
+        raise HTTPException(status_code=400, detail="Invalid page index")
+
+    page_info = pages[page_index]
+    orig_path = page_info.get("original_path", "")
+    if not orig_path or not os.path.exists(orig_path):
+        raise HTTPException(status_code=404, detail="Original page image not found")
+
+    palette = _get_palette(session_id)
+    if not palette or not palette.characters:
+        return JSONResponse({
+            "status": "no_palette",
+            "message": "No active character palette for this session",
+            "recognized": [],
+            "palette": palette.to_dict() if palette else {"characters": []},
+        })
+
+    api_key = req.api_key if req else ""
+    model_name = req.model_name if req else ""
+    recognition_mode = req.recognition_mode if (req and req.recognition_mode) else "auto"
+
+    recognized = await asyncio.to_thread(
+        colorizer_engine.recognizer.recognize_page_characters,
+        image_path=orig_path,
+        palette=palette,
+        api_key=api_key,
+        model_name=model_name,
+        recognition_mode=recognition_mode,
+    )
+
+    rec_dicts = [rc.to_dict() for rc in recognized]
+    page_info["recognized_characters"] = rec_dicts
+    save_session_meta(session_id)
+
+    return JSONResponse({
+        "status": "ok",
+        "session_id": session_id,
+        "page_index": page_index,
+        "recognized": rec_dicts,
+        "palette": palette.to_dict(),
+    })
 
 
 @app.post("/api/export/batch")
@@ -948,6 +1560,7 @@ async def _async_combined_export_worker(
     jpeg_quality: int = 80,
     grayscale: bool = False,
     colorsoft_tune: bool = False,
+    export_original: bool = False,
 ):
     job = COMBINED_EXPORTS.get(job_id)
     if not job:
@@ -975,6 +1588,7 @@ async def _async_combined_export_worker(
             jpeg_quality=jpeg_quality,
             grayscale=grayscale,
             colorsoft_tune=colorsoft_tune,
+            export_original=export_original,
             progress_callback=on_progress,
             cancel_check=check_cancelled,
         )
@@ -1087,11 +1701,19 @@ async def export_combined_volume(req: CombinedExportRequest):
         pass
 
     fmt = (req.format or "epub").lower().strip()
-    title = (req.title or "Colorized Manga Collection").strip() or "Colorized Manga Collection"
+    export_original = bool(req.export_original)
+    default_title = "Manga Collection" if export_original else "Colorized Manga Collection"
+    title = (req.title or default_title).strip() or default_title
+    if title == "Colorized Manga Collection" and export_original:
+        title = "Manga Collection"
+
     # Sanitize title for filename
     clean_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", title).strip().replace(" ", "_")
     if not clean_title:
         clean_title = "manga_collection"
+    if export_original and not clean_title.lower().startswith("original"):
+        clean_title = f"Original_{clean_title}"
+
     token = str(uuid.uuid4())[:8]
     n = len(sessions_data)
     total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
@@ -1109,8 +1731,11 @@ async def export_combined_volume(req: CombinedExportRequest):
     if chunk_by == "volumes" and n > chunk_size:
         will_chunk = True
     elif chunk_by in ["size_mb", "size"]:
-        avg_kb = 85 if is_gray else 135
-        if (total_pages * avg_kb) > (max(50, chunk_size) * 1024):
+        budget_mb = max(20, chunk_size)
+        avg_kb = 160 if is_gray else (480 if (max_dim and max_dim <= 1600) else 750)
+        total_est_mb = (total_pages * avg_kb) / 1024
+        max_safe_pages = min(450, max(80, int((budget_mb * 1024) / avg_kb)))
+        if total_est_mb > budget_mb or total_pages > max_safe_pages or (n > 1 and total_pages > 220):
             will_chunk = True
 
     if will_chunk:
@@ -1142,6 +1767,7 @@ async def export_combined_volume(req: CombinedExportRequest):
                 jpeg_quality=jpeg_qual,
                 grayscale=is_gray,
                 colorsoft_tune=colorsoft_tune,
+                export_original=export_original,
             )
             return JSONResponse(
                 {
@@ -1192,6 +1818,7 @@ async def export_combined_volume(req: CombinedExportRequest):
             jpeg_quality=jpeg_qual,
             grayscale=is_gray,
             colorsoft_tune=colorsoft_tune,
+            export_original=export_original,
         )
     )
 
@@ -1425,10 +2052,15 @@ async def download_file(session_id: str, filename: str):
 @app.get("/api/sessions")
 async def list_sessions(batch_id: Optional[str] = None):
     """Returns list of active/cached sessions, optionally filtered by batch_id, naturally sorted by filename."""
-    dirs = [d for d in STORAGE_DIR.iterdir() if d.is_dir()]
-    for d in dirs:
-        if d.name not in SESSIONS:
-            get_or_restore_session(d.name)
+    existing_dirs = {d.name for d in STORAGE_DIR.iterdir() if d.is_dir()}
+    for sid in list(SESSIONS.keys()):
+        if sid not in existing_dirs:
+            SESSIONS.pop(sid, None)
+            EVENT_QUEUES.pop(sid, None)
+
+    for d_name in existing_dirs:
+        if d_name not in SESSIONS:
+            get_or_restore_session(d_name)
 
     results = []
     for sess in SESSIONS.values():
@@ -1698,6 +2330,30 @@ async def bulk_delete_sessions(req: BulkDeleteSessionsRequest):
     )
 
 
+def is_authentic_user_manga(name: str = "", title: str = "", sid: str = "") -> bool:
+    """Identifies authentic user manga collections (such as Dr. Slump or One Piece)
+    that must be preserved unless purge_all is explicitly specified."""
+    text = f"{name} {title} {sid}".lower()
+    test_markers = [
+        "test",
+        "sample",
+        "dummy",
+        "api_orig_sync",
+        "api_split",
+        "import_test",
+        "split_test",
+        "custom_size",
+    ]
+    if any(m in text for m in test_markers):
+        return False
+
+    if "slump" in text:
+        return True
+    if "one piece" in text or "onepiece" in text or "eiichiro oda" in text:
+        return True
+    return False
+
+
 @app.post("/api/test/cleanup")
 async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
     """
@@ -1721,6 +2377,45 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
             pass
         return 0
 
+    test_keywords = [
+        "test",
+        "sample",
+        "dummy",
+        "cancel",
+        "switch",
+        "kindle",
+        "batch",
+        "preview",
+        "exp_page",
+        "manga_vol",
+        "manga_volume",
+        "vol_01",
+        "vol_02",
+        "vol_03",
+        "api_split",
+        "api_orig_sync",
+        "sess_epub",
+        "sess_pdf",
+        "sess_mobi",
+        "import_test",
+        "split_test",
+        "custom_size",
+        "huge_omnibus",
+        "omnibus_200mb",
+        "huge_manga",
+        "single_original",
+        "multi_original",
+        "epic_manga",
+        "amazon_kindle",
+        "progress_test",
+        "single_image_test",
+        "ranma",
+        "inuyasha",
+        "resnext",
+        "multicolor",
+        "skip_colored",
+    ]
+
     # 1. Determine target session IDs
     target_sids = set()
     if session_ids:
@@ -1736,13 +2431,12 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
             if d.is_dir():
                 all_sids.add(d.name)
 
-        test_keywords = ["test", "sample", "cancel", "switch", "kindle_test", "batch_test"]
         for sid in all_sids:
             sess = SESSIONS.get(sid) or get_or_restore_session(sid)
             fn = (sess.get("filename") or "").lower() if sess else ""
             title = (sess.get("title") or "").lower() if sess else ""
-            # Preserve user volumes like Dr. Slump unless purge_all is explicitly requested
-            if "slump" in fn or "slump" in title:
+            # Preserve authentic user volumes unless purge_all is explicitly requested
+            if is_authentic_user_manga(name=fn, title=title, sid=sid):
                 continue
             is_test = False
             for kw in test_keywords:
@@ -1771,26 +2465,32 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
     # 3. Clean orphan or test output files if requested
     cleaned_output_files = 0
     if clean_orphans or purge_all:
-        active_sids = set(SESSIONS.keys())
-        for d in STORAGE_DIR.iterdir():
-            if d.is_dir():
-                active_sids.add(d.name)
+        disk_sids = {d.name for d in STORAGE_DIR.iterdir() if d.is_dir()}
+        for sid in list(SESSIONS.keys()):
+            if sid not in disk_sids:
+                SESSIONS.pop(sid, None)
+                EVENT_QUEUES.pop(sid, None)
+        active_sids = set(SESSIONS.keys()) | disk_sids
 
-        test_out_keywords = ["test", "sample", "cancel", "switch", "progress", "kindle"]
         for f in OUTPUT_DIR.iterdir():
             if not f.is_file():
                 continue
             name_lower = f.name.lower()
+            is_user = is_authentic_user_manga(name=name_lower)
+            if is_user and not purge_all:
+                continue
+
             should_delete = False
             if purge_all:
                 should_delete = True
-            elif any(k in name_lower for k in test_out_keywords):
+            elif any(k in name_lower for k in test_keywords):
                 should_delete = True
+            elif name_lower.startswith("combined_") or name_lower.startswith("batch_"):
+                if not is_user:
+                    should_delete = True
             else:
                 prefix = f.name.split("_")[0]
-                if prefix not in active_sids and (
-                    f.name.startswith("combined_") or f.name.startswith("batch_")
-                ):
+                if prefix not in active_sids:
                     should_delete = True
 
             if should_delete:
@@ -1802,10 +2502,12 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
             if not f.is_file():
                 continue
             name_lower = f.name.lower()
+            if is_authentic_user_manga(name=name_lower) and not purge_all:
+                continue
             should_delete = False
             if purge_all:
                 should_delete = True
-            elif any(k in name_lower for k in test_out_keywords):
+            elif any(k in name_lower for k in test_keywords):
                 should_delete = True
             else:
                 prefix = f.name.split("_")[0]

@@ -61,11 +61,16 @@ class TestGoogleNanoBananaAPI(unittest.TestCase):
         self.assertTrue(mock_post.called)
         called_url = mock_post.call_args[0][0]
         self.assertIn("generativelanguage.googleapis.com", called_url)
-        self.assertIn("gemini-2.0-flash-exp", called_url)
+        self.assertIn("gemini-3.1-flash-image", called_url)
         self.assertIn("key=AIzaSyValidTestKey123", called_url)
 
+        # Verify generationConfig includes TEXT and IMAGE modalities
+        called_body = mock_post.call_args[1].get("json", {})
+        gen_config = called_body.get("generationConfig", {})
+        self.assertEqual(gen_config.get("responseModalities"), ["TEXT", "IMAGE"])
+
         # 2. Verify returned engine name indicates real Google Gemini API was used
-        self.assertIn("Google Gemini Nano Banana (gemini-2.0-flash-exp)", res.get("engine"))
+        self.assertIn("Google Gemini (gemini-3.1-flash-image)", res.get("engine"))
         self.assertEqual(res.get("status"), "success")
         self.assertTrue(os.path.exists(self.test_out_path))
 

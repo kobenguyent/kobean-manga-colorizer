@@ -77,3 +77,68 @@ def test_script_cleanup_protects_user_data():
     # If any exist on disk, ensure they are not deleted
     for s_dir in slump_dirs:
         assert s_dir.exists()
+
+
+def test_cleanup_new_patterns_and_protect_one_piece():
+    """Verifies that cleanup script removes new test patterns (like Manga_Vol_1.cbz and tmp files)
+    while strictly protecting authentic One Piece collections."""
+    import json
+    import shutil
+    import uuid
+    from scripts.cleanup_test_data import run_cleanup
+
+    # 1. Create a mock authentic One Piece session
+    real_sid = f"user_real_{uuid.uuid4().hex[:8]}"
+    real_dir = STORAGE_DIR / real_sid
+    real_dir.mkdir(parents=True, exist_ok=True)
+    real_meta = real_dir / "meta.json"
+    real_meta.write_text(
+        json.dumps(
+            {
+                "session_id": real_sid,
+                "filename": "One Piece Colored - Eiichiro Oda - Volume 0150.epub",
+                "title": "One Piece",
+            }
+        )
+    )
+
+    # 2. Create a mock new test session (Manga_Vol_1.cbz)
+    test_sid = f"vol_test_{uuid.uuid4().hex[:8]}"
+    test_dir = STORAGE_DIR / test_sid
+    test_dir.mkdir(parents=True, exist_ok=True)
+    test_meta = test_dir / "meta.json"
+    test_meta.write_text(
+        json.dumps(
+            {
+                "session_id": test_sid,
+                "filename": "Manga_Vol_1.cbz",
+                "title": "",
+            }
+        )
+    )
+
+    # 3. Create dummy tmp test files
+    tmp_f1 = Path("/tmp/dummy.jpg")
+    tmp_f1.write_text("dummy")
+    tmp_f2 = Path("/tmp/colorized_manga_output.epub")
+    tmp_f2.write_text("colorized")
+
+    try:
+        # Run cleanup
+        res = run_cleanup(purge_all=False, keep_slump=True, clean_tmp=True, dry_run=False)
+        assert res["dry_run"] is False
+
+        # Verify authentic One Piece session is preserved
+        assert real_dir.exists(), "Authentic One Piece session must not be deleted"
+
+        # Verify test session is deleted
+        assert not test_dir.exists(), "Manga_Vol_1 test session must be deleted"
+
+        # Verify tmp files are deleted
+        assert not tmp_f1.exists(), "Dummy image in /tmp must be deleted"
+        assert not tmp_f2.exists(), "Colorized epub in /tmp must be deleted"
+    finally:
+        shutil.rmtree(str(real_dir), ignore_errors=True)
+        shutil.rmtree(str(test_dir), ignore_errors=True)
+        tmp_f1.unlink(missing_ok=True)
+        tmp_f2.unlink(missing_ok=True)

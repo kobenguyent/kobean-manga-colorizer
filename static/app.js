@@ -1,6 +1,13 @@
 // Manga Colorizer Pro - Client Application Logic
 
 let currentSession = null;
+let isImportCancelled = false;
+let currentImportId = null;
+let folderImportPoller = null;
+let queueSearchQuery = "";
+let queueRenderLimit = 50;
+let currentHistoryPage = 1;
+const historyPageSize = 25;
 let activeSessions = [];
 let currentBatchId = null;
 let eventSource = null;
@@ -25,10 +32,12 @@ const MODEL_VARIANTS = {
     { value: "resnext-comicolor", label: "🎨 ResNeXt Comicolorization Pipeline" }
   ],
   google_nano: [
-    { value: "nano-banana", label: "🍌 Google Nano Banana (Multimodal Vision)" },
-    { value: "gemini-2.0-flash", label: "⚡ Gemini 2.0 Flash (Fast Vision)" },
-    { value: "gemini-1.5-flash", label: "✨ Gemini 1.5 Flash" },
-    { value: "imagen-3.0-generate-002", label: "🎨 Google Imagen 3 Colorizer" }
+    { value: "gemini-3.1-flash-image", label: "🍌 Gemini 3.1 Flash Image (Nano Banana - Recommended)" },
+    { value: "gemini-3-pro-image", label: "💎 Gemini 3 Pro Image (4K Studio Quality)" },
+    { value: "gemini-3.1-flash-lite-image", label: "⚡ Gemini 3.1 Flash Lite Image (Fast Vision)" },
+    { value: "gemini-2.5-flash-image", label: "✨ Gemini 2.5 Flash Image" },
+    { value: "imagen-3.0-generate-002", label: "🎨 Google Imagen 3 Colorizer" },
+    { value: "nano-banana", label: "🍌 Google Nano Banana (Default Alias)" }
   ],
   apple_foundation: [
     { value: "apple-foundation-v1", label: "🍏 Apple Foundation Model (Vision Neural Engine)" },
@@ -54,6 +63,9 @@ function initCustomSelect(selectElement) {
   container.className = "custom-select-container";
   if (selectElement.classList.contains("form-select-sm") || selectElement.classList.contains("custom-select-sm")) {
     container.classList.add("custom-select-sm");
+  }
+  if (selectElement.style.flex) {
+    container.style.flex = selectElement.style.flex;
   }
   container.id = `custom-select-${selectElement.id}`;
 
@@ -103,7 +115,17 @@ function initCustomSelect(selectElement) {
       labelSpan.innerText = "";
     }
 
+    let lastGroup = null;
     options.forEach((opt, idx) => {
+      const groupLabel = opt.parentElement && opt.parentElement.tagName === "OPTGROUP" ? opt.parentElement.label : null;
+      if (groupLabel && groupLabel !== lastGroup) {
+        lastGroup = groupLabel;
+        const grpHdr = document.createElement("div");
+        grpHdr.className = "custom-select-group-header";
+        grpHdr.textContent = groupLabel;
+        optionsContainer.appendChild(grpHdr);
+      }
+
       const isSelected = opt.selected || opt.value === selectElement.value;
       const optElem = document.createElement("div");
       optElem.className = `custom-select-option ${isSelected ? "selected" : ""}`;
@@ -267,6 +289,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
   updateModelVariants("resnext_generator");
   initAllCustomSelects();
+  loadMangaPresets();
 
   // Auto-restore session from sessionStorage or fetch the latest active session
   const savedSessionId = sessionStorage.getItem("active_session_id");
@@ -563,6 +586,40 @@ function setupEventListeners() {
     });
   }
 
+  // Combined Export Original Versions toggle
+  const combinedOriginal = document.getElementById("combined-original-check");
+  const combinedTitleInput = document.getElementById("combined-title-input");
+  if (combinedOriginal && combinedTitleInput) {
+    combinedOriginal.addEventListener("change", () => {
+      if (combinedOriginal.checked) {
+        if (combinedTitleInput.value === "Colorized Manga Collection") {
+          combinedTitleInput.value = "Manga Collection";
+        }
+        if (combinedPreset && combinedPreset.value === "colorsoft") {
+          combinedPreset.value = "original";
+          combinedPreset.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      } else {
+        if (combinedTitleInput.value === "Manga Collection") {
+          combinedTitleInput.value = "Colorized Manga Collection";
+        }
+      }
+    });
+  }
+
+  // Combined Chunk & Custom Size sync
+  const combinedChunk = document.getElementById("combined-chunk-select");
+  const customSizeBox = document.getElementById("combined-custom-size-box");
+  if (combinedChunk && customSizeBox) {
+    combinedChunk.addEventListener("change", () => {
+      if (combinedChunk.value === "size_custom") {
+        customSizeBox.classList.remove("hidden");
+      } else {
+        customSizeBox.classList.add("hidden");
+      }
+    });
+  }
+
   // Setup Split Slider Dragging
   setupSplitSlider();
 }
@@ -662,7 +719,7 @@ function toggleApiKeyVisibility() {
 }
 
 async function handleFileSelection(fileOrFiles) {
-  const allowed = ["pdf", "epub", "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "zip"];
+  const allowed = ["pdf", "epub", "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "zip", "cbz"];
   const fileList = Array.from(fileOrFiles instanceof FileList ? fileOrFiles : (Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles]));
 
   const validFiles = fileList.filter(f => {
@@ -671,7 +728,17 @@ async function handleFileSelection(fileOrFiles) {
   });
 
   if (validFiles.length === 0) {
-    showToast("Supported formats: .pdf, .epub, images (.png, .jpg, .webp) & .zip", "error");
+    showToast("Supported formats: .pdf, .epub, .cbz, images (.png, .jpg, .webp) & .zip", "error");
+    return;
+  }
+
+  // If selecting more than 5 files (or large batch up to +1076 files), use chunked batch uploader
+  if (validFiles.length > 5) {
+    if (addBtn) {
+      addBtn.disabled = false;
+      addBtn.innerHTML = origAddBtnHTML;
+    }
+    await handleBulkChunkedUpload(validFiles);
     return;
   }
 
@@ -760,6 +827,371 @@ async function handleFileSelection(fileOrFiles) {
   }
 }
 
+// Optimized chunked uploader for importing large numbers of files (+1076 files)
+async function handleBulkChunkedUpload(files) {
+  isImportCancelled = false;
+  const totalFiles = files.length;
+  const chunkSize = 8; // Upload 8 files per chunk to avoid browser payload timeouts
+  const totalChunks = Math.ceil(totalFiles / chunkSize);
+  const startTime = Date.now();
+
+  openImportProgressModal(totalFiles);
+
+  let successCount = 0;
+  let failCount = 0;
+  let firstUploadedSessionId = null;
+
+  for (let i = 0; i < totalChunks; i++) {
+    if (isImportCancelled) {
+      showToast("Batch import cancelled by user.", "info");
+      break;
+    }
+
+    const chunk = files.slice(i * chunkSize, (i + 1) * chunkSize);
+    const chunkNames = chunk.map(f => f.name).join(", ");
+    updateImportProgressModal(
+      successCount + failCount,
+      totalFiles,
+      chunkNames,
+      i + 1,
+      totalChunks,
+      successCount,
+      failCount,
+      startTime
+    );
+
+    const formData = new FormData();
+    if (currentBatchId) {
+      formData.append("batch_id", currentBatchId);
+    }
+    chunk.forEach(f => formData.append("files", f));
+
+    try {
+      const resp = await fetch("/api/upload", {
+        method: "POST",
+        body: formData
+      });
+      const data = await resp.json();
+      if (resp.ok && data.status === "success") {
+        successCount += chunk.length;
+        if (!firstUploadedSessionId && data.session_id) {
+          firstUploadedSessionId = data.session_id;
+        }
+        if (data.batch_id) {
+          currentBatchId = data.batch_id;
+          sessionStorage.setItem("active_batch_id", currentBatchId);
+        }
+      } else {
+        failCount += chunk.length;
+        console.error("Chunk upload error:", data.detail);
+      }
+    } catch (err) {
+      failCount += chunk.length;
+      console.error("Chunk upload fetch error:", err);
+    }
+
+    updateImportProgressModal(
+      successCount + failCount,
+      totalFiles,
+      chunkNames,
+      i + 1,
+      totalChunks,
+      successCount,
+      failCount,
+      startTime
+    );
+  }
+
+  // Refresh sessions after upload finishes
+  try {
+    const sessRes = await fetch("/api/sessions");
+    if (sessRes.ok) {
+      const sessData = await sessRes.json();
+      if (sessData && sessData.sessions) {
+        activeSessions = sessData.sessions;
+      }
+    }
+
+    if (firstUploadedSessionId && (!currentSession || !activeSessions.some(s => s.session_id === currentSession.session_id))) {
+      const fullSessRes = await fetch(`/api/session/${firstUploadedSessionId}`);
+      if (fullSessRes.ok) {
+        currentSession = await fullSessRes.json();
+        sessionStorage.setItem("active_session_id", currentSession.session_id);
+      }
+    }
+  } catch (err) {
+    console.error("Error refreshing sessions after bulk upload:", err);
+  }
+
+  renderDashboard();
+  renderDocumentQueue();
+
+  setTimeout(() => {
+    closeImportProgressModal();
+    if (successCount > 0) {
+      showToast(`Successfully imported ${successCount} document(s)!${failCount > 0 ? ` (${failCount} failed)` : ""}`, "success");
+    } else {
+      showToast("Bulk import completed with errors.", "error");
+    }
+  }, 1000);
+
+  const addMore = document.getElementById("add-more-input");
+  if (addMore) addMore.value = "";
+  const fileInput = document.getElementById("file-input");
+  if (fileInput) fileInput.value = "";
+}
+
+// Bulk Import Progress Modal Controls
+function openImportProgressModal(totalCount) {
+  const overlay = document.getElementById("import-progress-modal-overlay");
+  const fill = document.getElementById("bulk-import-progress-fill");
+  const statusText = document.getElementById("bulk-import-status-text");
+  const etaText = document.getElementById("bulk-import-eta");
+  const curFile = document.getElementById("bulk-import-current-file");
+  const chunkText = document.getElementById("bulk-import-chunk");
+  const successText = document.getElementById("bulk-import-success-count");
+  const failText = document.getElementById("bulk-import-fail-count");
+  const cancelBtn = document.getElementById("btn-cancel-bulk-import");
+
+  if (fill) fill.style.width = "0%";
+  if (statusText) statusText.innerText = `Importing 0 of ${totalCount} files (0%)`;
+  if (etaText) etaText.innerText = "Calculating ETA...";
+  if (curFile) curFile.innerText = "Starting batch upload...";
+  if (chunkText) chunkText.innerText = "1 / 1";
+  if (successText) successText.innerText = "0";
+  if (failText) failText.innerText = "0";
+  if (cancelBtn) {
+    cancelBtn.disabled = false;
+    cancelBtn.innerHTML = '<i class="ri-close-circle-line"></i> Cancel Import';
+  }
+
+  if (overlay) overlay.classList.remove("hidden");
+}
+
+function updateImportProgressModal(processed, total, currentFile, chunkNum, totalChunks, successCount, failCount, startTime) {
+  const fill = document.getElementById("bulk-import-progress-fill");
+  const statusText = document.getElementById("bulk-import-status-text");
+  const etaText = document.getElementById("bulk-import-eta");
+  const curFile = document.getElementById("bulk-import-current-file");
+  const chunkText = document.getElementById("bulk-import-chunk");
+  const successText = document.getElementById("bulk-import-success-count");
+  const failText = document.getElementById("bulk-import-fail-count");
+
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  if (fill) fill.style.width = `${pct}%`;
+  if (statusText) statusText.innerText = `Importing ${processed} of ${total} files (${pct}%)`;
+
+  if (startTime && processed > 0 && processed < total) {
+    const elapsedSec = (Date.now() - startTime) / 1000;
+    const secPerItem = elapsedSec / processed;
+    const remSec = Math.round(secPerItem * (total - processed));
+    if (etaText) {
+      if (remSec > 60) {
+        etaText.innerText = `~${Math.ceil(remSec / 60)} min remaining`;
+      } else {
+        etaText.innerText = `~${remSec}s remaining`;
+      }
+    }
+  } else if (processed >= total && etaText) {
+    etaText.innerText = "Complete!";
+  }
+
+  if (curFile && currentFile) curFile.innerText = currentFile;
+  if (chunkText) chunkText.innerText = `${chunkNum} / ${totalChunks}`;
+  if (successText) successText.innerText = successCount;
+  if (failText) failText.innerText = failCount;
+}
+
+function closeImportProgressModal() {
+  const overlay = document.getElementById("import-progress-modal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+}
+
+function cancelBatchImport() {
+  isImportCancelled = true;
+  const cancelBtn = document.getElementById("btn-cancel-bulk-import");
+  if (cancelBtn) {
+    cancelBtn.disabled = true;
+    cancelBtn.innerHTML = '<i class="ri-loader-4-line spin"></i> Cancelling...';
+  }
+  showToast("Cancelling import...", "info");
+}
+
+// Local Folder Import Modal Controls
+function openFolderImportModal() {
+  const overlay = document.getElementById("folder-import-modal-overlay");
+  const progressArea = document.getElementById("folder-import-progress-area");
+  const runBtn = document.getElementById("btn-run-folder-import");
+  if (progressArea) progressArea.classList.add("hidden");
+  if (runBtn) {
+    runBtn.disabled = false;
+    runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+  }
+  if (overlay) overlay.classList.remove("hidden");
+  const pathInput = document.getElementById("folder-import-path");
+  if (pathInput) pathInput.focus();
+}
+
+function closeFolderImportModal() {
+  const overlay = document.getElementById("folder-import-modal-overlay");
+  if (overlay) overlay.classList.add("hidden");
+  if (folderImportPoller) {
+    clearInterval(folderImportPoller);
+    folderImportPoller = null;
+  }
+}
+
+function handleFolderImportOverlayClick(event) {
+  if (event.target.id === "folder-import-modal-overlay") {
+    closeFolderImportModal();
+  }
+}
+
+async function startFolderImport() {
+  const pathInput = document.getElementById("folder-import-path");
+  const recursiveCb = document.getElementById("folder-import-recursive");
+  const maxInput = document.getElementById("folder-import-max");
+  const progressArea = document.getElementById("folder-import-progress-area");
+  const runBtn = document.getElementById("btn-run-folder-import");
+
+  const dirPath = pathInput ? pathInput.value.trim() : "";
+  if (!dirPath) {
+    showToast("Please enter a valid directory path.", "error");
+    if (pathInput) pathInput.focus();
+    return;
+  }
+
+  const recursive = recursiveCb ? recursiveCb.checked : true;
+  const maxFiles = maxInput ? parseInt(maxInput.value, 10) || 5000 : 5000;
+
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.innerHTML = '<i class="ri-loader-4-line spin"></i> Scanning...';
+  }
+  if (progressArea) progressArea.classList.remove("hidden");
+
+  try {
+    const resp = await fetch("/api/import/directory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        directory_path: dirPath,
+        recursive: recursive,
+        max_files: maxFiles
+      })
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      showToast(data.detail || "Folder import failed to start.", "error");
+      if (runBtn) {
+        runBtn.disabled = false;
+        runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+      }
+      return;
+    }
+
+    currentImportId = data.import_id;
+    showToast(`Scanning directory: found ${data.total_scanned_files} ebook file(s)...`, "info");
+    pollFolderImport(currentImportId);
+  } catch (err) {
+    showToast(`Failed to start folder import: ${err.message}`, "error");
+    if (runBtn) {
+      runBtn.disabled = false;
+      runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+    }
+  }
+}
+
+function pollFolderImport(importId) {
+  if (folderImportPoller) clearInterval(folderImportPoller);
+
+  const fill = document.getElementById("folder-progress-fill");
+  const progressText = document.getElementById("folder-progress-text");
+  const progressPct = document.getElementById("folder-progress-pct");
+  const progressFile = document.getElementById("folder-progress-file");
+  const runBtn = document.getElementById("btn-run-folder-import");
+
+  folderImportPoller = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/import/status/${importId}`);
+      if (!resp.ok) return;
+
+      const data = await resp.json();
+      const pct = data.progress_percent || 0;
+      if (fill) fill.style.width = `${pct}%`;
+      if (progressPct) progressPct.innerText = `${pct}%`;
+      if (progressText) {
+        progressText.innerText = `Imported ${data.processed_files} of ${data.total_scanned_files} files`;
+      }
+      if (progressFile) {
+        progressFile.innerText = data.current_file ? `Current: ${data.current_file}` : "";
+      }
+
+      if (data.status === "completed") {
+        clearInterval(folderImportPoller);
+        folderImportPoller = null;
+        showToast(`Imported ${data.processed_files} documents successfully!`, "success");
+
+        // Refresh sessions
+        const sessRes = await fetch("/api/sessions");
+        if (sessRes.ok) {
+          const sessData = await sessRes.json();
+          if (sessData && sessData.sessions) {
+            activeSessions = sessData.sessions;
+          }
+        }
+        if (data.created_session_ids && data.created_session_ids.length > 0 && !currentSession) {
+          const firstSess = await fetch(`/api/session/${data.created_session_ids[0]}`);
+          if (firstSess.ok) {
+            currentSession = await firstSess.json();
+            sessionStorage.setItem("active_session_id", currentSession.session_id);
+          }
+        }
+
+        renderDashboard();
+        renderDocumentQueue();
+
+        setTimeout(() => {
+          closeFolderImportModal();
+        }, 1200);
+      } else if (data.status === "cancelled" || data.status === "error") {
+        clearInterval(folderImportPoller);
+        folderImportPoller = null;
+        showToast(data.error_message || "Folder import stopped.", data.status === "error" ? "error" : "info");
+        if (runBtn) {
+          runBtn.disabled = false;
+          runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+        }
+      }
+    } catch (err) {
+      console.error("Error polling folder import:", err);
+    }
+  }, 600);
+}
+
+// Queue search and filter helpers
+function filterDocumentQueue(query) {
+  queueSearchQuery = (query || "").trim();
+  queueRenderLimit = 50; // Reset render window on filter change
+  const clearBtn = document.getElementById("doc-queue-filter-clear") || document.getElementById("doc-queue-clear-btn");
+  if (clearBtn) {
+    if (queueSearchQuery) clearBtn.classList.remove("hidden");
+    else clearBtn.classList.add("hidden");
+  }
+  renderDocumentQueue();
+}
+
+function clearQueueFilter() {
+  const input = document.getElementById("doc-queue-search") || document.getElementById("doc-queue-filter-input");
+  if (input) {
+    input.value = "";
+    input.focus();
+  }
+  filterDocumentQueue("");
+}
+
+
 function renderDocumentQueue() {
   const queueList = document.getElementById("doc-queue-list");
   const queueBadge = document.getElementById("doc-queue-badge");
@@ -768,16 +1200,37 @@ function renderDocumentQueue() {
   const sidebarBatchExport = document.getElementById("sidebar-batch-export");
   const bannerBatchBtn = document.getElementById("btn-export-batch-banner");
   const bannerBatchCount = document.getElementById("banner-batch-count");
+  const queueFilterWrap = document.getElementById("doc-queue-filter-wrap");
 
   if (!queueList) return;
 
   const count = activeSessions.length;
-  if (queueBadge) {
-    queueBadge.innerText = `${count} ${count === 1 ? "doc" : "docs"}`;
-    queueBadge.title = `${count} document${count === 1 ? "" : "s"} in queue`;
+  const hasMultiple = count > 1;
+
+  if (queueFilterWrap) {
+    if (count > 5) {
+      queueFilterWrap.classList.remove("hidden");
+    } else {
+      queueFilterWrap.classList.add("hidden");
+    }
   }
 
-  const hasMultiple = count > 1;
+  // Filter sessions according to search query
+  let filteredSessions = activeSessions;
+  if (queueSearchQuery) {
+    const q = queueSearchQuery.toLowerCase();
+    filteredSessions = activeSessions.filter(s => (s.filename || "").toLowerCase().includes(q));
+  }
+
+  if (queueBadge) {
+    queueBadge.title = `${count} document${count === 1 ? "" : "s"} in queue`;
+    if (queueSearchQuery) {
+      queueBadge.innerText = `${filteredSessions.length}/${count} docs`;
+    } else {
+      queueBadge.innerText = `${count} ${count === 1 ? "doc" : "docs"}`;
+    }
+  }
+
   if (hasMultiple) {
     queueList.classList.remove("hidden");
     if (batchColorizeBtn) {
@@ -798,7 +1251,11 @@ function renderDocumentQueue() {
   }
 
   queueList.innerHTML = "";
-  activeSessions.forEach((sess) => {
+
+  // Windowed rendering: render up to queueRenderLimit items to prevent DOM lag on 1000+ files
+  const itemsToRender = filteredSessions.slice(0, queueRenderLimit);
+
+  itemsToRender.forEach((sess) => {
     const item = document.createElement("div");
     const isActive = currentSession && currentSession.session_id === sess.session_id;
     const isQueueSelected = selectedQueueSessions.has(sess.session_id);
@@ -811,7 +1268,7 @@ function renderDocumentQueue() {
       iconHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
     } else if (fn.endsWith(".pdf")) {
       iconHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
-    } else if (fn.endsWith(".zip")) {
+    } else if (fn.endsWith(".zip") || fn.endsWith(".cbz")) {
       iconHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
     }
 
@@ -831,8 +1288,9 @@ function renderDocumentQueue() {
       <div class="doc-queue-icon">${iconHTML}</div>
       <div class="doc-queue-info">
         <div class="doc-queue-name" title="${sess.filename}">${sess.filename}</div>
-        <div class="doc-queue-meta">
+        <div class="doc-queue-meta" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <span>${sess.total_pages} pages</span>
+          ${sess.preset_title ? `<span class="queue-preset-pill" title="Manga Preset: ${sess.preset_title}"><i class="ri-palette-line"></i> ${sess.preset_title}</span>` : ""}
         </div>
       </div>
       <div class="doc-queue-top-actions">
@@ -844,8 +1302,23 @@ function renderDocumentQueue() {
     `;
     queueList.appendChild(item);
   });
+
+  // Append a "Show more" button if there are more items than queueRenderLimit
+  if (filteredSessions.length > queueRenderLimit) {
+    const moreBar = document.createElement("div");
+    moreBar.className = "doc-queue-more-bar";
+    moreBar.innerHTML = `<i class="ri-arrow-down-s-line"></i> Showing ${itemsToRender.length} of ${filteredSessions.length} — click to show more (+50)`;
+    moreBar.onclick = () => {
+      queueRenderLimit += 50;
+      renderDocumentQueue();
+    };
+    queueList.appendChild(moreBar);
+  }
+
   updateQueueSelectionUI();
 }
+
+
 
 function toggleQueueSelection(sessionId, isChecked) {
   if (isChecked) {
@@ -951,7 +1424,7 @@ function renderDashboard() {
     iconBox.innerHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
   } else if (fn.endsWith(".pdf")) {
     iconBox.innerHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
-  } else if (fn.endsWith(".zip")) {
+  } else if (fn.endsWith(".zip") || fn.endsWith(".cbz")) {
     iconBox.innerHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
   } else {
     iconBox.innerHTML = '<i class="ri-image-fill" style="color: #06b6d4;"></i>';
@@ -1209,7 +1682,8 @@ async function startColorization() {
     contrast: 1.1,
     line_preserve: linePreserve,
     selected_pages: pagesToColorize,
-    skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
+    skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
+    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
   };
 
   // UI state updates
@@ -1505,7 +1979,10 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     style: style,
     saturation: saturation,
     contrast: 1.1,
-    line_preserve: linePreserve
+    line_preserve: linePreserve,
+    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
+    active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null,
+    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
   };
 
   try {
@@ -1519,8 +1996,15 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
+      if (data.recognized_characters) {
+        page.recognized_characters = data.recognized_characters;
+        if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
+          renderPageCharacterChips(data.recognized_characters);
+        }
+      }
       const ts = Date.now();
       
+      // Update gallery thumbnail
       const imgElem = document.getElementById(`page-img-${pageIdx}`);
       if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
 
@@ -1533,24 +2017,14 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
       updateColorizedCount();
       updateSelectionUI();
 
-      // Update split comparator images directly
-      const origImg = document.getElementById("split-img-original");
-      const colorImg = document.getElementById("split-img-colorized");
-      const origUrl = `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
-      
-      if (origImg) origImg.src = origUrl;
-      if (colorImg) {
-        colorImg.style.opacity = "1.0";
-        colorImg.src = `${data.colorized_url}?t=${ts}`;
-      }
-
       const styleSelect = document.getElementById("style-select");
       const selectedStyleText = styleSelect.options[styleSelect.selectedIndex]?.text?.split(" ")[1] || style;
       if (titleBadge) {
         titleBadge.innerText = `${page.display_name} • ${selectedStyleText}`;
       }
 
-      // Open in Before / After Comparator and switch to split view so color is visible
+      // Open split comparator — openSplitPreview owns loading colorImg.src
+      // to ensure the onload callback fires after the container is fully set up.
       openSplitPreview(pageIdx, !showToastFeedback);
       setComparatorView("split", true);
 
@@ -1563,6 +2037,7 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     } else {
       showToast(data.detail || "Preview failed.", "error");
     }
+
   } catch (err) {
     showToast(`Preview error: ${err.message}`, "error");
   } finally {
@@ -1695,8 +2170,8 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   const wasHidden = splitCard.classList.contains("hidden");
   splitCard.classList.remove("hidden");
 
-  if (!preventScroll || wasHidden) {
-    splitCard.scrollIntoView({ behavior: 'smooth' });
+  if (!preventScroll) {
+    splitCard.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
   }
 
   // Update prev / next buttons and floating chevron indicators
@@ -1724,6 +2199,10 @@ function openSplitPreview(pageIdx, preventScroll = false) {
 
   // Reset handle with container dimensions applied
   requestAnimationFrame(() => setSplitPosition(currentSplitPct));
+
+  if (typeof updatePageCharacterChips === "function") {
+    updatePageCharacterChips(pageIdx);
+  }
 }
 
 // --- Comparator Zoom & Pan Engine ---
@@ -2314,7 +2793,8 @@ async function startBatchColorization() {
         saturation: saturation,
         contrast: 1.1,
         line_preserve: linePreserve,
-        skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false
+        skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
+        denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
       })
     });
 
@@ -2465,21 +2945,28 @@ async function exportCombined(format = "epub") {
   }
 
   const sessionIds = sessionList.map(s => s.session_id).filter(Boolean);
-  const title = document.getElementById("combined-title-input")?.value?.trim()
-    || "Colorized Manga Collection";
+  const isOriginal = Boolean(document.getElementById("combined-original-check")?.checked);
+  let title = document.getElementById("combined-title-input")?.value?.trim();
+  if (!title) {
+    title = isOriginal ? "Manga Collection" : "Colorized Manga Collection";
+  }
 
-  const chunkVal = document.getElementById("combined-chunk-select")?.value || "none";
+  const chunkVal = document.getElementById("combined-chunk-select")?.value || "size_250";
   let chunkBy = "none";
   let chunkSize = 3;
-  if (chunkVal === "volumes_3") {
+  if (chunkVal === "none") {
+    chunkBy = "none";
+    chunkSize = 0;
+  } else if (chunkVal.startsWith("volumes_")) {
     chunkBy = "volumes";
-    chunkSize = 3;
-  } else if (chunkVal === "volumes_5") {
-    chunkBy = "volumes";
-    chunkSize = 5;
-  } else if (chunkVal === "size_500") {
+    chunkSize = parseInt(chunkVal.replace("volumes_", ""), 10) || 3;
+  } else if (chunkVal === "size_custom") {
     chunkBy = "size_mb";
-    chunkSize = 500;
+    const customMb = parseInt(document.getElementById("combined-custom-size-input")?.value, 10);
+    chunkSize = (!isNaN(customMb) && customMb >= 20) ? customMb : 200;
+  } else if (chunkVal.startsWith("size_")) {
+    chunkBy = "size_mb";
+    chunkSize = parseInt(chunkVal.replace("size_", ""), 10) || 250;
   }
 
   const presetVal = document.getElementById("combined-preset-select")?.value || "colorsoft";
@@ -2489,7 +2976,7 @@ async function exportCombined(format = "epub") {
   if (presetVal === "colorsoft") {
     maxDim = 1600;
     jpegQual = 80;
-    colorsoftTune = true;
+    colorsoftTune = !isOriginal;
   } else if (presetVal === "kindle") {
     maxDim = 1600;
     jpegQual = 80;
@@ -2504,6 +2991,7 @@ async function exportCombined(format = "epub") {
   const isGrayscale = Boolean(document.getElementById("combined-grayscale-check")?.checked);
 
   const fmtLabel = format === "pdf" ? "Single PDF" : (format === "mobi" ? "Kindle MOBI" : "Single EPUB");
+  const origTag = isOriginal ? " (Original)" : "";
 
   const epubBtn = document.getElementById("btn-combined-epub");
   const mobiBtn = document.getElementById("btn-combined-mobi");
@@ -2521,7 +3009,7 @@ async function exportCombined(format = "epub") {
   const btnCancel = document.getElementById("btn-cancel-combined-export");
 
   if (progressBox) progressBox.classList.remove("hidden");
-  if (progressTitle) progressTitle.innerText = `Exporting ${fmtLabel}...`;
+  if (progressTitle) progressTitle.innerText = `Exporting ${fmtLabel}${origTag}...`;
   if (progressPct) progressPct.innerText = "0%";
   if (progressBarFill) progressBarFill.style.width = "0%";
   if (progressSubtext) progressSubtext.innerText = "Starting packager...";
@@ -2540,12 +3028,12 @@ async function exportCombined(format = "epub") {
     progCard.classList.remove("hidden");
     progCard.dataset.combinedExport = "true";
   }
-  if (progStatus) progStatus.innerText = `Assembling ${fmtLabel}...`;
+  if (progStatus) progStatus.innerText = `Assembling ${fmtLabel}${origTag}...`;
   if (progSub) progSub.innerText = `Preparing ${sessionIds.length || 'all'} volumes: "${title}"`;
   if (progCounter) progCounter.innerText = "0%";
   if (progFill) progFill.style.width = "0%";
 
-  showToast(`Preparing ${fmtLabel} (${sessionIds.length || 'all'} volumes)...`, "info");
+  showToast(`Preparing ${fmtLabel}${origTag} (${sessionIds.length || 'all'} volumes)...`, "info");
 
   try {
     const resp = await fetch("/api/export/combined", {
@@ -2560,7 +3048,8 @@ async function exportCombined(format = "epub") {
         max_dimension: maxDim,
         jpeg_quality: jpegQual,
         grayscale: isGrayscale,
-        colorsoft_tune: colorsoftTune
+        colorsoft_tune: colorsoftTune,
+        export_original: isOriginal
       })
     });
 
@@ -3192,18 +3681,29 @@ async function bulkDeleteHistory() {
   await executeBulkDeletion(sessionIdsToDelete);
 }
 
+function changeHistoryPage(delta) {
+  currentHistoryPage += delta;
+  renderHistoryList();
+}
+
 function renderHistoryList() {
   const container = document.getElementById("history-list-container");
   const summaryEl = document.getElementById("history-footer-summary");
+  const paginationWrap = document.getElementById("history-pagination-wrap");
+  const pageIndicator = document.getElementById("history-page-indicator");
+  const prevBtn = document.getElementById("btn-hist-prev");
+  const nextBtn = document.getElementById("btn-hist-next");
+
   if (!container) return;
 
   const filtered = getFilteredHistoryItems();
 
-  if (summaryEl) {
-    summaryEl.innerText = `Showing ${filtered.length} of ${historyData.length} documents`;
-  }
-
   if (filtered.length === 0) {
+    if (paginationWrap) paginationWrap.classList.add("hidden");
+    if (summaryEl) {
+      summaryEl.innerText = `Showing 0 of ${historyData.length} documents`;
+    }
+
     let emptyMsg = "No documents uploaded or processed yet.";
     let emptyDesc = "Drag & drop manga files onto the upload area to start colorizing!";
     if (currentHistorySearch || currentHistoryFilter !== "all") {
@@ -3227,9 +3727,32 @@ function renderHistoryList() {
     return;
   }
 
+  // Calculate pagination
+  const totalPages = Math.ceil(filtered.length / historyPageSize) || 1;
+  if (currentHistoryPage > totalPages) currentHistoryPage = totalPages;
+  if (currentHistoryPage < 1) currentHistoryPage = 1;
+
+  if (paginationWrap) {
+    if (filtered.length > historyPageSize) {
+      paginationWrap.classList.remove("hidden");
+      if (pageIndicator) pageIndicator.innerText = `Page ${currentHistoryPage} of ${totalPages}`;
+      if (prevBtn) prevBtn.disabled = currentHistoryPage <= 1;
+      if (nextBtn) nextBtn.disabled = currentHistoryPage >= totalPages;
+    } else {
+      paginationWrap.classList.add("hidden");
+    }
+  }
+
+  const startIdx = (currentHistoryPage - 1) * historyPageSize;
+  const pageItems = filtered.slice(startIdx, startIdx + historyPageSize);
+
+  if (summaryEl) {
+    summaryEl.innerText = `Showing ${pageItems.length} of ${filtered.length} documents${filtered.length !== historyData.length ? ` (filtered from ${historyData.length})` : ""}`;
+  }
+
   container.innerHTML = "";
 
-  filtered.forEach(item => {
+  pageItems.forEach(item => {
     const isCurrent = currentSession && currentSession.session_id === item.session_id;
     const isSelected = selectedHistorySessions.has(item.session_id);
     const totalPages = item.total_pages || 0;
@@ -3242,7 +3765,7 @@ function renderHistoryList() {
       iconHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
     } else if (fn.endsWith(".pdf")) {
       iconHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
-    } else if (fn.endsWith(".zip")) {
+    } else if (fn.endsWith(".zip") || fn.endsWith(".cbz")) {
       iconHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
     }
 
@@ -3367,15 +3890,71 @@ window.bulkDeleteHistory = bulkDeleteHistory;
 window.toggleQueueSelection = toggleQueueSelection;
 window.deleteSelectedQueueDocuments = deleteSelectedQueueDocuments;
 window.executeBulkDeletion = executeBulkDeletion;
+window.changeHistoryPage = changeHistoryPage;
+window.handleBulkChunkedUpload = handleBulkChunkedUpload;
+window.openImportProgressModal = openImportProgressModal;
+window.closeImportProgressModal = closeImportProgressModal;
+window.cancelBatchImport = cancelBatchImport;
+window.openFolderImportModal = openFolderImportModal;
+window.closeFolderImportModal = closeFolderImportModal;
+window.handleFolderImportOverlayClick = handleFolderImportOverlayClick;
+window.startFolderImport = startFolderImport;
+window.filterDocumentQueue = filterDocumentQueue;
+window.clearQueueFilter = clearQueueFilter;
+
 
 
 
 // ─────────────────────────────────────────────────────────────────────
-//  Character Palette Manager
+//  Character Palette & Manga Presets Manager
 // ─────────────────────────────────────────────────────────────────────
 
 /** In-memory palette state for the active session. */
 let paletteCharacters = [];
+let allMangaPresets = [];
+let currentPresetId = "";
+
+/**
+ * Loads registered manga presets from the backend to populate the dropdown.
+ */
+async function loadMangaPresets() {
+  try {
+    const resp = await fetch("/api/palette/presets");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    allMangaPresets = data.presets || [];
+    populatePresetDropdown();
+  } catch (err) {
+    console.warn("Could not load manga presets:", err);
+  }
+}
+
+/**
+ * Populates the #palette-preset-select dropdown with all available presets.
+ */
+function populatePresetDropdown() {
+  const select = document.getElementById("palette-preset-select");
+  if (!select) return;
+
+  const currentVal = select.value;
+  select.innerHTML = '<option value="">Custom / None</option>';
+
+  const group = document.createElement("optgroup");
+  group.label = "Popular Manga Presets";
+
+  allMangaPresets.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = `${p.title} (${p.characters.length} characters)`;
+    group.appendChild(opt);
+  });
+
+  select.appendChild(group);
+  if (currentVal) select.value = currentVal;
+  if (select.refreshCustomSelect) {
+    select.refreshCustomSelect();
+  }
+}
 
 /**
  * Fetches the current session's palette from the server and re-renders the list.
@@ -3387,10 +3966,240 @@ async function paletteLoadFromServer() {
     if (!resp.ok) return;
     const data = await resp.json();
     paletteCharacters = data.palette?.characters || [];
+    currentPresetId = data.preset_id || data.palette?.preset_id || currentSession.detected_preset || "";
+    const presetTitle = data.preset_title || data.palette?.preset_title || currentSession.preset_title || "";
+
+    // Sync dropdown
+    const select = document.getElementById("palette-preset-select");
+    if (select) {
+      if (currentPresetId && !Array.from(select.options).some(o => o.value === currentPresetId)) {
+        // Preset might be custom or online-fetched, append if not present
+        const opt = document.createElement("option");
+        opt.value = currentPresetId;
+        opt.textContent = presetTitle || currentPresetId;
+        select.appendChild(opt);
+      }
+      select.value = currentPresetId || "";
+      if (select.refreshCustomSelect) {
+        select.refreshCustomSelect();
+      }
+    }
+
+    // Auto-detected badge
+    const badge = document.getElementById("palette-detected-badge");
+    const desc = document.getElementById("palette-preset-desc");
+    if (badge) {
+      if (currentPresetId && presetTitle) {
+        badge.style.display = "inline-flex";
+        badge.title = `Preset: ${presetTitle}`;
+        badge.innerHTML = `<i class="ri-sparkling-fill" style="margin-right:2px;"></i> ${presetTitle}`;
+      } else {
+        badge.style.display = "none";
+      }
+    }
+
+    // Preset description
+    if (desc) {
+      const presetObj = allMangaPresets.find(p => p.id === currentPresetId);
+      if (presetObj && presetObj.description) {
+        desc.style.display = "block";
+        desc.textContent = presetObj.description;
+      } else {
+        desc.style.display = "none";
+      }
+    }
+
     paletteRender();
   } catch (_) {
     // Silent — palette is optional
   }
+}
+
+/**
+ * Handles user selecting a manga preset from the dropdown.
+ */
+async function onMangaPresetSelected(presetId) {
+  if (!currentSession) {
+    showToast("No active session selected.", "warning");
+    return;
+  }
+
+  const select = document.getElementById("palette-preset-select");
+  if (select && select.refreshCustomSelect) {
+    select.refreshCustomSelect();
+  }
+
+  if (!presetId) {
+    // User picked "Custom / None"
+    currentPresetId = "";
+    const badge = document.getElementById("palette-detected-badge");
+    if (badge) badge.style.display = "none";
+    const desc = document.getElementById("palette-preset-desc");
+    if (desc) desc.style.display = "none";
+    return;
+  }
+
+  try {
+    const resp = await fetch("/api/palette/apply-preset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: currentSession.session_id,
+        preset_id: presetId
+      })
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail || "Failed to apply preset");
+    const data = await resp.json();
+    paletteCharacters = data.palette?.characters || [];
+    currentPresetId = presetId;
+    currentSession.detected_preset = presetId;
+    currentSession.preset_title = data.preset_title;
+
+    // Update active style recommendation if applicable
+    const presetObj = allMangaPresets.find(p => p.id === presetId);
+    if (presetObj && presetObj.recommended_style) {
+      const styleSelect = document.getElementById("style-select");
+      if (styleSelect) styleSelect.value = presetObj.recommended_style;
+    }
+
+    // Refresh preset info & palette list
+    paletteLoadFromServer();
+    renderDocumentQueue();
+    showToast(`✨ Applied "${data.preset_title}" preset (${paletteCharacters.length} characters loaded).`, "success");
+  } catch (err) {
+    showToast(`Error applying preset: ${err.message}`, "error");
+  }
+}
+
+/**
+ * Opens the online preset search modal. Pre-fills input with clean series title.
+ */
+function openSearchPresetModal() {
+  const modal = document.getElementById("preset-search-modal");
+  const input = document.getElementById("preset-search-input");
+  const results = document.getElementById("preset-search-results");
+  const loading = document.getElementById("preset-search-loading");
+
+  if (results) { results.style.display = "none"; results.innerHTML = ""; }
+  if (loading) loading.style.display = "none";
+
+  if (input && currentSession && currentSession.filename) {
+    // Derive a clean series name suggestion from filename
+    let clean = currentSession.filename
+      .replace(/\.(pdf|epub|cbz|cbr|zip|tar|gz|png|jpg|jpeg|webp)$/i, "")
+      .replace(/[\-_]+/g, " ")
+      .replace(/vol(ume)?\.?\s*\d+/i, "")
+      .replace(/ch(apter)?\.?\s*\d+/i, "")
+      .replace(/\b(part|omnibus|colored|colorized|c2c)\b/gi, "")
+      .trim();
+    input.value = clean || currentSession.filename;
+  }
+
+  if (modal) modal.classList.remove("hidden");
+  if (input) input.focus();
+}
+
+/**
+ * Closes the online preset search modal.
+ */
+function closeSearchPresetModal() {
+  const modal = document.getElementById("preset-search-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function handlePresetSearchOverlayClick(event) {
+  if (event.target && event.target.id === "preset-search-modal") {
+    closeSearchPresetModal();
+  }
+}
+
+/**
+ * Executes online lookup for manga color palette via backend /api/palette/search-online.
+ */
+async function executePresetOnlineSearch() {
+  const input = document.getElementById("preset-search-input");
+  const query = (input?.value || "").trim();
+  if (!query) {
+    showToast("Please enter a manga title to search.", "warning");
+    return;
+  }
+
+  const loading = document.getElementById("preset-search-loading");
+  const results = document.getElementById("preset-search-results");
+  const btn = document.getElementById("btn-run-preset-search");
+
+  if (loading) loading.style.display = "block";
+  if (results) { results.style.display = "none"; results.innerHTML = ""; }
+  if (btn) btn.disabled = true;
+
+  try {
+    const resp = await fetch("/api/palette/search-online", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: query,
+        session_id: currentSession ? currentSession.session_id : null
+      })
+    });
+
+    if (!resp.ok) {
+      const errData = await resp.json();
+      throw new Error(errData.detail || "No character color palette found online.");
+    }
+
+    const data = await resp.json();
+    const preset = data.preset;
+
+    // Refresh preset list in memory
+    await loadMangaPresets();
+
+    if (results) {
+      results.style.display = "block";
+      const charChips = (preset.characters || []).map(c => `
+        <div class="preset-swatch-chip" title="${c.name}: hair ${c.hair_hex}, costume ${c.costume_hex}">
+          <span class="preset-swatch-dot" style="background:${c.costume_hex || c.hair_hex || '#1565c0'};"></span>
+          <span>${c.name}</span>
+        </div>
+      `).join("");
+
+      results.innerHTML = `
+        <div class="preset-search-result-card">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div style="font-weight:600; font-size:0.9rem; color:#fff;">
+              <i class="ri-check-line" style="color:var(--accent-green);"></i> ${preset.title}
+            </div>
+            <span class="badge badge-accent" style="font-size:0.7rem;">${(preset.characters || []).length} characters</span>
+          </div>
+          <p style="font-size:0.78rem; color:var(--text-secondary); margin:4px 0 8px;">
+            ${preset.description || "Extracted from online sources"}
+          </p>
+          <div class="preset-swatch-list" style="margin-bottom:10px;">
+            ${charChips}
+          </div>
+          <button class="btn btn-primary btn-sm btn-block" onclick="applyOnlineSearchResult('${preset.id}')">
+            <i class="ri-sparkling-line"></i> Apply to Current Document
+          </button>
+        </div>
+      `;
+    }
+  } catch (err) {
+    if (results) {
+      results.style.display = "block";
+      results.innerHTML = `
+        <div style="padding:10px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.25); border-radius:6px; font-size:0.8rem; color:#ef4444;">
+          <i class="ri-error-warning-line"></i> ${err.message}
+        </div>
+      `;
+    }
+  } finally {
+    if (loading) loading.style.display = "none";
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function applyOnlineSearchResult(presetId) {
+  closeSearchPresetModal();
+  await onMangaPresetSelected(presetId);
 }
 
 /**
@@ -3406,7 +4215,7 @@ function paletteRender() {
 
   if (paletteCharacters.length === 0) {
     list.innerHTML = `<p style="font-size:0.78rem;color:var(--text-secondary);text-align:center;padding:0.5rem 0;">
-      No characters yet. Add one below.
+      No characters yet. Pick a preset above or add one below.
     </p>`;
     return;
   }
@@ -3434,7 +4243,47 @@ function paletteRender() {
         </button>
       </div>`;
   }).join("");
+
+  if (typeof updatePageCharacterChips === "function") {
+    updatePageCharacterChips(currentPreviewPageIndex);
+  }
 }
+
+/**
+ * Updates ONLY the palette character list UI (badge + rows) without touching the chips section.
+ * Use this when you need to sync paletteCharacters without triggering updatePageCharacterChips.
+ */
+function paletteRenderListOnly() {
+  const list = document.getElementById("palette-character-list");
+  const badge = document.getElementById("palette-badge-count");
+  if (!list) return;
+
+  if (badge) badge.innerText = `${paletteCharacters.length} Character${paletteCharacters.length !== 1 ? "s" : ""}`;
+
+  if (paletteCharacters.length === 0) {
+    list.innerHTML = `<p style="font-size:0.78rem;color:var(--text-secondary);text-align:center;padding:0.5rem 0;">
+      No characters yet. Pick a preset above or add one below.
+    </p>`;
+    return;
+  }
+
+  list.innerHTML = paletteCharacters.map((ch, i) => {
+    const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+      .filter(Boolean)
+      .map(hx => `<span title="${hx}" style="display:inline-block;width:14px;height:14px;border-radius:3px;background:${hx};border:1px solid rgba(255,255,255,0.2);vertical-align:middle;"></span>`)
+      .join(" ");
+
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;background:var(--card-bg,#1e1e2e);border:1px solid var(--border-color);border-radius:6px;padding:6px 10px;gap:6px;">
+        <span style="font-size:0.82rem;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${ch.name}">${ch.name}</span>
+        <span style="display:flex;gap:3px;align-items:center;">${swatches}</span>
+        <button class="btn-icon" title="Remove ${ch.name}" onclick="paletteDeleteCharacter(${i})" style="padding:2px 5px;opacity:0.6;flex-shrink:0;">
+          <i class="ri-delete-bin-line" style="font-size:0.85rem;"></i>
+        </button>
+      </div>`;
+  }).join("");
+}
+
 
 /**
  * Reads the add-character form, calls POST /api/palette/upsert, and refreshes.
@@ -3494,14 +4343,502 @@ async function paletteDeleteCharacter(index) {
   }
 }
 
-window.paletteAddCharacter    = paletteAddCharacter;
-window.paletteDeleteCharacter = paletteDeleteCharacter;
-window.paletteLoadFromServer  = paletteLoadFromServer;
+window.loadMangaPresets              = loadMangaPresets;
+window.onMangaPresetSelected         = onMangaPresetSelected;
+window.openSearchPresetModal         = openSearchPresetModal;
+window.closeSearchPresetModal        = closeSearchPresetModal;
+window.handlePresetSearchOverlayClick = handlePresetSearchOverlayClick;
+window.executePresetOnlineSearch     = executePresetOnlineSearch;
+window.applyOnlineSearchResult       = applyOnlineSearchResult;
+window.paletteAddCharacter           = paletteAddCharacter;
+window.paletteDeleteCharacter        = paletteDeleteCharacter;
+window.paletteLoadFromServer         = paletteLoadFromServer;
 
 
 // ─────────────────────────────────────────────────────────────────────
-//  Recolorize — force re-run colorization on already-done pages
+//  Page Character Recognition & Optimization UI
 // ─────────────────────────────────────────────────────────────────────
+
+let activePageCharacterNames = new Set();
+
+/**
+ * Finds the canonical character from the palette using exact, substring, or keyword matching.
+ */
+function findCanonicalPaletteCharacter(name) {
+  if (!name || !paletteCharacters || !paletteCharacters.length) return null;
+  const nLow = name.trim().toLowerCase();
+  // 1. Exact match
+  let found = paletteCharacters.find(c => c.name.trim().toLowerCase() === nLow);
+  if (found) return found;
+  // 2. Substring match
+  found = paletteCharacters.find(c => {
+    const cLow = c.name.trim().toLowerCase();
+    return cLow.includes(nLow) || nLow.includes(cLow);
+  });
+  if (found) return found;
+  // 3. Keyword / alias match
+  found = paletteCharacters.find(c => {
+    if (!c.keywords) return false;
+    return c.keywords.some(kw => nLow.includes(kw.toLowerCase()) || kw.toLowerCase().includes(nLow));
+  });
+  return found || null;
+}
+
+/**
+ * Finds if a character was matched in the recognized list.
+ */
+function findMatchingRecognized(ch, recognizedList) {
+  if (!recognizedList || !recognizedList.length) return null;
+  const chLow = ch.name.trim().toLowerCase();
+  for (const r of recognizedList) {
+    const rLow = (r.name || "").trim().toLowerCase();
+    if (rLow === chLow || chLow.includes(rLow) || rLow.includes(chLow)) return r;
+    if (ch.keywords && ch.keywords.some(kw => rLow.includes(kw.toLowerCase()))) return r;
+  }
+  return null;
+}
+
+/**
+ * Scans the current page with character recognition and renders active chips.
+ */
+async function recognizeCurrentPageCharacters() {
+  if (!currentSession || !currentSession.pages || currentPreviewPageIndex < 0) {
+    showToast("No active page selected to scan.", "warning");
+    return;
+  }
+
+  const page = currentSession.pages[currentPreviewPageIndex];
+  const btn = document.getElementById("btn-recognize-page");
+  const origBtnHtml = btn ? btn.innerHTML : "";
+  const pageNum = currentPreviewPageIndex + 1;
+  if (btn) {
+    btn.disabled = true;
+    btn.title = `Scanning page ${pageNum}…`;
+    btn.innerHTML = `<i class="ri-loader-4-line spinner"></i><span class="btn-label-scan">Scanning…</span>`;
+  }
+
+  try {
+    const apiKey = typeof getActiveApiKey === "function" ? getActiveApiKey() : (document.getElementById("api-key-input")?.value || "");
+    const modeSelect = document.getElementById("recognition-mode-select");
+    const recognitionMode = modeSelect ? modeSelect.value : "auto";
+    const resp = await fetch(`/api/session/${currentSession.session_id}/page/${currentPreviewPageIndex}/recognize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey || "",
+        model_name: "gemini-2.5-flash",
+        recognition_mode: recognitionMode
+      })
+    });
+
+    if (!resp.ok) {
+      throw new Error((await resp.json()).detail || "Recognition request failed");
+    }
+
+    const data = await resp.json();
+    const recognized = data.recognized || [];
+
+    console.log("[MangaColorizer] Recognition response:", {
+      recognized,
+      paletteFromServer: data.palette?.characters?.map(c => c.name),
+      currentPaletteChars: paletteCharacters.map(c => c.name)
+    });
+
+    // Store recognized characters on the page object
+    page.recognized_characters = recognized;
+
+    // Synchronize paletteCharacters FIRST if returned by server — update in-memory state only.
+    // Do NOT call paletteRender() here to avoid a double-render race condition where
+    // updatePageCharacterChips() inside paletteRender() fires before we set activePageCharacterNames.
+    if (data.palette && data.palette.characters && data.palette.characters.length > 0) {
+      paletteCharacters = data.palette.characters;
+      // Refresh just the character list UI without touching the chips section
+      if (typeof paletteRenderListOnly === "function") {
+        paletteRenderListOnly();
+      } else if (typeof paletteRender === "function") {
+        // Safe fallback: paletteRender calls updatePageCharacterChips which uses page.recognized_characters
+        paletteRender();
+      }
+    }
+
+    console.log("[MangaColorizer] About to renderPageCharacterChips with:", {
+      recognizedNames: recognized.map(r => r.name),
+      paletteNames: paletteCharacters.map(c => c.name)
+    });
+
+    // Render chips — single authoritative call after palette is synced
+    renderPageCharacterChips(recognized);
+
+    console.log("[MangaColorizer] After renderPageCharacterChips, activePageCharacterNames:", Array.from(activePageCharacterNames));
+
+    if (recognized.length > 0) {
+      const names = recognized.map(r => r.name).join(", ");
+      showToast(`🎯 Page ${pageNum}: Detected ${names}`, "success");
+    } else {
+      showToast(`Page ${pageNum}: No specific character detected (all palette colors active).`, "info");
+    }
+  } catch (err) {
+    console.warn("[MangaColorizer] Character scan error:", err);
+    showToast(`Scan error: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.title = `Auto-scan page ${pageNum} to detect characters`;
+      btn.innerHTML = `<i class="ri-scan-line"></i><span class="btn-label-scan">Scan</span>`;
+    }
+  }
+}
+
+/**
+ * Updates chips display when switching pages in preview.
+ */
+function updatePageCharacterChips(pageIdx) {
+  if (!currentSession || !currentSession.pages) return;
+  const page = currentSession.pages[pageIdx];
+  const pageNum = pageIdx + 1;
+
+  // Update header title and button tooltips with current page number
+  const titleText = document.getElementById("palette-page-title-text");
+  if (titleText) titleText.textContent = `Page ${pageNum} Characters`;
+  const btn = document.getElementById("btn-recognize-page");
+  if (btn && !btn.disabled) {
+    btn.title = `Auto-scan page ${pageNum} to detect characters`;
+    // Keep button label compact — just icon + "Scan"
+    btn.innerHTML = `<i class="ri-scan-line"></i><span class="btn-label-scan">Scan</span>`;
+  }
+  const specBtn = document.getElementById("btn-specify-page-chars");
+  if (specBtn) specBtn.title = `Manually pick characters for page ${pageNum}`;
+
+
+  if (page && page.recognized_characters && page.recognized_characters.length > 0) {
+    renderPageCharacterChips(page.recognized_characters);
+  } else if (paletteCharacters && paletteCharacters.length > 0) {
+    renderPageCharacterChips(null);
+  } else {
+    renderPageCharacterChips([]);
+  }
+}
+
+/**
+ * Renders interactive character chips for current page.
+ */
+function renderPageCharacterChips(recognizedList) {
+  const container = document.getElementById("palette-page-characters-chips");
+  if (!container) return;
+
+  if ((!paletteCharacters || paletteCharacters.length === 0) && currentSession?.preset_characters) {
+    paletteCharacters = currentSession.preset_characters;
+  }
+
+  if (!paletteCharacters || paletteCharacters.length === 0) {
+    container.innerHTML = '<span style="font-size:0.72rem;color:var(--text-secondary);font-style:italic;">No characters in palette yet</span>';
+    activePageCharacterNames.clear();
+    return;
+  }
+
+  // Update activePageCharacterNames with canonical names if recognizedList is provided
+  if (recognizedList !== undefined && recognizedList !== null) {
+    activePageCharacterNames.clear();
+    if (recognizedList.length > 0) {
+      recognizedList.forEach(r => {
+        const canonical = findCanonicalPaletteCharacter(r.name);
+        if (canonical) {
+          activePageCharacterNames.add(canonical.name);
+        } else if (r.name) {
+          activePageCharacterNames.add(r.name);
+        }
+      });
+    } else {
+      // Empty recognizedList means scanned with no specific characters found
+      activePageCharacterNames = new Set(paletteCharacters.map(c => c.name));
+    }
+  } else if (recognizedList === null && activePageCharacterNames.size === 0) {
+    activePageCharacterNames = new Set(paletteCharacters.map(c => c.name));
+  }
+
+  // Build lookup map for confidence badges
+  const recMap = {};
+  if (recognizedList && recognizedList.length > 0) {
+    recognizedList.forEach(r => {
+      const canonical = findCanonicalPaletteCharacter(r.name);
+      const key = (canonical ? canonical.name : r.name).trim().toLowerCase();
+      recMap[key] = r;
+    });
+  }
+
+  const chipsHtml = paletteCharacters.map(ch => {
+    const isSelected = activePageCharacterNames.has(ch.name);
+    const rec = recMap[ch.name.trim().toLowerCase()] || findMatchingRecognized(ch, recognizedList);
+    const dotColor = ch.costume_hex || ch.hair_hex || "#a855f7";
+    const confBadge = rec && rec.confidence ? `<span class="chip-conf">${Math.round(rec.confidence * 100)}%</span>` : "";
+
+    return `
+      <div class="page-char-chip ${isSelected ? 'active' : ''}" 
+           title="${isSelected ? 'Active on this page (click to exclude)' : 'Excluded from this page (click to include)'}"
+           onclick="togglePageCharacterChip('${encodeURIComponent(ch.name)}')">
+        <span class="chip-dot" style="background:${dotColor};"></span>
+        <span>${escapeHtml(ch.name)}</span>
+        ${confBadge}
+      </div>
+    `;
+  }).join("");
+
+  const pageNum = (currentPreviewPageIndex >= 0 ? currentPreviewPageIndex + 1 : 1);
+  const statusNote = (recognizedList && recognizedList.length > 0)
+    ? `<span style="font-size:0.68rem;color:#22c55e;width:100%;margin-top:2px;display:flex;align-items:center;gap:3px;"><i class="ri-check-line"></i> ${recognizedList.length} character${recognizedList.length > 1 ? 's' : ''} detected on page ${pageNum}. Click to toggle.</span>`
+    : `<span style="font-size:0.68rem;color:var(--text-secondary);width:100%;margin-top:2px;display:block;">All palette characters active on page ${pageNum}. Click any to exclude.</span>`;
+
+  container.innerHTML = chipsHtml + statusNote;
+}
+
+/**
+ * Toggles a character on or off for the active page.
+ */
+function togglePageCharacterChip(encodedName) {
+  const name = decodeURIComponent(encodedName);
+  const canonical = findCanonicalPaletteCharacter(name);
+  const targetName = canonical ? canonical.name : name;
+
+  if (activePageCharacterNames.has(targetName)) {
+    activePageCharacterNames.delete(targetName);
+  } else {
+    activePageCharacterNames.add(targetName);
+  }
+  const page = currentSession?.pages?.[currentPreviewPageIndex];
+  if (page) {
+    page.recognized_characters = Array.from(activePageCharacterNames).map(n => {
+      const existing = (page.recognized_characters || []).find(r => r.name === n);
+      return existing || { name: n, confidence: 1.0, detection_method: "manual" };
+    });
+  }
+  // Re-render chips preserving current manual selection (passing undefined)
+  renderPageCharacterChips(undefined);
+}
+
+window.recognizeCurrentPageCharacters = recognizeCurrentPageCharacters;
+window.togglePageCharacterChip        = togglePageCharacterChip;
+window.updatePageCharacterChips       = updatePageCharacterChips;
+window.renderPageCharacterChips       = renderPageCharacterChips;
+
+
+// ─────────────────────────────────────────────────────────────────────
+//  Character Picker Modal — manually specify page characters
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Escapes a string for safe insertion into HTML content / attributes.
+ */
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/**
+ * Opens the character picker modal pre-populated with all palette characters.
+ * Currently active characters are pre-checked.
+ */
+function openCharacterPickerModal() {
+  if (!currentSession) {
+    showToast("No active session. Load a document first.", "warning");
+    return;
+  }
+
+  // Fallback 1: pull from session.preset_characters if paletteCharacters is empty
+  if ((!paletteCharacters || paletteCharacters.length === 0) && currentSession.preset_characters) {
+    paletteCharacters = currentSession.preset_characters;
+  }
+
+  // Fallback 2: if still empty, fetch palette from server then re-open
+  if (!paletteCharacters || paletteCharacters.length === 0) {
+    fetch(`/api/palette/${currentSession.session_id}`)
+      .then(r => r.json())
+      .then(data => {
+        paletteCharacters = data.palette?.characters || [];
+        if (paletteCharacters.length > 0) {
+          openCharacterPickerModal(); // retry after palette is loaded
+        } else {
+          showToast("No characters in palette yet. Add characters or load a preset first.", "warning");
+        }
+      })
+      .catch(() => showToast("Could not load palette. Try again.", "error"));
+    return;
+  }
+
+  const modal = document.getElementById("char-picker-modal");
+  const subtitle = document.getElementById("char-picker-subtitle");
+  const list = document.getElementById("char-picker-list");
+  const empty = document.getElementById("char-picker-empty");
+  if (!modal || !list) {
+    console.error("[MangaColorizer] char-picker-modal or char-picker-list element not found in DOM");
+    showToast("UI error: character picker not found. Try refreshing the page.", "error");
+    return;
+  }
+
+  // Update subtitle with current page number
+  const pageNum = currentPreviewPageIndex >= 0 ? currentPreviewPageIndex + 1 : 1;
+  if (subtitle) subtitle.textContent = `Choose which characters appear on page ${pageNum}`;
+
+  list.innerHTML = "";
+  empty.style.display = "none";
+
+  if (paletteCharacters.length === 0) {
+    empty.style.display = "block";
+  } else {
+    paletteCharacters.forEach(ch => {
+      const isChecked = activePageCharacterNames.has(ch.name);
+      const dotColor = ch.costume_hex || ch.hair_hex || "#a855f7";
+      const swatches = [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]
+        .filter(Boolean)
+        .map(hx => `<span title="${hx}" style="display:inline-block;width:12px;height:12px;border-radius:2px;background:${hx};border:1px solid rgba(255,255,255,0.2);flex-shrink:0;"></span>`)
+        .join("");
+
+      const row = document.createElement("label");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:7px;cursor:pointer;border:1px solid transparent;transition:background 0.15s,border-color 0.15s;user-select:none;";
+      row.dataset.charName = ch.name;
+      row.innerHTML = `
+        <input type="checkbox" class="char-picker-cb" data-name="${escapeHtml(ch.name)}"
+               style="width:15px;height:15px;accent-color:var(--accent-purple,#a855f7);cursor:pointer;flex-shrink:0;"
+               ${isChecked ? "checked" : ""}>
+        <span class="chip-dot" style="background:${dotColor};width:10px;height:10px;border-radius:50%;flex-shrink:0;"></span>
+        <span style="font-size:0.82rem;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ch.name)}</span>
+        <span style="display:flex;gap:3px;align-items:center;flex-shrink:0;">${swatches}</span>
+      `;
+
+      // Highlight row on check change
+      const updateRowStyle = (checked) => {
+        row.style.background = checked ? "rgba(168,85,247,0.1)" : "";
+        row.style.borderColor = checked ? "rgba(168,85,247,0.3)" : "transparent";
+      };
+      updateRowStyle(isChecked);
+
+      row.querySelector(".char-picker-cb").addEventListener("change", (e) => {
+        updateRowStyle(e.target.checked);
+        _charPickerUpdateCount();
+      });
+
+      list.appendChild(row);
+    });
+  }
+
+  _charPickerUpdateCount();
+  modal.classList.remove("hidden");
+
+  // Escape key to close
+  document._charPickerEscHandler = (e) => { if (e.key === "Escape") closeCharacterPickerModal(); };
+  document.addEventListener("keydown", document._charPickerEscHandler);
+}
+
+/**
+ * Closes the character picker modal without applying.
+ */
+function closeCharacterPickerModal() {
+  const modal = document.getElementById("char-picker-modal");
+  if (modal) modal.classList.add("hidden");
+  if (document._charPickerEscHandler) {
+    document.removeEventListener("keydown", document._charPickerEscHandler);
+    delete document._charPickerEscHandler;
+  }
+}
+
+/**
+ * Closes modal when clicking the dark overlay behind the dialog.
+ */
+function handleCharPickerOverlayClick(e) {
+  const dialog = e.currentTarget.querySelector(".folder-import-dialog");
+  if (dialog && !dialog.contains(e.target)) closeCharacterPickerModal();
+}
+
+/**
+ * Checks all character checkboxes in the picker.
+ */
+function charPickerSelectAll() {
+  document.querySelectorAll(".char-picker-cb").forEach(cb => {
+    cb.checked = true;
+    const row = cb.closest("label");
+    if (row) {
+      row.style.background = "rgba(168,85,247,0.1)";
+      row.style.borderColor = "rgba(168,85,247,0.3)";
+    }
+  });
+  _charPickerUpdateCount();
+}
+
+/**
+ * Unchecks all character checkboxes in the picker.
+ */
+function charPickerSelectNone() {
+  document.querySelectorAll(".char-picker-cb").forEach(cb => {
+    cb.checked = false;
+    const row = cb.closest("label");
+    if (row) { row.style.background = ""; row.style.borderColor = "transparent"; }
+  });
+  _charPickerUpdateCount();
+}
+
+/**
+ * Updates the "X of N selected" counter in the picker header.
+ */
+function _charPickerUpdateCount() {
+  const total = document.querySelectorAll(".char-picker-cb").length;
+  const checked = document.querySelectorAll(".char-picker-cb:checked").length;
+  const label = document.getElementById("char-picker-count-label");
+  if (label) label.textContent = `${checked} of ${total} selected`;
+}
+
+/**
+ * Applies the checkbox selection to activePageCharacterNames and the current page's
+ * recognized_characters list (with detection_method = "manual"), then refreshes chips.
+ */
+function applyCharacterPickerSelection() {
+  const checkboxes = document.querySelectorAll(".char-picker-cb");
+  if (!checkboxes.length) { closeCharacterPickerModal(); return; }
+
+  // Build the new active set from checked boxes
+  const selectedNames = new Set();
+  checkboxes.forEach(cb => { if (cb.checked) selectedNames.add(cb.dataset.name); });
+
+  // Commit to global state
+  activePageCharacterNames = selectedNames;
+
+  // Update page object so it persists when switching pages
+  const page = currentSession?.pages?.[currentPreviewPageIndex];
+  if (page) {
+    page.recognized_characters = paletteCharacters
+      .filter(ch => selectedNames.has(ch.name))
+      .map(ch => {
+        const existing = (page.recognized_characters || []).find(r => r.name === ch.name);
+        return existing || { name: ch.name, confidence: 1.0, detection_method: "manual" };
+      });
+  }
+
+  // Refresh chips without resetting the selection (pass undefined = preserve activePageCharacterNames)
+  renderPageCharacterChips(undefined);
+
+  closeCharacterPickerModal();
+
+  const pageNum = currentPreviewPageIndex >= 0 ? currentPreviewPageIndex + 1 : 1;
+  const count = selectedNames.size;
+  if (count === 0) {
+    showToast(`Page ${pageNum}: No characters selected — all palette colors will be used.`, "info");
+  } else {
+    const names = Array.from(selectedNames).join(", ");
+    showToast(`✔ Page ${pageNum}: ${count} character${count > 1 ? "s" : ""} set (${names})`, "success");
+  }
+}
+
+window.openCharacterPickerModal      = openCharacterPickerModal;
+window.closeCharacterPickerModal     = closeCharacterPickerModal;
+window.handleCharPickerOverlayClick  = handleCharPickerOverlayClick;
+window.charPickerSelectAll           = charPickerSelectAll;
+window.charPickerSelectNone          = charPickerSelectNone;
+window.applyCharacterPickerSelection = applyCharacterPickerSelection;
+
+
 
 /**
  * Force-recolorizes a single page using the preview endpoint.
@@ -3548,6 +4885,9 @@ async function recolorizePage(pageIdx) {
         contrast:        1.1,
         line_preserve:   linePreserve,
         force_recolorize: true,
+        denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
+        active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null,
+        recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto",
       })
     });
 
@@ -3555,6 +4895,12 @@ async function recolorizePage(pageIdx) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
+      if (data.recognized_characters) {
+        page.recognized_characters = data.recognized_characters;
+        if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
+          renderPageCharacterChips(data.recognized_characters);
+        }
+      }
       const ts = Date.now();
 
       // Update gallery thumbnail
@@ -3657,3 +5003,14 @@ async function recolorizeSelected() {
 
 window.recolorizePage     = recolorizePage;
 window.recolorizeSelected = recolorizeSelected;
+window.changeHistoryPage = changeHistoryPage;
+window.handleBulkChunkedUpload = handleBulkChunkedUpload;
+window.openImportProgressModal = openImportProgressModal;
+window.closeImportProgressModal = closeImportProgressModal;
+window.cancelBatchImport = cancelBatchImport;
+window.openFolderImportModal = openFolderImportModal;
+window.closeFolderImportModal = closeFolderImportModal;
+window.handleFolderImportOverlayClick = handleFolderImportOverlayClick;
+window.startFolderImport = startFolderImport;
+window.filterDocumentQueue = filterDocumentQueue;
+window.clearQueueFilter = clearQueueFilter;

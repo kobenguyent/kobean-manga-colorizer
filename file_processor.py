@@ -49,7 +49,7 @@ class MangaFileProcessor:
             return self._extract_epub_images(file_path, orig_dir)
         elif ext in IMAGE_EXTENSIONS:
             return self._extract_single_image(file_path, orig_dir)
-        elif ext == ".zip":
+        elif ext in (".zip", ".cbz"):
             return self._extract_epub_images(file_path, orig_dir)  # reuse zip extraction
         else:
             raise ValueError(f"Unsupported file format: {ext}")
@@ -621,7 +621,18 @@ class MangaFileProcessor:
         text_content = "\n".join(html_lines).encode("utf-8")
         text_len = len(text_content)
 
-        first_image_index = 2
+        # PalmDOC specification requires text content to be split into records of <= 4096 bytes.
+        # Kindle bookreader strictly rejects files where an uncompressed text record exceeds 4096 bytes.
+        CHUNK_SIZE = 4096
+        text_slices = [
+            text_content[i : i + CHUNK_SIZE]
+            for i in range(0, len(text_content), CHUNK_SIZE)
+        ]
+        if not text_slices:
+            text_slices = [b""]
+        num_text_records = len(text_slices)
+
+        first_image_index = 1 + num_text_records
         last_image_index = first_image_index + num_images - 1
         flis_index = last_image_index + 1
         fcis_index = flis_index + 1
@@ -661,7 +672,7 @@ class MangaFileProcessor:
             1,  # compression: 1 (none)
             0,  # unused
             text_len,  # text length
-            1,  # record count (1 text record)
+            num_text_records,  # record count
             4096,  # record size
             0,  # current position
         )
@@ -687,7 +698,7 @@ class MangaFileProcessor:
             ("extra_index_3", "I", 0xFFFFFFFF),
             ("extra_index_4", "I", 0xFFFFFFFF),
             ("extra_index_5", "I", 0xFFFFFFFF),
-            ("first_non_book_index", "I", 2),
+            ("first_non_book_index", "I", first_image_index),
             ("full_name_offset", "I", title_offset),
             ("full_name_length", "I", title_len),
             ("locale", "I", 1033),
@@ -724,7 +735,7 @@ class MangaFileProcessor:
         eof_record = b"\xe9\x8e\r\n"
 
         records = (
-            [record_0, text_content] + image_bytes_list + [flis_record, fcis_record, eof_record]
+            [record_0] + text_slices + image_bytes_list + [flis_record, fcis_record, eof_record]
         )
 
         header_size = 78 + (8 * total_records) + 2
@@ -909,6 +920,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
     ) -> str:
         """
         Merges all queued volumes into one continuous EPUB3 file optimised for e-readers.
@@ -968,10 +980,15 @@ class MangaFileProcessor:
                             raise InterruptedError("Combined EPUB export cancelled")
 
                         color_filename = page_info["filename"]
-                        color_path = colorized_dir / color_filename
-                        if not color_path.exists():
-                            color_path = Path(page_info["original_path"])
-                        if not color_path.exists():
+                        if export_original:
+                            img_path = Path(page_info["original_path"])
+                            if not img_path.exists():
+                                img_path = colorized_dir / color_filename
+                        else:
+                            img_path = colorized_dir / color_filename
+                            if not img_path.exists():
+                                img_path = Path(page_info["original_path"])
+                        if not img_path.exists():
                             continue
 
                         gidx = global_page_idx
@@ -980,7 +997,7 @@ class MangaFileProcessor:
                         # Image - e-reader optimized
                         img_arc_name = f"images/vol_{vol_idx + 1:02d}_page_{gidx + 1:04d}.jpg"
                         img_bytes, w, h = self.optimize_image_data(
-                            color_path,
+                            img_path,
                             max_dimension=max_dimension,
                             quality=jpeg_quality,
                             grayscale=grayscale,
@@ -1129,6 +1146,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
     ) -> str:
         """
         Concatenates all volumes into a single PDF with PDF bookmarks (outlines)
@@ -1157,14 +1175,19 @@ class MangaFileProcessor:
                         raise InterruptedError("Combined PDF export cancelled")
 
                     color_filename = page_info["filename"]
-                    color_path = colorized_dir / color_filename
-                    if not color_path.exists():
-                        color_path = Path(page_info["original_path"])
-                    if not color_path.exists():
+                    if export_original:
+                        img_path = Path(page_info["original_path"])
+                        if not img_path.exists():
+                            img_path = colorized_dir / color_filename
+                    else:
+                        img_path = colorized_dir / color_filename
+                        if not img_path.exists():
+                            img_path = Path(page_info["original_path"])
+                    if not img_path.exists():
                         continue
 
                     img_bytes, width, height = self.optimize_image_data(
-                        color_path,
+                        img_path,
                         max_dimension=max_dimension,
                         quality=jpeg_quality,
                         grayscale=grayscale,
@@ -1222,6 +1245,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
     ) -> str:
         """
         Merges all queued volumes into a single Amazon Kindle MOBI file.
@@ -1250,6 +1274,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
                 if cancel_check and cancel_check():
                     raise InterruptedError("Combined MOBI export cancelled")
@@ -1279,17 +1304,22 @@ class MangaFileProcessor:
                     raise InterruptedError("Combined MOBI export cancelled")
 
                 color_filename = page_info["filename"]
-                color_path = colorized_dir / color_filename
-                if not color_path.exists():
-                    color_path = Path(page_info["original_path"])
-                if not color_path.exists():
+                if export_original:
+                    img_path = Path(page_info["original_path"])
+                    if not img_path.exists():
+                        img_path = colorized_dir / color_filename
+                else:
+                    img_path = colorized_dir / color_filename
+                    if not img_path.exists():
+                        img_path = Path(page_info["original_path"])
+                if not img_path.exists():
                     continue
 
                 gidx = global_page_idx
                 global_page_idx += 1
 
                 img_bytes, w, h = self.optimize_image_data(
-                    color_path,
+                    img_path,
                     max_dimension=max_dimension,
                     quality=jpeg_quality,
                     grayscale=grayscale,
@@ -1331,6 +1361,7 @@ class MangaFileProcessor:
         jpeg_quality: int = 80,
         grayscale: bool = False,
         colorsoft_tune: bool = False,
+        export_original: bool = False,
         progress_callback: Optional[Any] = None,
         cancel_check: Optional[Any] = None,
     ) -> str:
@@ -1341,7 +1372,9 @@ class MangaFileProcessor:
         containing the individual omnibus files (e.g. Part_01_Vol_01-03.mobi).
         """
 
-        clean_title = (title or "Colorized Manga Collection").strip()
+        clean_title = (title or ("Manga Collection" if export_original else "Colorized Manga Collection")).strip()
+        if clean_title == "Colorized Manga Collection" and export_original:
+            clean_title = "Manga Collection"
         safe_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", clean_title).strip().replace(" ", "_")
         if not safe_title:
             safe_title = "manga_collection"
@@ -1355,20 +1388,82 @@ class MangaFileProcessor:
             c_size = max(1, int(chunk_size))
             chunks = [sessions_data[i : i + c_size] for i in range(0, n, c_size)]
         elif chunk_by in ["size_mb", "size"] and chunk_size and chunk_size > 0:
-            budget_kb = max(50, int(chunk_size)) * 1024
-            avg_page_kb = 85 if grayscale else 135
+            budget_kb = max(20, int(chunk_size)) * 1024
+            # Realistic per-page size estimation based on format/settings
+            if grayscale:
+                base_page_kb = 160
+            elif max_dimension == 0 or max_dimension is None or max_dimension >= 1920:
+                base_page_kb = 750
+            else:
+                base_page_kb = 480
+
+            # Safe page threshold: Kindle/Kobo indexers choke when a single volume exceeds 400-500 pages
+            max_pages_per_chunk = min(450, max(80, int(budget_kb / base_page_kb)))
+
+            def _estimate_session_kb(sess: dict) -> int:
+                pages = sess.get("pages", [])
+                p_cnt = len(pages)
+                if p_cnt == 0:
+                    return 0
+                sample_bytes = []
+                sess_id = sess.get("session_id", "")
+                colorized_dir = self.storage_dir / sess_id / "colorized"
+                for p in pages[:4]:
+                    p_path = None
+                    if export_original:
+                        p_path = Path(p.get("original_path", ""))
+                    else:
+                        p_path = colorized_dir / p.get("filename", "")
+                        if not p_path.exists():
+                            p_path = Path(p.get("original_path", ""))
+                    if p_path and p_path.exists():
+                        sample_bytes.append(p_path.stat().st_size)
+                if sample_bytes:
+                    avg_b = sum(sample_bytes) / len(sample_bytes)
+                    factor = 1.0
+                    if max_dimension and max_dimension > 0 and max_dimension <= 1600:
+                        factor = 0.70
+                    if grayscale:
+                        factor *= 0.50
+                    return int((avg_b * factor * p_cnt) / 1024)
+                return int(p_cnt * base_page_kb)
+
+            # Subdivide any huge single session that exceeds budget or max pages
+            normalized_sessions = []
+            for s in sessions_data:
+                pages = s.get("pages", [])
+                s_est_kb = _estimate_session_kb(s)
+                if (len(pages) > max_pages_per_chunk or s_est_kb > budget_kb) and len(pages) > 1:
+                    per_page_kb = max(1, s_est_kb // len(pages))
+                    slice_size = min(max_pages_per_chunk, max(30, budget_kb // per_page_kb))
+                    stem = Path(s.get("filename", "Volume")).stem
+                    for slice_idx, start_i in enumerate(range(0, len(pages), slice_size), start=1):
+                        slice_pages = pages[start_i : start_i + slice_size]
+                        end_i = start_i + len(slice_pages)
+                        sub_sess = dict(s)
+                        sub_sess["pages"] = slice_pages
+                        sub_sess["filename"] = f"{stem} (p.{start_i + 1:03d}-{end_i:03d})"
+                        normalized_sessions.append(sub_sess)
+                else:
+                    normalized_sessions.append(s)
+
             curr_chunk = []
             curr_kb = 0
-            for s in sessions_data:
+            curr_pages = 0
+            for s in normalized_sessions:
                 p_cnt = len(s.get("pages", []))
-                s_kb = p_cnt * avg_page_kb
-                if curr_chunk and (curr_kb + s_kb > budget_kb):
+                s_kb = _estimate_session_kb(s)
+                if curr_chunk and (
+                    (curr_kb + s_kb > budget_kb) or (curr_pages + p_cnt > max_pages_per_chunk)
+                ):
                     chunks.append(curr_chunk)
                     curr_chunk = [s]
                     curr_kb = s_kb
+                    curr_pages = p_cnt
                 else:
                     curr_chunk.append(s)
                     curr_kb += s_kb
+                    curr_pages += p_cnt
             if curr_chunk:
                 chunks.append(curr_chunk)
         else:
@@ -1387,6 +1482,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
             elif export_format == "pdf":
                 return self.build_combined_pdf(
@@ -1399,6 +1495,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
             else:
                 return self.build_combined_epub(
@@ -1411,6 +1508,7 @@ class MangaFileProcessor:
                     jpeg_quality=jpeg_quality,
                     grayscale=grayscale,
                     colorsoft_tune=colorsoft_tune,
+                    export_original=export_original,
                 )
 
         # Multiple chunks: build each omnibus volume and bundle into ZIP
@@ -1468,6 +1566,7 @@ class MangaFileProcessor:
                         jpeg_quality=jpeg_quality,
                         grayscale=grayscale,
                         colorsoft_tune=colorsoft_tune,
+                        export_original=export_original,
                     )
                 elif export_format == "pdf":
                     self.build_combined_pdf(
@@ -1480,6 +1579,7 @@ class MangaFileProcessor:
                         jpeg_quality=jpeg_quality,
                         grayscale=grayscale,
                         colorsoft_tune=colorsoft_tune,
+                        export_original=export_original,
                     )
                 else:
                     self.build_combined_epub(
@@ -1492,6 +1592,7 @@ class MangaFileProcessor:
                         jpeg_quality=jpeg_quality,
                         grayscale=grayscale,
                         colorsoft_tune=colorsoft_tune,
+                        export_original=export_original,
                     )
 
                 created_files.append((part_file_path, part_filename))

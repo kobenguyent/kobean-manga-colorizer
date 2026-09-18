@@ -1,10 +1,12 @@
 import base64
+import copy
 import io
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import cv2
 import numpy as np
@@ -96,13 +98,126 @@ def is_colored_page(
 
 @dataclass
 class CharacterEntry:
-    """Canonical color hints for a single named character."""
+    """Canonical color hints and visual features for a single named character."""
 
     name: str  # e.g. "Arale"
     hair_hex: str = ""  # e.g. "#8B2BE2"  (violet)
     skin_hex: str = ""  # e.g. "#F4C5A0"  (peach)
     costume_hex: str = ""  # e.g. "#3A7BFF"
     extra_hex: str = ""  # optional catch-all / accessory color
+    notes: str = ""
+    visual_traits: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+    bounding_box: Optional[tuple[float, float, float, float]] = None  # (ymin, xmin, ymax, xmax) normalized 0.0-1.0
+
+    def __post_init__(self):
+        if not self.visual_traits:
+            self.visual_traits = self._infer_visual_traits()
+        if not self.keywords:
+            self.keywords = self._infer_keywords()
+        if self.bounding_box is not None:
+            self.bounding_box = tuple(float(x) for x in self.bounding_box)
+
+    def _infer_visual_traits(self) -> list[str]:
+        traits = []
+        if self.hair_hex:
+            hx = self.hair_hex.strip().lstrip("#")
+            if len(hx) >= 6:
+                try:
+                    r, g, b = int(hx[:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+                    brightness = (r + g + b) / 3.0
+                    if brightness < 55:
+                        traits.append("black_hair")
+                    elif brightness > 175:
+                        traits.append("light_hair")
+                    else:
+                        traits.append("screentone_hair")
+                except Exception:
+                    pass
+        n_lower = (self.notes + " " + self.name).lower()
+        if "straw hat" in n_lower:
+            traits.append("straw_hat")
+        elif "hat" in n_lower or "cap" in n_lower:
+            traits.append("hat")
+        if "glasses" in n_lower:
+            traits.append("glasses")
+        if "winged" in n_lower or "wing" in n_lower:
+            traits.append("winged_cap")
+        if "antler" in n_lower or "fur" in n_lower:
+            traits.append("antlers")
+        if "whiskers" in n_lower or "bell" in n_lower or "doraemon" in n_lower:
+            traits.append("round_head")
+        if "chibi" in n_lower or "small" in n_lower or "kid" in n_lower or "child" in n_lower:
+            traits.append("chibi")
+        else:
+            traits.append("standard_body")
+        return traits
+
+    def _infer_keywords(self) -> list[str]:
+        kw = [self.name.lower()]
+        for part in re.split(r"[\s\(\)\-\.]+", self.name):
+            if len(part) >= 3 and part.lower() not in kw:
+                kw.append(part.lower())
+        return kw
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "hair_hex": self.hair_hex,
+            "skin_hex": self.skin_hex,
+            "costume_hex": self.costume_hex,
+            "extra_hex": self.extra_hex,
+            "notes": self.notes,
+            "visual_traits": self.visual_traits,
+            "keywords": self.keywords,
+            "bounding_box": list(self.bounding_box) if self.bounding_box else None,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CharacterEntry":
+        bb = d.get("bounding_box")
+        return cls(
+            name=d.get("name", ""),
+            hair_hex=d.get("hair_hex", ""),
+            skin_hex=d.get("skin_hex", ""),
+            costume_hex=d.get("costume_hex", ""),
+            extra_hex=d.get("extra_hex", ""),
+            notes=d.get("notes", ""),
+            visual_traits=d.get("visual_traits") or [],
+            keywords=d.get("keywords") or [],
+            bounding_box=tuple(float(x) for x in bb) if bb else None,
+        )
+
+
+@dataclass
+class RecognizedCharacter:
+    """Character detected on a specific manga page/panel."""
+
+    name: str
+    confidence: float = 0.0  # 0.0 to 1.0
+    bounding_box: Optional[tuple[float, float, float, float]] = None  # (ymin, xmin, ymax, xmax) normalized 0.0-1.0
+    detection_method: str = "visual_heuristic"  # "ocr_keyword", "visual_heuristic", "gemini_multimodal", "fallback_principal"
+    matched_features: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "confidence": round(float(self.confidence), 3),
+            "bounding_box": [round(float(x), 4) for x in self.bounding_box] if self.bounding_box else None,
+            "detection_method": self.detection_method,
+            "matched_features": self.matched_features,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RecognizedCharacter":
+        bb = d.get("bounding_box")
+        return cls(
+            name=d.get("name", ""),
+            confidence=float(d.get("confidence", 0.0)),
+            bounding_box=tuple(float(x) for x in bb) if bb else None,
+            detection_method=d.get("detection_method", "manual"),
+            matched_features=d.get("matched_features", []),
+        )
 
 
 @dataclass
@@ -114,67 +229,1008 @@ class CharacterPalette:
     """
 
     characters: list[CharacterEntry] = field(default_factory=list)
+    preset_id: str = ""
+    preset_title: str = ""
 
     # ── Serialization ────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
-        return {"characters": [vars(c) for c in self.characters]}
+        return {
+            "characters": [c.to_dict() if hasattr(c, "to_dict") else vars(c) for c in self.characters],
+            "preset_id": self.preset_id,
+            "preset_title": self.preset_title,
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> "CharacterPalette":
-        entries = [CharacterEntry(**c) for c in d.get("characters", [])]
-        return cls(characters=entries)
+        entries = []
+        for c in d.get("characters", []):
+            if isinstance(c, dict):
+                entries.append(CharacterEntry.from_dict(c))
+            elif isinstance(c, CharacterEntry):
+                entries.append(c)
+        return cls(
+            characters=entries,
+            preset_id=d.get("preset_id", ""),
+            preset_title=d.get("preset_title", ""),
+        )
+
+    # ── Page Optimization ───────────────────────────────────────────
+
+    def optimize_for_page(
+        self,
+        recognized: list[RecognizedCharacter],
+        min_confidence: float = 0.35,
+    ) -> "CharacterPalette":
+        """
+        Builds a page-specific CharacterPalette where:
+        1. Characters confirmed to appear on this page are prioritized.
+        2. Normalized bounding boxes are assigned to isolate seeds and harmonization.
+        3. Unrecognized characters are omitted so their colors do not bleed onto other characters.
+        """
+        valid_rec = [r for r in recognized if r.confidence >= min_confidence]
+        if not valid_rec or not self.characters:
+            cloned = copy.deepcopy(self)
+            for c in cloned.characters:
+                c.bounding_box = None
+            return cloned
+
+        optimized_characters: list[CharacterEntry] = []
+        matched_canonical_names: set[str] = set()
+
+        for rec in valid_rec:
+            rec_name_lower = rec.name.lower().strip()
+            best_match: Optional[CharacterEntry] = None
+            for c in self.characters:
+                c_name_lower = c.name.lower().strip()
+                if (
+                    rec_name_lower == c_name_lower
+                    or rec_name_lower in c_name_lower
+                    or c_name_lower in rec_name_lower
+                    or any(kw in rec_name_lower for kw in c.keywords)
+                ):
+                    best_match = c
+                    break
+
+            if best_match is not None:
+                new_entry = copy.deepcopy(best_match)
+                new_entry.bounding_box = rec.bounding_box
+                optimized_characters.append(new_entry)
+                matched_canonical_names.add(best_match.name.lower())
+
+        if optimized_characters:
+            return CharacterPalette(
+                characters=optimized_characters,
+                preset_id=self.preset_id,
+                preset_title=self.preset_title,
+            )
+
+        cloned = copy.deepcopy(self)
+        for c in cloned.characters:
+            c.bounding_box = None
+        return cloned
 
     # ── Hint tensor for neural colorizer ────────────────────────────
 
-    def build_hint_tensor(self, h: int, w: int, device: str) -> torch.Tensor:
+    def build_hint_tensor(
+        self,
+        h: int,
+        w: int,
+        device: str,
+        sketch_gray: Optional[np.ndarray] = None,
+    ) -> torch.Tensor:
         """
         Builds a (1, 4, H, W) hint tensor for the neural model.
 
         Channel layout expected by the Colorizer hint input:
-          ch 0-2 : R, G, B  (0–1 float)
-          ch 3   : confidence mask  (0 = no hint, 1 = strong hint)
+          ch 0-2 : R, G, B in [-1.0, 1.0] scaled as (RGB - 0.5) / 0.5 * mask
+          ch 3   : confidence mask in [0.0, 1.0]  (0 = unguided, 1.0 = guided seed)
 
-        Applies a global tint derived by averaging all provided character colors.
-        This gives the model a "preferred palette" nudge without pixel-precise
-        segmentation.  The low confidence (0.30) allows the model to override
-        the hint wherever the local context provides stronger evidence.
+        Uses sparse localized seed points within candidate character midtone regions
+        so the neural model's dilated convolutions propagate canonical character colors
+        along lineart boundaries without flat-tinting backgrounds, speech bubbles, or scenery.
+        Spatially constrained by each character's bounding_box when available.
         """
         hint = torch.zeros(1, 4, h, w, dtype=torch.float32, device=device)
-
-        hex_colors: list[str] = []
-        for ch in self.characters:
-            for hex_val in [ch.hair_hex, ch.skin_hex, ch.costume_hex, ch.extra_hex]:
-                if hex_val and len(hex_val) >= 6:
-                    hex_colors.append(hex_val.strip().lstrip("#"))
-
-        if not hex_colors:
-            return hint  # all-zero → model runs unguided
-
-        rgb_vals = []
-        for hx in hex_colors:
-            try:
-                r = int(hx[0:2], 16) / 255.0
-                g = int(hx[2:4], 16) / 255.0
-                b = int(hx[4:6], 16) / 255.0
-                rgb_vals.append((r, g, b))
-            except ValueError:
-                continue
-
-        if not rgb_vals:
+        if sketch_gray is None or not self.characters:
             return hint
 
-        avg_r = sum(c[0] for c in rgb_vals) / len(rgb_vals)
-        avg_g = sum(c[1] for c in rgb_vals) / len(rgb_vals)
-        avg_b = sum(c[2] for c in rgb_vals) / len(rgb_vals)
+        def hex_to_rgb01(hex_code: Optional[str]) -> Optional[list[float]]:
+            if not hex_code or len(hex_code.strip().lstrip("#")) < 6:
+                return None
+            hx = hex_code.strip().lstrip("#")
+            try:
+                return [
+                    int(hx[0:2], 16) / 255.0,
+                    int(hx[2:4], 16) / 255.0,
+                    int(hx[4:6], 16) / 255.0,
+                ]
+            except Exception:
+                return None
 
-        confidence = 0.30  # low enough for model to override locally
-        hint[0, 0, :, :] = avg_r
-        hint[0, 1, :, :] = avg_g
-        hint[0, 2, :, :] = avg_b
-        hint[0, 3, :, :] = confidence
+        # Ensure sketch_gray is 2D float32 [0.0, 1.0]
+        if sketch_gray.ndim == 3:
+            sketch_gray = sketch_gray[:, :, 0]
+        if sketch_gray.dtype != np.float32:
+            sketch_gray = sketch_gray.astype(np.float32)
+        if sketch_gray.max() > 1.0:
+            sketch_gray = sketch_gray / 255.0
+
+        y_coords, x_coords = np.ogrid[:h, :w]
+        seeds_placed = 0
+
+        for ch in self.characters[:4]:
+            costume_rgb = hex_to_rgb01(ch.costume_hex)
+            skin_rgb = hex_to_rgb01(ch.skin_hex)
+            hair_rgb = hex_to_rgb01(ch.hair_hex)
+
+            # Spatial region mask if bounding box is defined
+            region_mask = None
+            if ch.bounding_box is not None:
+                by0, bx0, by1, bx1 = ch.bounding_box
+                y0_px = max(0, min(h - 1, int(by0 * h)))
+                x0_px = max(0, min(w - 1, int(bx0 * w)))
+                y1_px = max(y0_px + 10, min(h, int(by1 * h)))
+                x1_px = max(x0_px + 10, min(w, int(bx1 * w)))
+                region_mask = np.zeros((h, w), dtype=bool)
+                region_mask[y0_px:y1_px, x0_px:x1_px] = True
+
+            # 1. Costume / clothing components: medium screentones [0.28, 0.72]
+            if costume_rgb is not None and seeds_placed < 6:
+                c_mask_cond = (sketch_gray >= 0.28) & (sketch_gray <= 0.72)
+                if region_mask is not None:
+                    c_mask_cond = c_mask_cond & region_mask
+                costume_mask = c_mask_cond.astype(np.uint8)
+                num_c, _, stats_c, centroids_c = cv2.connectedComponentsWithStats(costume_mask)
+                if num_c > 1:
+                    indices = np.argsort(-stats_c[1:, cv2.CC_STAT_AREA]) + 1
+                    for idx in indices:
+                        area = stats_c[idx, cv2.CC_STAT_AREA]
+                        if 350 <= area <= 0.20 * h * w and seeds_placed < 6:
+                            cx, cy = int(centroids_c[idx][0]), int(centroids_c[idx][1])
+                            if 15 < cx < w - 15 and 15 < cy < h - 15:
+                                if 0.25 <= sketch_gray[cy, cx] <= 0.85:
+                                    radius = min(12, max(5, int(np.sqrt(area) / 6)))
+                                    dist_sq = (y_coords - cy) ** 2 + (x_coords - cx) ** 2
+                                    mask = dist_sq <= radius ** 2
+                                    hint[0, 0, mask] = (costume_rgb[0] - 0.5) / 0.5
+                                    hint[0, 1, mask] = (costume_rgb[1] - 0.5) / 0.5
+                                    hint[0, 2, mask] = (costume_rgb[2] - 0.5) / 0.5
+                                    hint[0, 3, mask] = 1.0
+                                    seeds_placed += 1
+                                    break
+
+            # 2. Skin components: light screentones [0.72, 0.90]
+            if skin_rgb is not None and seeds_placed < 8:
+                s_mask_cond = (sketch_gray >= 0.72) & (sketch_gray <= 0.90)
+                if region_mask is not None:
+                    s_mask_cond = s_mask_cond & region_mask
+                skin_mask = s_mask_cond.astype(np.uint8)
+                num_s, _, stats_s, centroids_s = cv2.connectedComponentsWithStats(skin_mask)
+                if num_s > 1:
+                    indices = np.argsort(-stats_s[1:, cv2.CC_STAT_AREA]) + 1
+                    for idx in indices:
+                        area = stats_s[idx, cv2.CC_STAT_AREA]
+                        if 250 <= area <= 0.15 * h * w and seeds_placed < 8:
+                            cx, cy = int(centroids_s[idx][0]), int(centroids_s[idx][1])
+                            if 15 < cx < w - 15 and 15 < cy < h - 15:
+                                if 0.65 <= sketch_gray[cy, cx] <= 0.92:
+                                    radius = min(10, max(4, int(np.sqrt(area) / 8)))
+                                    dist_sq = (y_coords - cy) ** 2 + (x_coords - cx) ** 2
+                                    mask = dist_sq <= radius ** 2
+                                    hint[0, 0, mask] = (skin_rgb[0] - 0.5) / 0.5
+                                    hint[0, 1, mask] = (skin_rgb[1] - 0.5) / 0.5
+                                    hint[0, 2, mask] = (skin_rgb[2] - 0.5) / 0.5
+                                    hint[0, 3, mask] = 1.0
+                                    seeds_placed += 1
+                                    break
+
+            # 3. Hair components: darker screentones [0.18, 0.45]
+            if hair_rgb is not None and seeds_placed < 9:
+                h_mask_cond = (sketch_gray >= 0.18) & (sketch_gray <= 0.45)
+                if region_mask is not None:
+                    h_mask_cond = h_mask_cond & region_mask
+                hair_mask = h_mask_cond.astype(np.uint8)
+                num_h, _, stats_h, centroids_h = cv2.connectedComponentsWithStats(hair_mask)
+                if num_h > 1:
+                    indices = np.argsort(-stats_h[1:, cv2.CC_STAT_AREA]) + 1
+                    for idx in indices:
+                        area = stats_h[idx, cv2.CC_STAT_AREA]
+                        if 300 <= area <= 0.15 * h * w and seeds_placed < 9:
+                            cx, cy = int(centroids_h[idx][0]), int(centroids_h[idx][1])
+                            if 15 < cx < w - 15 and 15 < cy < h - 15:
+                                if 0.18 <= sketch_gray[cy, cx] <= 0.50:
+                                    radius = min(10, max(4, int(np.sqrt(area) / 8)))
+                                    dist_sq = (y_coords - cy) ** 2 + (x_coords - cx) ** 2
+                                    mask = dist_sq <= radius ** 2
+                                    hint[0, 0, mask] = (hair_rgb[0] - 0.5) / 0.5
+                                    hint[0, 1, mask] = (hair_rgb[1] - 0.5) / 0.5
+                                    hint[0, 2, mask] = (hair_rgb[2] - 0.5) / 0.5
+                                    hint[0, 3, mask] = 1.0
+                                    seeds_placed += 1
+                                    break
 
         return hint
+
+
+def apply_character_palette_harmonization(
+    img_rgb: np.ndarray, palette: Optional["CharacterPalette"]
+) -> np.ndarray:
+    """
+    Harmonizes generated manga colors to canonical preset hues and saturations.
+    Targeted semantic snapping prevents color drift across panels without flat-tinting.
+    Respects character bounding boxes when present to prevent cross-panel color bleed.
+    """
+    if not palette or not palette.characters:
+        return img_rgb
+
+    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+    h_chan, s_chan, v_chan = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    H, W = img_rgb.shape[:2]
+
+    # 1. Skin tone harmonization: anchor skin midtones to canonical anime peach
+    for ch in palette.characters:
+        if ch.skin_hex and len(ch.skin_hex.strip().lstrip("#")) >= 6:
+            hx = ch.skin_hex.strip().lstrip("#")
+            try:
+                cr = int(hx[0:2], 16)
+                cg = int(hx[2:4], 16)
+                cb = int(hx[4:6], 16)
+                skin_px = np.uint8([[[cr, cg, cb]]])
+                skin_hsv = cv2.cvtColor(skin_px, cv2.COLOR_RGB2HSV)[0, 0]
+                target_skin_h = float(skin_hsv[0])
+                target_skin_s = float(skin_hsv[1])
+                target_skin_v = float(skin_hsv[2])
+
+                # Anime skin tone detector: warm peach hue (0-24 or 172-180), moderate saturation (18-125), bright midtone (110-245)
+                skin_mask = (
+                    ((h_chan <= 24.0) | (h_chan >= 172.0))
+                    & (s_chan >= 18.0)
+                    & (s_chan <= 125.0)
+                    & (v_chan >= 110.0)
+                    & (v_chan <= 245.0)
+                )
+                if ch.bounding_box:
+                    by0, bx0, by1, bx1 = ch.bounding_box
+                    y0 = max(0, min(H - 1, int(by0 * H)))
+                    x0 = max(0, min(W - 1, int(bx0 * W)))
+                    y1 = max(y0 + 10, min(H, int(by1 * H)))
+                    x1 = max(x0 + 10, min(W, int(bx1 * W)))
+                    box_m = np.zeros((H, W), dtype=bool)
+                    box_m[y0:y1, x0:x1] = True
+                    skin_mask = skin_mask & box_m
+
+                if np.any(skin_mask):
+                    h_chan[skin_mask] = 0.60 * h_chan[skin_mask] + 0.40 * target_skin_h
+                    s_chan[skin_mask] = np.clip(
+                        0.60 * s_chan[skin_mask] + 0.40 * target_skin_s, 25.0, 140.0
+                    )
+                    v_chan[skin_mask] = np.clip(
+                        0.80 * v_chan[skin_mask] + 0.20 * target_skin_v, 110.0, 255.0
+                    )
+                if not ch.bounding_box:
+                    break  # Harmonize skin once from principal character if global
+            except Exception:
+                pass
+
+    # 2. Costume, Hair & Accessory Anchors
+    color_mask_base = (s_chan >= 25.0) & (v_chan >= 30.0) & (v_chan <= 245.0)
+    for ch in palette.characters:
+        spatial_mask = None
+        if ch.bounding_box:
+            by0, bx0, by1, bx1 = ch.bounding_box
+            y0 = max(0, min(H - 1, int(by0 * H)))
+            x0 = max(0, min(W - 1, int(bx0 * W)))
+            y1 = max(y0 + 10, min(H, int(by1 * H)))
+            x1 = max(x0 + 10, min(W, int(bx1 * W)))
+            spatial_mask = np.zeros((H, W), dtype=bool)
+            spatial_mask[y0:y1, x0:x1] = True
+
+        for hex_code in [ch.costume_hex, ch.hair_hex, ch.extra_hex]:
+            if not hex_code or len(hex_code.strip().lstrip("#")) < 6:
+                continue
+            hx = hex_code.strip().lstrip("#")
+            try:
+                cr = int(hx[0:2], 16)
+                cg = int(hx[2:4], 16)
+                cb = int(hx[4:6], 16)
+                px = np.uint8([[[cr, cg, cb]]])
+                ch_hsv = cv2.cvtColor(px, cv2.COLOR_RGB2HSV)[0, 0]
+                target_h = float(ch_hsv[0])
+                target_s = float(ch_hsv[1])
+                target_v = float(ch_hsv[2])
+
+                if target_s < 25.0:
+                    continue  # skip neutral grays/whites/blacks
+
+                # Angular hue distance (0-180 scale in OpenCV)
+                diff = np.abs(h_chan - target_h)
+                diff = np.minimum(diff, 180.0 - diff)
+
+                # Match pixels within ±28 degrees of the canonical hue
+                matched = (diff <= 28.0) & color_mask_base
+
+                # Also handle magenta/purple-red to canonical red (e.g. Luffy vest or Sakuragi red)
+                if target_h <= 10.0 or target_h >= 170.0:
+                    matched = matched | (
+                        (h_chan >= 140.0)
+                        & (h_chan <= 170.0)
+                        & (s_chan >= 40.0)
+                        & (v_chan >= 30.0)
+                        & (v_chan <= 230.0)
+                    )
+
+                if spatial_mask is not None:
+                    matched = matched & spatial_mask
+
+                if np.any(matched):
+                    influence = np.clip((28.0 - diff) / 28.0, 0.0, 1.0)
+                    pull = 0.65 * influence
+
+                    # Red wrap-around safe blending
+                    if target_h <= 15.0 or target_h >= 165.0:
+                        h_unwrapped = np.where(h_chan > 90.0, h_chan - 180.0, h_chan)
+                        t_unwrapped = target_h - 180.0 if target_h > 90.0 else target_h
+                        new_h = (1.0 - pull) * h_unwrapped + pull * t_unwrapped
+                        h_chan[matched] = np.where(
+                            new_h[matched] < 0, new_h[matched] + 180.0, new_h[matched]
+                        )
+                    else:
+                        h_chan[matched] = (
+                            (1.0 - pull[matched]) * h_chan[matched] + pull[matched] * target_h
+                        )
+
+                    s_chan[matched] = np.clip(
+                        (1.0 - pull[matched]) * s_chan[matched]
+                        + pull[matched] * max(target_s, 130.0),
+                        0.0,
+                        255.0,
+                    )
+                    v_chan[matched] = np.clip(
+                        (1.0 - pull[matched] * 0.4) * v_chan[matched]
+                        + pull[matched] * 0.4 * target_v,
+                        0.0,
+                        255.0,
+                    )
+            except Exception:
+                continue
+
+    h_chan = np.clip(h_chan, 0.0, 179.0)
+    s_chan = np.clip(s_chan, 0.0, 255.0)
+    v_chan = np.clip(v_chan, 0.0, 255.0)
+    return cv2.cvtColor(
+        cv2.merge([h_chan.astype(np.uint8), s_chan.astype(np.uint8), v_chan.astype(np.uint8)]),
+        cv2.COLOR_HSV2RGB,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Manga Character Recognition Engine
+# ─────────────────────────────────────────────────────────────────────
+
+
+class MangaCharacterRecognizer:
+    """
+    Intelligent manga character recognition system:
+    - Pre-trained Offline Neural AI (CLIP zero-shot visual character classification) running on MPS / CPU.
+    - Candidate figure silhouette & manga panel isolation.
+    - Hair shading analysis (black ink vs screentone vs light), accessories (glasses, hats, horns),
+      and chibi vs standard proportions.
+    - Checks dialogue keywords if text is available.
+    - Multimodal AI verification (Google Gemini) when API key is available.
+    """
+
+    _clip_model = None
+    _clip_processor = None
+    _clip_device = None
+
+    def __init__(self):
+        self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+    @classmethod
+    def _ensure_clip(cls):
+        """Lazy-loads openai/clip-vit-base-patch32 singleton model and processor."""
+        if cls._clip_model is not None and cls._clip_processor is not None:
+            return cls._clip_model, cls._clip_processor, cls._clip_device
+
+        try:
+            from transformers import CLIPModel, CLIPProcessor
+
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            model_name = "openai/clip-vit-base-patch32"
+            processor = CLIPProcessor.from_pretrained(model_name)
+            model = CLIPModel.from_pretrained(model_name).to(device)
+            model.eval()
+
+            cls._clip_model = model
+            cls._clip_processor = processor
+            cls._clip_device = device
+            print(f"[MangaCharacterRecognizer] Loaded offline CLIP model on {device}")
+            return cls._clip_model, cls._clip_processor, cls._clip_device
+        except Exception as e:
+            print(f"[MangaCharacterRecognizer WARNING] Could not load offline CLIP model: {e}")
+            return None, None, None
+
+    @staticmethod
+    def _canonicalize_name(raw_name: str, palette: CharacterPalette) -> str:
+        """
+        Maps a detected raw name (e.g. 'Luffy', 'Monkey D Luffy', 'Straw Hat')
+        to the exact canonical name defined in palette.characters ('Monkey D. Luffy').
+        """
+        if not palette or not palette.characters or not raw_name:
+            return raw_name
+        r_clean = raw_name.lower().strip()
+        # 1. Exact match
+        for c in palette.characters:
+            if c.name.lower().strip() == r_clean:
+                return c.name
+        # 2. Substring match
+        for c in palette.characters:
+            c_clean = c.name.lower().strip()
+            if r_clean in c_clean or c_clean in r_clean:
+                return c.name
+        # 3. Keyword / alias match
+        for c in palette.characters:
+            if any(kw in r_clean or r_clean in kw for kw in c.keywords):
+                return c.name
+        return raw_name
+
+    def recognize_page_characters(
+        self,
+        image_path: str,
+        palette: CharacterPalette,
+        api_key: str = "",
+        model_name: str = "",
+        page_text: str = "",
+        min_confidence: float = 0.35,
+        recognition_mode: str = "auto",
+    ) -> list[RecognizedCharacter]:
+        if not palette or not palette.characters:
+            return []
+
+        mode = (recognition_mode or "auto").lower()
+
+        results: list[RecognizedCharacter] = []
+
+        # 1. Explicit Google Gemini cloud vision mode
+        if mode in ("gemini", "cloud", "gemini_multimodal"):
+            gemini_key = (
+                api_key
+                or os.environ.get("GOOGLE_API_KEY", "")
+                or os.environ.get("GEMINI_API_KEY", "")
+            )
+            if gemini_key:
+                try:
+                    res = self._recognize_with_gemini(
+                        image_path=image_path,
+                        palette=palette,
+                        api_key=gemini_key,
+                        model_name=model_name,
+                    )
+                    if res:
+                        results = res
+                except Exception as e:
+                    print(f"[MangaCharacterRecognizer] Gemini recognition error: {e}")
+            if not results:
+                clip_res = self._recognize_with_clip(image_path, palette, min_confidence)
+                if clip_res:
+                    results = clip_res
+                else:
+                    results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+
+        # 2. Explicit Fast Visual Heuristics mode
+        elif mode in ("heuristics", "fast", "visual_heuristic"):
+            results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+
+        # 3. Explicit Offline Pre-trained Neural AI (CLIP) mode
+        elif mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai"):
+            try:
+                res = self._recognize_with_clip(
+                    image_path=image_path,
+                    palette=palette,
+                    min_confidence=min_confidence,
+                )
+                if res:
+                    results = res
+            except Exception as e:
+                print(f"[MangaCharacterRecognizer WARNING] Offline CLIP error: {e}")
+            if not results:
+                results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+
+        # 4. Auto mode (Best Available: Gemini -> Offline CLIP -> Fast Heuristics)
+        else:
+            gemini_key = (
+                api_key
+                or os.environ.get("GOOGLE_API_KEY", "")
+                or os.environ.get("GEMINI_API_KEY", "")
+            )
+            if gemini_key:
+                try:
+                    gemini_results = self._recognize_with_gemini(
+                        image_path=image_path,
+                        palette=palette,
+                        api_key=gemini_key,
+                        model_name=model_name,
+                    )
+                    if gemini_results:
+                        results = gemini_results
+                except Exception as e:
+                    print(f"[MangaCharacterRecognizer] Gemini recognition fallback: {e}")
+
+            if not results:
+                try:
+                    clip_results = self._recognize_with_clip(
+                        image_path=image_path,
+                        palette=palette,
+                        min_confidence=min_confidence,
+                    )
+                    if clip_results:
+                        results = clip_results
+                except Exception as e:
+                    print(f"[MangaCharacterRecognizer] Offline CLIP fallback: {e}")
+
+            if not results:
+                results = self._recognize_heuristics(
+                    image_path=image_path,
+                    palette=palette,
+                    page_text=page_text,
+                    min_confidence=min_confidence,
+                )
+
+        # Ensure all recognized names are strictly canonicalized against palette
+        for r in results:
+            r.name = self._canonicalize_name(r.name, palette)
+
+        return results
+
+    def _recognize_with_gemini(
+        self,
+        image_path: str,
+        palette: CharacterPalette,
+        api_key: str,
+        model_name: str = "",
+    ) -> list[RecognizedCharacter]:
+        import json
+
+        with open(image_path, "rb") as f:
+            b64_data = base64.b64encode(f.read()).decode("utf-8")
+
+        char_list_str = "\n".join(
+            f"- {c.name}: {c.notes or 'Main character'}" for c in palette.characters
+        )
+
+        prompt = (
+            "You are an expert manga analyst. Identify which of these characters appear on this manga page.\n\n"
+            f"Candidate Characters:\n{char_list_str}\n\n"
+            "Return ONLY a JSON array of objects with the following schema, and no markdown wrapping:\n"
+            "[\n"
+            "  {\n"
+            '    "name": "Exact Character Name from Candidate List",\n'
+            '    "confidence": 0.95,\n'
+            '    "bounding_box": [ymin, xmin, ymax, xmax],\n'
+            '    "matched_features": ["black hair", "straw hat"]\n'
+            "  }\n"
+            "]\n"
+            "If none of the candidates appear, return []."
+        )
+
+        target_model = "gemini-2.5-flash"
+        if model_name and "gemini" in model_name.lower():
+            target_model = model_name.replace("-image", "")
+            if "nano" in target_model.lower():
+                target_model = "gemini-2.5-flash"
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key}"
+        body = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": b64_data,
+                            }
+                        },
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+            },
+        }
+
+        resp = requests.post(
+            url, json=body, headers={"Content-Type": "application/json"}, timeout=20
+        )
+        if resp.status_code != 200:
+            return []
+
+        res_json = resp.json()
+        candidates = res_json.get("candidates", [])
+        if not candidates:
+            return []
+        text_content = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+            .strip()
+        )
+        if not text_content:
+            return []
+
+        text_content = re.sub(r"^```json\s*", "", text_content)
+        text_content = re.sub(r"^```\s*", "", text_content)
+        text_content = re.sub(r"\s*```$", "", text_content).strip()
+
+        parsed = json.loads(text_content)
+        if not isinstance(parsed, list):
+            return []
+
+        results = []
+        for item in parsed:
+            name = item.get("name")
+            conf = float(item.get("confidence", 0.8))
+            bb = item.get("bounding_box")
+            bb_tuple = tuple(float(x) for x in bb) if (bb and len(bb) == 4) else None
+            matched = item.get("matched_features", ["gemini_vision"])
+            if name:
+                results.append(
+                    RecognizedCharacter(
+                        name=self._canonicalize_name(name, palette),
+                        confidence=conf,
+                        bounding_box=bb_tuple,
+                        detection_method="gemini_multimodal",
+                        matched_features=matched if isinstance(matched, list) else [str(matched)],
+                    )
+                )
+        return results
+
+    def _extract_candidate_boxes(self, img: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """
+        Extracts candidate panel and figure bounding boxes (y0, x0, y1, x1) from grayscale image.
+        Uses morphological closing and contour analysis to locate panel segments and character silhouettes.
+        """
+        h, w = img.shape
+        candidate_boxes: list[tuple[int, int, int, int]] = []
+        scale = 1.0
+        if max(h, w) > 1200:
+            scale = 1200.0 / max(h, w)
+            small = cv2.resize(
+                img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+            )
+        else:
+            small = img
+
+        sh, sw = small.shape
+        ink_mask = (small < 215).astype(np.uint8) * 255
+        kernel_size = max(5, int(min(sh, sw) / 45))
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        closed = cv2.morphologyEx(ink_mask, cv2.MORPH_CLOSE, k)
+
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            area = bw * bh
+            if 0.02 * sh * sw <= area <= 0.88 * sh * sw and bw >= 30 and bh >= 40:
+                orig_y0 = int(by / scale)
+                orig_x0 = int(bx / scale)
+                orig_y1 = min(h, int((by + bh) / scale))
+                orig_x1 = min(w, int((bx + bw) / scale))
+                candidate_boxes.append((orig_y0, orig_x0, orig_y1, orig_x1))
+
+        if not candidate_boxes:
+            candidate_boxes.append((int(0.05 * h), int(0.05 * w), int(0.95 * h), int(0.95 * w)))
+
+        return candidate_boxes
+
+    def _recognize_with_clip(
+        self,
+        image_path: str,
+        palette: CharacterPalette,
+        min_confidence: float = 0.35,
+    ) -> list[RecognizedCharacter]:
+        """
+        Zero-shot offline character recognition using pre-trained CLIP vision-language transformer.
+        Locates candidate panels/figures and performs zero-shot classification against character descriptions.
+        """
+        model, processor, device = self._ensure_clip()
+        if model is None or processor is None:
+            return []
+
+        pil_img = Image.open(image_path).convert("RGB")
+        w_img, h_img = pil_img.size
+
+        cv_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if cv_img is None:
+            cv_img = np.array(pil_img.convert("L"))
+
+        candidate_boxes = self._extract_candidate_boxes(cv_img)
+        if not candidate_boxes:
+            candidate_boxes = [(int(0.05 * h_img), int(0.05 * w_img), int(0.95 * h_img), int(0.95 * w_img))]
+
+        series = getattr(palette, "preset_title", None) or getattr(palette, "title", None) or "manga"
+        prompts = [
+            f"manga drawing of {c.name} from {series}" + (f", {c.notes}" if c.notes else "")
+            for c in palette.characters
+        ]
+        neutral_prompt = "manga speech bubble, sound effect, or scenery background without characters"
+        all_prompts = prompts + [neutral_prompt]
+        num_chars = len(palette.characters)
+
+        # Collect candidate crops
+        valid_boxes: list[tuple[int, int, int, int]] = []
+        crops: list[Image.Image] = []
+        for y0, x0, y1, x1 in candidate_boxes:
+            bh = y1 - y0
+            bw = x1 - x0
+            if bh >= 30 and bw >= 30:
+                valid_boxes.append((y0, x0, y1, x1))
+                crops.append(pil_img.crop((x0, y0, x1, y1)))
+
+        if not crops:
+            valid_boxes = [(0, 0, h_img, w_img)]
+            crops = [pil_img]
+
+        inputs = processor(
+            text=all_prompts,
+            images=crops,
+            return_tensors="pt",
+            padding=True,
+        ).to(device)
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+            probs_matrix = outputs.logits_per_image.softmax(dim=1).cpu().numpy()
+
+        recognized_candidates: list[RecognizedCharacter] = []
+        for (y0, x0, y1, x1), probs in zip(valid_boxes, probs_matrix):
+            top_idx = int(np.argmax(probs))
+            top_prob = float(probs[top_idx])
+
+            # If the candidate crop was classified as neutral background/bubble, skip
+            if top_idx >= num_chars:
+                continue
+
+            char_probs = probs[:num_chars]
+            char_sum = float(np.sum(char_probs))
+            rel_conf = (top_prob / char_sum) if char_sum > 0 else top_prob
+
+            if top_prob >= min_confidence or (rel_conf >= 0.50 and top_prob >= 0.18):
+                matched_char = palette.characters[top_idx]
+                norm_box = (
+                    round(y0 / float(h_img), 4),
+                    round(x0 / float(w_img), 4),
+                    round(y1 / float(h_img), 4),
+                    round(x1 / float(w_img), 4),
+                )
+                effective_conf = min(0.99, round(max(top_prob, rel_conf * 0.85), 2))
+                recognized_candidates.append(
+                    RecognizedCharacter(
+                        name=matched_char.name,
+                        confidence=effective_conf,
+                        bounding_box=norm_box,
+                        detection_method="offline_clip_ai",
+                        matched_features=[
+                            f"clip_score:{top_prob:.2f}",
+                            f"rel_score:{rel_conf:.2f}",
+                        ],
+                    )
+                )
+
+        # Deduplicate per character: keep highest confidence
+        best_per_char: dict[str, RecognizedCharacter] = {}
+        for rc in recognized_candidates:
+            if rc.name not in best_per_char or rc.confidence > best_per_char[rc.name].confidence:
+                best_per_char[rc.name] = rc
+
+        return sorted(best_per_char.values(), key=lambda x: x.confidence, reverse=True)
+
+    def _recognize_heuristics(
+        self,
+        image_path: str,
+        palette: CharacterPalette,
+        page_text: str = "",
+        min_confidence: float = 0.35,
+    ) -> list[RecognizedCharacter]:
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return [
+                RecognizedCharacter(
+                    name=palette.characters[0].name,
+                    confidence=0.35,
+                    bounding_box=None,
+                    detection_method="fallback_principal",
+                    matched_features=["fallback"],
+                )
+            ]
+
+        h, w = img.shape
+
+        # 1. Text keyword search if text is provided
+        text_matched_chars: dict[str, float] = {}
+        if page_text:
+            text_lower = page_text.lower()
+            for ch in palette.characters:
+                for kw in ch.keywords:
+                    if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
+                        text_matched_chars[ch.name] = max(
+                            text_matched_chars.get(ch.name, 0.0), 0.75
+                        )
+                        break
+
+        # 2. Candidate panel / figure detection
+        candidate_boxes = self._extract_candidate_boxes(img)
+
+        recognized_candidates: list[RecognizedCharacter] = []
+
+        for y0, x0, y1, x1 in candidate_boxes:
+            box_h = y1 - y0
+            box_w = x1 - x0
+            if box_h < 30 or box_w < 30:
+                continue
+
+            crop = img[y0:y1, x0:x1]
+            features_found: list[str] = []
+
+            # (a) Proportions
+            aspect = box_w / float(box_h)
+            h_ratio = box_h / float(h)
+            if aspect > 0.52 and h_ratio < 0.40:
+                features_found.append("chibi")
+            else:
+                features_found.append("standard_body")
+
+            # (b) Hair tone in upper 35%
+            head_h = max(10, int(box_h * 0.35))
+            head_roi = crop[:head_h, :]
+            total_head_px = head_roi.size
+            if total_head_px > 0:
+                black_ratio = np.sum(head_roi < 55) / float(total_head_px)
+                screentone_ratio = (
+                    np.sum((head_roi >= 60) & (head_roi <= 180)) / float(total_head_px)
+                )
+                light_ratio = np.sum(head_roi > 205) / float(total_head_px)
+
+                if black_ratio >= 0.13:
+                    features_found.append("black_hair")
+                elif screentone_ratio >= 0.16:
+                    features_found.append("screentone_hair")
+                elif light_ratio >= 0.70:
+                    features_found.append("light_hair")
+
+            # (c) Headwear / Straw hat in upper 22%
+            brim_roi_h = max(8, int(box_h * 0.22))
+            brim_roi = crop[:brim_roi_h, :]
+            if brim_roi.shape[0] > 5 and brim_roi.shape[1] > 20:
+                brim_bin = (brim_roi < 185).astype(np.uint8) * 255
+                h_k = cv2.getStructuringElement(
+                    cv2.MORPH_RECT, (max(7, int(box_w * 0.30)), 2)
+                )
+                h_lines = cv2.morphologyEx(brim_bin, cv2.MORPH_OPEN, h_k)
+                if np.sum(h_lines > 0) > (0.10 * brim_roi.size):
+                    features_found.append("straw_hat")
+                    features_found.append("hat")
+
+            # (d) Glasses in face area
+            face_y0 = int(box_h * 0.12)
+            face_y1 = int(box_h * 0.38)
+            face_x0 = int(box_w * 0.15)
+            face_x1 = int(box_w * 0.85)
+            if face_y1 - face_y0 > 15 and face_x1 - face_x0 > 25:
+                face_roi = crop[face_y0:face_y1, face_x0:face_x1]
+                edges = cv2.Canny(face_roi, 60, 160)
+                fcnts, _ = cv2.findContours(
+                    edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                circular_count = 0
+                for fc in fcnts:
+                    fperi = cv2.arcLength(fc, True)
+                    if fperi >= 16:
+                        farea = cv2.contourArea(fc)
+                        circ = 4.0 * np.pi * (farea / (fperi * fperi + 1e-6))
+                        if 0.45 <= circ <= 1.2:
+                            circular_count += 1
+                if circular_count >= 1:
+                    features_found.append("glasses")
+
+            # (e) Compare features against each character in palette
+            norm_box = (
+                round(y0 / float(h), 4),
+                round(x0 / float(w), 4),
+                round(y1 / float(h), 4),
+                round(x1 / float(w), 4),
+            )
+
+            for ch_idx, ch in enumerate(palette.characters):
+                score = 0.0
+                matched_traits = []
+
+                # Text keyword boost
+                if ch.name in text_matched_chars:
+                    score += 0.50
+                    matched_traits.append("name_in_dialogue")
+
+                # Hair match
+                if "black_hair" in ch.visual_traits and "black_hair" in features_found:
+                    score += 0.35
+                    matched_traits.append("black_hair")
+                elif (
+                    "screentone_hair" in ch.visual_traits
+                    and "screentone_hair" in features_found
+                ):
+                    score += 0.35
+                    matched_traits.append("screentone_hair")
+                elif "light_hair" in ch.visual_traits and "light_hair" in features_found:
+                    score += 0.30
+                    matched_traits.append("light_hair")
+
+                # Headwear / Hat match
+                if "straw_hat" in ch.visual_traits and "straw_hat" in features_found:
+                    score += 0.35
+                    matched_traits.append("straw_hat")
+                elif "hat" in ch.visual_traits and "hat" in features_found:
+                    score += 0.20
+                    matched_traits.append("hat")
+                elif "winged_cap" in ch.visual_traits and (
+                    "hat" in features_found or "chibi" in features_found
+                ):
+                    score += 0.25
+                    matched_traits.append("winged_cap")
+
+                # Glasses match
+                if "glasses" in ch.visual_traits and "glasses" in features_found:
+                    score += 0.35
+                    matched_traits.append("glasses")
+
+                # Body shape match
+                if "chibi" in ch.visual_traits and "chibi" in features_found:
+                    score += 0.20
+                    matched_traits.append("chibi")
+                elif (
+                    "standard_body" in ch.visual_traits
+                    and "standard_body" in features_found
+                ):
+                    score += 0.10
+                    matched_traits.append("standard_body")
+
+                # Protagonist slight prior
+                if ch_idx == 0:
+                    score += 0.08
+
+                if score >= min_confidence:
+                    recognized_candidates.append(
+                        RecognizedCharacter(
+                            name=ch.name,
+                            confidence=min(0.99, round(score, 2)),
+                            bounding_box=norm_box,
+                            detection_method="visual_heuristic",
+                            matched_features=matched_traits,
+                        )
+                    )
+
+        # Filter duplicates per character: keep highest confidence bounding box
+        best_per_char: dict[str, RecognizedCharacter] = {}
+        for rc in recognized_candidates:
+            if rc.name not in best_per_char or rc.confidence > best_per_char[rc.name].confidence:
+                best_per_char[rc.name] = rc
+
+        results = sorted(best_per_char.values(), key=lambda x: x.confidence, reverse=True)
+
+        if not results and palette.characters:
+            results = [
+                RecognizedCharacter(
+                    name=palette.characters[0].name,
+                    confidence=0.35,
+                    bounding_box=None,
+                    detection_method="fallback_principal",
+                    matched_features=["principal_default"],
+                )
+            ]
+
+        return results
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -327,6 +1383,7 @@ class MangaColorizerEngine:
 
         self.colorizer_model: Optional[Any] = None
         self.denoiser: Optional[Any] = None
+        self.recognizer = MangaCharacterRecognizer()
         self._init_models()
 
     def _ensure_weights(self):
@@ -413,6 +1470,10 @@ class MangaColorizerEngine:
         line_preserve: float = 0.85,
         skip_if_colored: bool = False,
         character_palette: Optional["CharacterPalette"] = None,
+        denoise_screentone: bool = True,
+        denoise_sigma: int = 25,
+        recognition_mode: str = "auto",
+        skip_recognition: bool = False,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -424,6 +1485,14 @@ class MangaColorizerEngine:
             character_palette:  Optional CharacterPalette whose color hints are
                                 injected into the neural hint tensor to keep hair /
                                 costume colors consistent across panels.
+            denoise_screentone: When True, applies FFDNet screentone denoising to
+                                remove halftone dots before neural colorization while
+                                preserving 100% native ink lines downstream.
+            denoise_sigma:      Denoising noise level (default 25).
+            recognition_mode:   Character recognition mode ("auto", "offline_ai", "heuristics", "gemini").
+            skip_recognition:   When True, skip in-process character recognition entirely.
+                                Use when the caller has already pre-filtered the palette
+                                via active_character_names, avoiding a redundant CLIP scan.
         """
         # ── Early exit: page already has colors ─────────────────────
         if skip_if_colored and is_colored_page(image_path):
@@ -437,10 +1506,47 @@ class MangaColorizerEngine:
                 "output_path": output_path,
             }
 
+        # ── Page-specific Character Recognition & Palette Optimization ──
+        active_palette = character_palette
+        recognized_chars: list[dict] = []
+        if character_palette is not None and character_palette.characters and not skip_recognition:
+            if any(c.bounding_box is not None for c in character_palette.characters):
+                active_palette = character_palette
+                recognized_chars = [
+                    {"name": c.name, "confidence": 1.0, "bounding_box": list(c.bounding_box)}
+                    for c in character_palette.characters
+                    if c.bounding_box
+                ]
+            else:
+                try:
+                    recs = self.recognizer.recognize_page_characters(
+                        image_path=image_path,
+                        palette=character_palette,
+                        api_key=api_key,
+                        model_name=model_name,
+                        recognition_mode=recognition_mode,
+                    )
+                    recognized_chars = [r.to_dict() for r in recs]
+                    active_palette = character_palette.optimize_for_page(recs)
+                except Exception as e:
+                    print(f"[MangaColorizer WARNING] Character recognition error: {e}")
+                    active_palette = character_palette
+        elif skip_recognition and character_palette is not None:
+            # Caller pre-filtered the palette — treat all passed characters as recognized
+            active_palette = character_palette
+            recognized_chars = [
+                {"name": c.name, "confidence": 1.0, "detection_method": "pre_filtered"}
+                for c in character_palette.characters
+            ]
+            print(
+                f"[MangaColorizer] Skipping recognition (pre-filtered palette: "
+                f"{[c.name for c in character_palette.characters]})"
+            )
+
         provider = (model_provider or "resnext_generator").lower()
 
         if provider in ("local_smart", "smart_local"):
-            return self._colorize_local_semantic(
+            res = self._colorize_local_semantic(
                 image_path=image_path,
                 output_path=output_path,
                 model_name=model_name,
@@ -448,9 +1554,10 @@ class MangaColorizerEngine:
                 saturation=saturation,
                 contrast=contrast,
                 line_preserve=line_preserve,
+                character_palette=active_palette,
             )
         elif provider in ("apple_foundation", "apple"):
-            return self._colorize_apple(
+            res = self._colorize_apple(
                 image_path=image_path,
                 output_path=output_path,
                 model_name=model_name,
@@ -459,9 +1566,12 @@ class MangaColorizerEngine:
                 saturation=saturation,
                 contrast=contrast,
                 line_preserve=line_preserve,
+                character_palette=active_palette,
+                denoise_screentone=denoise_screentone,
+                denoise_sigma=denoise_sigma,
             )
         elif provider in ("google_nano", "google"):
-            return self._colorize_google(
+            res = self._colorize_google(
                 image_path=image_path,
                 output_path=output_path,
                 model_name=model_name,
@@ -470,9 +1580,10 @@ class MangaColorizerEngine:
                 saturation=saturation,
                 contrast=contrast,
                 line_preserve=line_preserve,
+                character_palette=active_palette,
             )
         else:
-            return self._colorize_neural(
+            res = self._colorize_neural(
                 image_path=image_path,
                 output_path=output_path,
                 model_provider=provider,
@@ -481,8 +1592,14 @@ class MangaColorizerEngine:
                 saturation=saturation,
                 contrast=contrast,
                 line_preserve=line_preserve,
-                character_palette=character_palette,
+                character_palette=active_palette,
+                denoise_screentone=denoise_screentone,
+                denoise_sigma=denoise_sigma,
             )
+
+        if isinstance(res, dict) and "recognized_characters" not in res:
+            res["recognized_characters"] = recognized_chars
+        return res
 
     # ── Neural ResNeXt Colorizer Engine ─────────────────────────────
 
@@ -497,6 +1614,8 @@ class MangaColorizerEngine:
         contrast: float = 1.1,
         line_preserve: float = 0.85,
         character_palette: Optional["CharacterPalette"] = None,
+        denoise_screentone: bool = True,
+        denoise_sigma: int = 25,
     ) -> dict:
         """
         High-Vibrancy Deep Neural Manga Colorization:
@@ -506,6 +1625,7 @@ class MangaColorizerEngine:
         4. Native Line Art Multiply Blending (zero gamut clipping distortion).
         5. Clean white paper & speech bubble protection.
         6. Optional CharacterPalette hint injection for cross-panel color consistency.
+        7. FFDNet Screentone / Halftone dot noise preprocessing.
         """
         if self.colorizer_model is None:
             print("[MangaColorizer] Neural model not loaded, running local fallback.")
@@ -518,19 +1638,36 @@ class MangaColorizerEngine:
         orig_np = np.array(orig_pil).astype(np.float32) / 255.0
         h_orig, w_orig = orig_np.shape[:2]
 
+        # 1b. Screentone & halftone denoising preprocessor (FFDNet)
+        # Removes dot screentones and compression noise from neural input sketch,
+        # while keeping orig_np untouched for 100% native lineart multiply blending downstream.
+        denoised_sketch = orig_np
+        if denoise_screentone and self.denoiser is not None:
+            try:
+                denoised_bgr = self.denoiser.get_denoised_image(
+                    (orig_np * 255.0).astype(np.uint8), sigma=denoise_sigma
+                )
+                denoised_rgb = cv2.cvtColor(denoised_bgr, cv2.COLOR_BGR2RGB)
+                denoised_sketch = denoised_rgb.astype(np.float32) / 255.0
+            except Exception as e:
+                print(f"[MangaColorizer WARNING] Screentone denoising failed: {e}")
+                denoised_sketch = orig_np
+
         # 2. Optimal inference size (768px for standard, 896px for chroma-hd)
         if "chroma-hd" in (model_name or ""):
             inference_size = 896
         else:
             inference_size = 768
 
-        img_pad, pad = resize_pad_manga(orig_np, size=inference_size)
+        img_pad, pad = resize_pad_manga(denoised_sketch, size=inference_size)
         tens_in = ToTensor()(img_pad).unsqueeze(0).to(self.device)
 
         # 3. Build hint tensor — inject character palette when provided
         _, _, pad_h, pad_w = tens_in.shape
         if character_palette is not None:
-            hint = character_palette.build_hint_tensor(pad_h, pad_w, self.device)
+            hint = character_palette.build_hint_tensor(
+                pad_h, pad_w, self.device, sketch_gray=img_pad[:, :, 0]
+            )
             print(
                 f"[MangaColorizer] Palette hint injected ({len(character_palette.characters)} characters)"
             )
@@ -623,23 +1760,59 @@ class MangaColorizerEngine:
             b = np.clip(b * 1.28, 0, 255)
             color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
 
-        # 7. Native Line Art Multiply Blending (100% crisp ink, no gamut clipping)
+        # 7. Apply Canonical Character Palette Harmonization
+        if character_palette is not None:
+            color_vivid_rgb = apply_character_palette_harmonization(
+                color_vivid_rgb, character_palette
+            )
+
+        # 8. Native Line Art Multiply Blending (100% crisp ink, no midtone crushing)
         gray_orig = cv2.cvtColor(orig_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-        line_multiplier = np.clip(gray_orig / max(0.60, line_preserve), 0.0, 1.0)
+        # Line art multiply blending: preserve 100% ink sharpness on pure black/dark ink lines,
+        # while keeping vibrant midtones uncrushed.
+        ink_threshold = max(0.18, 0.35 * line_preserve)
+        line_multiplier = np.clip((gray_orig - 0.04) / ink_threshold, 0.0, 1.0)
         final_rgb = np.clip(
             color_vivid_rgb.astype(np.float32) * line_multiplier[:, :, np.newaxis], 0, 255
         ).astype(np.uint8)
 
-        # 8. Clean White Margin & Speech Bubble Protection
-        # Protect page borders, gutters, and speech bubbles from any color wash (near white paper >= 242)
-        paper_fade = np.clip((gray_orig * 255.0 - 240.0) / 14.0, 0.0, 1.0)
+        # 9. Clean White Margin & Speech Bubble Protection
+        # Protect page borders, gutters, and speech bubbles from any color wash (near white paper >= 218)
+        paper_fade = np.clip((gray_orig * 255.0 - 218.0) / 26.0, 0.0, 1.0)
         for c in range(3):
             final_rgb[:, :, c] = (
                 final_rgb[:, :, c].astype(np.float32) * (1.0 - paper_fade)
                 + orig_rgb[:, :, c].astype(np.float32) * paper_fade
             ).astype(np.uint8)
 
-        # 9. Convert RGB to BGR for cv2.imwrite output
+        # Enclosed speech bubble detection: protect dialogue bubbles so they stay pure crisp white
+        try:
+            paper_u = (gray_orig * 255.0 >= 205.0).astype(np.uint8) * 255
+            contours, hierarchy = cv2.findContours(paper_u, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            if hierarchy is not None and len(hierarchy[0]) > 0:
+                bubble_mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
+                for cnt, hier in zip(contours, hierarchy[0]):
+                    if hier[2] != -1:  # Contour has inner child strokes (text in dialogue bubble)
+                        area = cv2.contourArea(cnt)
+                        if 600 < area < 0.35 * h_orig * w_orig:
+                            bx, by, bw, bh = cv2.boundingRect(cnt)
+                            aspect = bw / float(max(1, bh))
+                            if 0.25 <= aspect <= 3.2 and bw < 0.7 * w_orig and bh < 0.6 * h_orig:
+                                child_idx = hier[2]
+                                child_count = 0
+                                while child_idx != -1:
+                                    child_count += 1
+                                    child_idx = hierarchy[0][child_idx][0]
+                                if child_count >= 2:
+                                    cv2.drawContours(bubble_mask, [cnt], -1, 255, -1)
+                if np.any(bubble_mask > 0):
+                    mask_idx = (bubble_mask > 0) & (gray_orig >= 0.80)
+                    for c in range(3):
+                        final_rgb[mask_idx, c] = orig_rgb[mask_idx, c]
+        except Exception as e:
+            print(f"[MangaColorizer WARNING] Speech bubble protection: {e}")
+
+        # 10. Convert RGB to BGR for cv2.imwrite output
         final_bgr = cv2.cvtColor(final_rgb, cv2.COLOR_RGB2BGR)
 
         # Save to output file
@@ -664,6 +1837,9 @@ class MangaColorizerEngine:
         saturation: float,
         contrast: float,
         line_preserve: float,
+        character_palette: Optional["CharacterPalette"] = None,
+        denoise_screentone: bool = True,
+        denoise_sigma: int = 25,
     ) -> dict:
         """
         Apple Silicon Foundation Engine with P3 Wide Color Gamut & Neural Engine vibrance.
@@ -688,6 +1864,9 @@ class MangaColorizerEngine:
             saturation=saturation * sat_boost,
             contrast=contrast * cont_boost,
             line_preserve=line_preserve,
+            character_palette=character_palette,
+            denoise_screentone=denoise_screentone,
+            denoise_sigma=denoise_sigma,
         )
         res["engine"] = f"Apple Foundation Model (MPS Neural Engine - {model_name or 'CoreML'})"
         return res
@@ -725,18 +1904,41 @@ class MangaColorizerEngine:
         saturation: float,
         contrast: float,
         line_preserve: float,
+        character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
         """
         Google Multimodal AI Engine (Nano Banana / Gemini 2.0 / Imagen 3).
         Produces vibrant anime colorization matching the Gemini demo standard:
         - Speech bubbles kept pure white with crisp black text
-        - Character semantics (Arale violet/purple hair, peach skin, blush)
+        - Dynamic character semantics & canonical palette guidance
         - Outdoor blue sky gradients and lush green foliage
         - Sound effects styled with comic yellow & purple accents
         """
         key = (
             api_key or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
         )
+
+        # Build dynamic character color guidance from active palette if present
+        if character_palette and character_palette.characters:
+            char_items = []
+            for c in character_palette.characters:
+                parts = []
+                if c.hair_hex:
+                    parts.append(f"hair {c.hair_hex}")
+                if c.skin_hex:
+                    parts.append(f"skin {c.skin_hex}")
+                if c.costume_hex:
+                    parts.append(f"costume {c.costume_hex}")
+                if c.extra_hex:
+                    parts.append(f"accents {c.extra_hex}")
+                if parts:
+                    char_items.append(f"{c.name} ({', '.join(parts)})")
+            if char_items:
+                char_guidance = "2. Canonical Characters & Colors: " + "; ".join(char_items) + ". "
+            else:
+                char_guidance = "2. Characters: Keep authentic anime colors matching official Japanese colored editions. "
+        else:
+            char_guidance = "2. Characters: Authentic anime colors with natural peach skin, distinct hair, and coordinated outfits. "
 
         # When no API key is provided, check if demo exemplar pair matches demo/original.png
         if not key:
@@ -794,22 +1996,33 @@ class MangaColorizerEngine:
 
                 # Map frontend nicknames/selectors to actual Google Gemini / Imagen models
                 GOOGLE_MODEL_MAP = {
-                    "nano-banana": "gemini-2.0-flash-exp",
-                    "google_nano": "gemini-2.0-flash-exp",
-                    "gemini-2.0-flash": "gemini-2.0-flash-exp",
-                    "gemini-1.5-flash": "gemini-1.5-flash",
+                    # Gemini 3.x Image Generation & Multimodal Editing (Nano Banana)
+                    "gemini-3.1-flash-image": "gemini-3.1-flash-image",
+                    "gemini-3-pro-image": "gemini-3-pro-image",
+                    "gemini-3.1-flash-lite-image": "gemini-3.1-flash-lite-image",
+                    "gemini-2.5-flash-image": "gemini-2.5-flash-image",
+                    "nano-banana": "gemini-3.1-flash-image",
+                    "google_nano": "gemini-3.1-flash-image",
+                    "gemini-2.0-flash": "gemini-3.1-flash-image",
+                    "gemini-2.0-flash-exp": "gemini-2.0-flash-exp",
+                    "gemini-1.5-flash": "gemini-3.1-flash-image",
                     "imagen-3.0-generate-002": "imagen-3.0-generate-002",
                 }
                 target_model = GOOGLE_MODEL_MAP.get(
-                    model_name, model_name or "gemini-2.0-flash-exp"
+                    model_name, model_name or "gemini-3.1-flash-image"
                 )
 
                 if "imagen" in target_model.lower():
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key={key}"
+                    if character_palette and character_palette.characters:
+                        char_desc = ", ".join(f"{c.name} ({c.costume_hex})" for c in character_palette.characters[:3])
+                        prompt_inst = f"Full vibrant anime colorization of manga page, canonical colors: {char_desc}, blue sky, white speech bubbles."
+                    else:
+                        prompt_inst = "Full vibrant anime colorization of manga page, vibrant anime colors, peach skin, blue sky, white speech bubbles."
                     body = {
                         "instances": [
                             {
-                                "prompt": "Full vibrant anime colorization of black and white manga page, Arale purple hair, peach skin, blue sky, white speech bubbles."
+                                "prompt": prompt_inst
                             }
                         ],
                         "parameters": {"sampleCount": 1, "aspectRatio": "3:4"},
@@ -833,13 +2046,12 @@ class MangaColorizerEngine:
                         api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
                         print(f"[Google Imagen API Error] {api_error_reason}")
                 else:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={key}"
                     prompt_text = (
                         "Colorize this black and white manga page in full vibrant anime style matching official Japanese color manga editions. "
                         "Guidelines: "
                         "1. Speech bubbles: Keep all speech bubble interiors pure white (#ffffff) with crisp black dialogue text. "
-                        "2. Characters: Arale Norimaki has vivid violet/purple hair, warm peach skin, and rosy cheeks; Dr. Senbei Norimaki has warm peach skin, black hair, purple/grey vest; robot body has cobalt blue torso, red limbs, yellow joints. "
-                        "3. Environment: Bright blue gradient sky, lush green foliage, terracotta roof tiles, and glowing emerald green/magenta chemistry flasks. "
+                        f"{char_guidance}"
+                        "3. Environment: Bright blue gradient sky, lush green foliage, terracotta roof tiles, and glowing chemistry flasks. "
                         "4. Sound effects: Color onomatopoeia with bright anime comic colors (yellow/orange or purple). "
                         "5. Preserve original line art, panel borders, and text cleanly."
                     )
@@ -852,30 +2064,46 @@ class MangaColorizerEngine:
                                 ]
                             }
                         ],
-                        "generationConfig": {"responseModalities": ["IMAGE"]},
+                        "generationConfig": {
+                            "responseModalities": ["TEXT", "IMAGE"],
+                            "temperature": 0.4,
+                        },
                     }
-                    resp = requests.post(
-                        url, json=body, headers={"Content-Type": "application/json"}, timeout=45
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            for part in parts:
-                                if "inlineData" in part and "data" in part["inlineData"]:
-                                    img_bytes = base64.b64decode(part["inlineData"]["data"])
-                                    self._blend_and_save_api_result(
-                                        img_bytes, image_path, output_path, line_preserve
-                                    )
-                                    return {
-                                        "status": "success",
-                                        "engine": f"Google Gemini Nano Banana ({target_model})",
-                                        "output_path": output_path,
-                                    }
-                    else:
-                        api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
-                        print(f"[Google Gemini API Error] {api_error_reason}")
+
+                    candidate_models = [target_model]
+                    if target_model == "gemini-3.1-flash-image":
+                        candidate_models.extend(["gemini-2.5-flash-image", "gemini-2.0-flash-exp"])
+                    elif target_model not in ["gemini-3.1-flash-image"]:
+                        candidate_models.append("gemini-3.1-flash-image")
+
+                    for model_candidate in candidate_models:
+                        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_candidate}:generateContent?key={key}"
+                        resp = requests.post(
+                            url, json=body, headers={"Content-Type": "application/json"}, timeout=45
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                parts = candidates[0].get("content", {}).get("parts", [])
+                                for part in parts:
+                                    inline = part.get("inlineData") or part.get("inline_data")
+                                    if inline and "data" in inline:
+                                        img_bytes = base64.b64decode(inline["data"])
+                                        self._blend_and_save_api_result(
+                                            img_bytes, image_path, output_path, line_preserve
+                                        )
+                                        return {
+                                            "status": "success",
+                                            "engine": f"Google Gemini ({model_candidate})",
+                                            "output_path": output_path,
+                                        }
+                        else:
+                            api_error_reason = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                            print(f"[Google Gemini API Error - {model_candidate}] {api_error_reason}")
+                            if resp.status_code != 404:
+                                # Stop cascade on authentication or quota errors
+                                break
             except Exception as e:
                 api_error_reason = str(e)
                 print(f"[Google Gemini API Error] {e}")
@@ -891,6 +2119,7 @@ class MangaColorizerEngine:
             saturation=saturation * 1.35,
             contrast=contrast * 1.10,
             line_preserve=line_preserve,
+            character_palette=character_palette,
         )
         if api_error_reason:
             res["engine"] = (
@@ -912,6 +2141,7 @@ class MangaColorizerEngine:
         saturation: float,
         contrast: float,
         line_preserve: float,
+        character_palette: Optional["CharacterPalette"] = None,
     ) -> dict:
         """
         Authentic Offline Multi-Region Semantic Engine:
@@ -973,6 +2203,12 @@ class MangaColorizerEngine:
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
         hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation * 1.3, 0, 255)
         bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+        # Harmonize with character palette presets if active
+        if character_palette is not None and character_palette.characters:
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rgb = apply_character_palette_harmonization(rgb, character_palette)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
         self._write_optimized_image(output_path, bgr, quality=88)
 

@@ -32,22 +32,47 @@ BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 TEST_KEYWORDS = [
     "test",
     "sample",
+    "dummy",
     "cancel",
     "switch",
-    "kindle_test",
-    "batch_test",
-    "preview_manga",
+    "kindle",
+    "batch",
+    "preview",
     "exp_page",
-    "test_export",
-    "test_vol",
+    "manga_vol",
+    "manga_volume",
+    "vol_01",
+    "vol_02",
+    "vol_03",
+    "api_split",
+    "api_orig_sync",
+    "sess_epub",
+    "sess_pdf",
+    "sess_mobi",
+    "import_test",
+    "split_test",
+    "custom_size",
+    "huge_omnibus",
+    "omnibus_200mb",
+    "huge_manga",
+    "single_original",
+    "multi_original",
+    "epic_manga",
+    "amazon_kindle",
+    "progress_test",
+    "single_image_test",
+    "ranma",
+    "inuyasha",
+    "resnext",
+    "multicolor",
+    "skip_colored",
 ]
 
 TMP_TEST_PATTERNS = [
     "/tmp/sample_*",
-    "/tmp/*test*.png",
-    "/tmp/*test*.pdf",
-    "/tmp/*test*.epub",
-    "/tmp/*test*.mobi",
+    "/tmp/dummy.*",
+    "/tmp/dummy_*",
+    "/tmp/import_test*",
     "/tmp/manga_test*",
     "/tmp/cancel_test*",
     "/tmp/switch_test*",
@@ -57,7 +82,54 @@ TMP_TEST_PATTERNS = [
     "/tmp/test_export*",
     "/tmp/single_image_test*",
     "/tmp/progress_test*",
+    "/tmp/colorized_manga_output.*",
+    "/tmp/colorized_out.*",
+    "/tmp/colorized_test_*",
+    "/tmp/original_test_*",
+    "/tmp/combined_test_*",
+    "/tmp/pure_resnext_*",
+    "/tmp/resnext_*",
+    "/tmp/verified_*",
+    "/tmp/multicolor_test*",
+    "/tmp/huge_*",
+    "/tmp/omnibus_*",
+    "/tmp/test_*",
+    "/tmp/*test*.png",
+    "/tmp/*test*.jpg",
+    "/tmp/*test*.jpeg",
+    "/tmp/*test*.webp",
+    "/tmp/*test*.pdf",
+    "/tmp/*test*.epub",
+    "/tmp/*test*.mobi",
+    "/tmp/*test*.zip",
+    "/tmp/*test*.cbz",
 ]
+
+
+def is_authentic_user_manga(name: str = "", title: str = "", sid: str = "") -> bool:
+    """Identifies authentic user manga collections (such as Dr. Slump or One Piece)
+    that must be preserved by default unless --all is specified."""
+    text = f"{name} {title} {sid}".lower()
+    # Explicit test markers always take precedence (e.g. api_orig_sync_OnePiece_Vol_01)
+    test_markers = [
+        "test",
+        "sample",
+        "dummy",
+        "api_orig_sync",
+        "api_split",
+        "import_test",
+        "split_test",
+        "custom_size",
+    ]
+    if any(m in text for m in test_markers):
+        return False
+
+    # Authentic user manga series
+    if "slump" in text:
+        return True
+    if "one piece" in text or "onepiece" in text or "eiichiro oda" in text:
+        return True
+    return False
 
 
 def format_bytes(size_bytes: int) -> str:
@@ -101,7 +173,11 @@ def cleanup_via_api(purge_all: bool = False, session_ids: list = None) -> dict:
 
 
 def run_cleanup(
-    purge_all: bool = False, keep_slump: bool = True, clean_tmp: bool = True, dry_run: bool = False
+    purge_all: bool = False,
+    keep_slump: bool = True,
+    clean_tmp: bool = True,
+    dry_run: bool = False,
+    verbose: bool = False,
 ) -> dict:
     """Main cleanup routine."""
     total_freed = 0
@@ -117,9 +193,9 @@ def run_cleanup(
         if api_result and api_result.get("status") == "success":
             total_freed += api_result.get("freed_bytes", 0)
             for sid in api_result.get("cleaned_sessions", []):
-                deleted_sessions.append((sid, 0))
+                deleted_sessions.append((Path(sid), 0))
             for _ in range(api_result.get("cleaned_output_files", 0)):
-                deleted_outputs.append(("api_output", 0))
+                deleted_outputs.append((Path("api_output"), 0))
 
     # 1. Scan and clean sessions
     if SESSIONS_DIR.exists():
@@ -139,8 +215,8 @@ def run_cleanup(
                 except Exception:
                     pass
 
-            is_user_slump = "slump" in fn or "slump" in title or "slump" in sid.lower()
-            if keep_slump and is_user_slump and not purge_all:
+            is_user = is_authentic_user_manga(name=fn, title=title, sid=sid)
+            if keep_slump and is_user and not purge_all:
                 continue
 
             should_delete = purge_all
@@ -170,8 +246,8 @@ def run_cleanup(
             if not up_file.is_file():
                 continue
             name_lower = up_file.name.lower()
-            is_slump = "slump" in name_lower
-            if keep_slump and is_slump and not purge_all:
+            is_user = is_authentic_user_manga(name=name_lower)
+            if keep_slump and is_user and not purge_all:
                 continue
 
             prefix = up_file.name.split("_")[0]
@@ -195,8 +271,8 @@ def run_cleanup(
             if not out_file.is_file():
                 continue
             name_lower = out_file.name.lower()
-            is_slump = "slump" in name_lower
-            if keep_slump and is_slump and not purge_all:
+            is_user = is_authentic_user_manga(name=name_lower)
+            if keep_slump and is_user and not purge_all:
                 continue
 
             prefix = out_file.name.split("_")[0]
@@ -205,11 +281,8 @@ def run_cleanup(
                 if any(kw in name_lower for kw in TEST_KEYWORDS):
                     should_delete = True
                 elif name_lower.startswith("combined_") or name_lower.startswith("batch_"):
-                    # Delete test combined & batch exports
-                    if any(
-                        kw in name_lower
-                        for kw in ["test", "sample", "cancel", "switch", "progress", "kindle"]
-                    ):
+                    # Delete combined & batch outputs unless they belong to authentic user collections
+                    if not is_user:
                         should_delete = True
                 elif prefix not in remaining_sids:
                     should_delete = True
@@ -223,8 +296,12 @@ def run_cleanup(
 
     # 4. Clean /tmp test files
     if clean_tmp:
+        seen_tmps = set()
         for pat in TMP_TEST_PATTERNS:
             for tmp_path_str in glob.glob(pat):
+                if tmp_path_str in seen_tmps:
+                    continue
+                seen_tmps.add(tmp_path_str)
                 t_path = Path(tmp_path_str)
                 sz = get_path_size(t_path)
                 total_freed += sz
@@ -243,6 +320,10 @@ def run_cleanup(
         "uploads_count": len(deleted_uploads),
         "outputs_count": len(deleted_outputs),
         "tmps_count": len(deleted_tmps),
+        "deleted_sessions": [str(p[0]) for p in deleted_sessions],
+        "deleted_uploads": [str(p[0]) for p in deleted_uploads],
+        "deleted_outputs": [str(p[0]) for p in deleted_outputs],
+        "deleted_tmps": [str(p[0]) for p in deleted_tmps],
         "api_used": api_result is not None,
     }
 
@@ -258,13 +339,20 @@ def main():
     parser.add_argument(
         "--no-tmp", action="store_true", help="Skip cleaning temporary files in /tmp."
     )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Display individual deleted file paths."
+    )
     args = parser.parse_args()
 
     action = "SIMULATING CLEANUP (DRY-RUN)" if args.dry_run else "CLEANING TEST DATA"
     print(f"=== {action} ===")
 
     res = run_cleanup(
-        purge_all=args.all, keep_slump=not args.all, clean_tmp=not args.no_tmp, dry_run=args.dry_run
+        purge_all=args.all,
+        keep_slump=not args.all,
+        clean_tmp=not args.no_tmp,
+        dry_run=args.dry_run,
+        verbose=args.verbose,
     )
 
     print(f"Sessions cleaned:   {res['sessions_count']}")
@@ -274,6 +362,25 @@ def main():
     print(f"Total space freed:  {res['freed_formatted']}")
     if res["api_used"]:
         print("Server in-memory state was also synced via API.")
+
+    if args.verbose:
+        if res["deleted_sessions"]:
+            print("\nCleaned Sessions:")
+            for s in res["deleted_sessions"]:
+                print(f"  - {s}")
+        if res["deleted_uploads"]:
+            print("\nCleaned Uploads:")
+            for u in res["deleted_uploads"]:
+                print(f"  - {u}")
+        if res["deleted_outputs"]:
+            print("\nCleaned Outputs:")
+            for o in res["deleted_outputs"]:
+                print(f"  - {o}")
+        if res["deleted_tmps"]:
+            print("\nCleaned /tmp files:")
+            for t in res["deleted_tmps"]:
+                print(f"  - {t}")
+
     print("=== Cleanup Complete ===")
 
 
