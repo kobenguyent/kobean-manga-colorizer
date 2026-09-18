@@ -558,7 +558,7 @@ document.addEventListener("DOMContentLoaded", () => {
           if (expCard) expCard.classList.add("hidden");
           const btnStart = document.getElementById("btn-start-colorize");
           if (btnStart) btnStart.disabled = true;
-          subscribeToProgressStream(data.session_id);
+          subscribeToProgressStream(data.session_id, true);
         } else if (data.pages[0].status === "colorized") {
           openSplitPreview(0, true);
         }
@@ -1483,7 +1483,14 @@ function renderDocumentQueue() {
     queueList.classList.remove("hidden");
     if (batchColorizeBtn) {
       batchColorizeBtn.classList.remove("hidden");
-      if (batchCountText) batchCountText.innerText = count;
+      const pendingCount = activeSessions.filter(s => s.status !== "completed").length;
+      if (pendingCount > 0 && pendingCount < count) {
+        batchColorizeBtn.innerHTML = `<i class="ri-play-list-2-line"></i> Continue Pending (<span id="batch-count-text">${pendingCount}</span>)`;
+        batchColorizeBtn.title = `Continue colorizing ${pendingCount} pending document${pendingCount === 1 ? "" : "s"}`;
+      } else {
+        batchColorizeBtn.innerHTML = `<i class="ri-magic-line"></i> Colorize All (<span id="batch-count-text">${count}</span>)`;
+        batchColorizeBtn.title = `Colorize all ${count} documents`;
+      }
       batchColorizeBtn.disabled = isBatchColorizing;
     }
     if (sidebarBatchExport) sidebarBatchExport.classList.remove("hidden");
@@ -1543,6 +1550,15 @@ function renderDocumentQueue() {
       </div>
       <div class="doc-queue-top-actions">
         <span class="page-status-badge doc-queue-status-badge ${statusBadgeClass}" id="doc-queue-badge-${sess.session_id}">${statusHTML}</span>
+        ${(sess.status === "processing" || sess.is_active) ? `
+          <button class="btn-icon doc-pause-btn" title="Pause / Cancel colorization for ${sess.filename}" onclick="cancelDocumentColorization(event, '${sess.session_id}')">
+            <i class="ri-pause-line"></i>
+          </button>
+        ` : (sess.status !== "completed" && sess.total_pages > 0) ? `
+          <button class="btn-icon doc-resume-btn" title="Resume / Continue colorizing ${sess.filename}" onclick="resumeDocument(event, '${sess.session_id}')">
+            <i class="ri-play-line"></i>
+          </button>
+        ` : ""}
         <button class="btn-icon doc-delete-btn" title="Delete ${sess.filename}" onclick="deleteDocument(event, '${sess.session_id}')">
           <i class="ri-delete-bin-line"></i>
         </button>
@@ -1610,6 +1626,61 @@ async function deleteSelectedQueueDocuments(event) {
   await executeBulkDeletion(sessionIdsToDelete);
 }
 
+async function resumeDocument(event, sessionId) {
+  if (event) event.stopPropagation();
+  try {
+    showToast("Resuming colorization...", "info");
+    const resp = await fetch(`/api/colorize/resume/${sessionId}`, { method: "POST" });
+    const data = await resp.json();
+    if (resp.ok) {
+      if (!currentSession || currentSession.session_id !== sessionId) {
+        await switchActiveDocument(sessionId);
+      }
+      document.getElementById("progress-card")?.classList.remove("hidden");
+      document.getElementById("export-card")?.classList.add("hidden");
+      const btnStart = document.getElementById("btn-start-colorize");
+      if (btnStart) btnStart.disabled = true;
+      subscribeToProgressStream(sessionId, true);
+      renderDocumentQueue();
+    } else {
+      showToast(data.detail || "Could not resume colorization", "error");
+    }
+  } catch (err) {
+    showToast(`Error resuming: ${err.message}`, "error");
+  }
+}
+window.resumeDocument = resumeDocument;
+
+async function cancelDocumentColorization(event, sessionId) {
+  if (event) event.stopPropagation();
+  try {
+    const resp = await fetch(`/api/colorize/cancel/${sessionId}`, { method: "POST" });
+    if (resp.ok) {
+      showToast("Colorization paused/cancelled", "info");
+      if (eventSource && currentSession && currentSession.session_id === sessionId) {
+        eventSource.close();
+        eventSource = null;
+      }
+      const s = activeSessions.find(x => x.session_id === sessionId);
+      if (s) {
+        s.status = "cancelled";
+        s.is_active = false;
+      }
+      if (currentSession && currentSession.session_id === sessionId) {
+        currentSession.status = "cancelled";
+        document.getElementById("progress-card")?.classList.add("hidden");
+        const btnStart = document.getElementById("btn-start-colorize");
+        if (btnStart) btnStart.disabled = false;
+        updateSelectionUI();
+      }
+      renderDocumentQueue();
+    }
+  } catch (err) {
+    showToast(`Error cancelling: ${err.message}`, "error");
+  }
+}
+window.cancelDocumentColorization = cancelDocumentColorization;
+
 async function switchActiveDocument(sessionId) {
   if (currentSession && currentSession.session_id === sessionId) return;
 
@@ -1636,7 +1707,7 @@ async function switchActiveDocument(sessionId) {
         if (progCard) progCard.classList.remove("hidden");
         if (expCard) expCard.classList.add("hidden");
         if (btnStart) btnStart.disabled = true;
-        subscribeToProgressStream(sessionId);
+        subscribeToProgressStream(sessionId, true);
       } else if (data.status === "completed") {
         if (!isBatchColorizing && progCard) progCard.classList.add("hidden");
         if (expCard) expCard.classList.remove("hidden");
@@ -1891,11 +1962,18 @@ function updateSelectionUI() {
 
   const btnStart = document.getElementById("btn-start-colorize");
   if (btnStart) {
+    const totalPages = currentSession ? (currentSession.total_pages || (currentSession.pages ? currentSession.pages.length : 0)) : 0;
+    const processedPages = currentSession ? (currentSession.processed_count || 0) : 0;
+    const remainingPages = Math.max(0, totalPages - processedPages);
+
     if (isBatchColorizing) {
       btnStart.disabled = true;
     } else if (count === 0) {
       btnStart.innerHTML = '<i class="ri-checkbox-blank-line"></i> Select Pages to Colorize';
       btnStart.disabled = true;
+    } else if (processedPages > 0 && count === total && remainingPages > 0) {
+      btnStart.innerHTML = `<i class="ri-play-circle-line"></i> Continue Colorizing (${remainingPages} Remaining Pages)`;
+      btnStart.disabled = false;
     } else if (count === total) {
       btnStart.innerHTML = `<i class="ri-magic-line"></i> Start Colorizing All (${total} Pages)`;
       btnStart.disabled = false;
@@ -1976,7 +2054,7 @@ async function startColorization() {
   }
 }
 
-function subscribeToProgressStream(sessionId = null) {
+function subscribeToProgressStream(sessionId = null, autoResume = false) {
   if (eventSource) {
     eventSource.close();
     eventSource = null;
@@ -1985,7 +2063,8 @@ function subscribeToProgressStream(sessionId = null) {
   const targetId = sessionId || (currentSession ? currentSession.session_id : null);
   if (!targetId) return;
 
-  eventSource = new EventSource(`/api/colorize/stream/${targetId}`);
+  const streamUrl = `/api/colorize/stream/${targetId}${autoResume ? "?auto_resume=true" : ""}`;
+  eventSource = new EventSource(streamUrl);
 
   eventSource.onmessage = (e) => {
     const data = JSON.parse(e.data);
@@ -2009,6 +2088,27 @@ function subscribeToProgressStream(sessionId = null) {
         updateColorizedCount();
         return;
       }
+      // If session is idle or pending and not actively running
+      if (!data.is_active && data.session && data.session.status !== "processing") {
+        document.getElementById("progress-card")?.classList.add("hidden");
+        const btnStart = document.getElementById("btn-start-colorize");
+        if (btnStart) btnStart.disabled = false;
+        updateSelectionUI();
+        renderDocumentQueue();
+      }
+    }
+
+    if (data.type === "idle") {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      document.getElementById("progress-card")?.classList.add("hidden");
+      const btnStart = document.getElementById("btn-start-colorize");
+      if (btnStart) btnStart.disabled = false;
+      updateSelectionUI();
+      renderDocumentQueue();
+      return;
     }
 
     if (data.type === "page_update") {
@@ -3023,7 +3123,9 @@ async function startBatchColorization() {
   const linePreserve = parseFloat(document.getElementById("slider-line").value) / 100.0;
   const saturation = parseFloat(document.getElementById("slider-saturation").value) / 10.0;
 
-  const sessionIds = activeSessions.map(s => s.session_id);
+  const pendingSessions = activeSessions.filter(s => s.status !== "completed");
+  const targetSessions = pendingSessions.length > 0 ? pendingSessions : activeSessions;
+  const sessionIds = targetSessions.map(s => s.session_id);
   showToast(`Starting batch colorization for ${sessionIds.length} documents...`, "info");
 
   isBatchColorizing = true;
@@ -3065,7 +3167,7 @@ async function startBatchColorization() {
           if (progCard) progCard.classList.remove("hidden");
           const expCard = document.getElementById("export-card");
           if (expCard) expCard.classList.add("hidden");
-          subscribeToProgressStream(targetSess.session_id);
+          subscribeToProgressStream(targetSess.session_id, true);
         }
       }
     } else {

@@ -94,6 +94,16 @@ SESSIONS: dict[str, dict] = {}
 # session_id -> asyncio.Queue for SSE events
 EVENT_QUEUES: dict[str, list[asyncio.Queue]] = {}
 
+# Active Colorization Tasks tracker
+# session_id -> asyncio.Task
+ACTIVE_COLORIZATION_TASKS: dict[str, asyncio.Task] = {}
+
+
+def is_task_active(session_id: str) -> bool:
+    """Returns True if an asyncio background task is currently running for session_id."""
+    task = ACTIVE_COLORIZATION_TASKS.get(session_id)
+    return task is not None and not task.done()
+
 # Background Directory Import Tasks tracker
 # import_id -> { "import_id": str, "status": "running"|"completed"|"cancelled"|"failed", ... }
 IMPORT_TASKS: dict[str, Any] = {}
@@ -131,80 +141,104 @@ def save_session_meta(session_id: str):
 
 def get_or_restore_session(session_id: str) -> Optional[dict]:
     """Retrieves session from memory, or restores from disk if server restarted."""
+    sess = None
     if session_id in SESSIONS:
-        return SESSIONS[session_id]
+        sess = SESSIONS[session_id]
+    else:
+        sess_dir = STORAGE_DIR / session_id
+        if not sess_dir.exists():
+            return None
 
-    sess_dir = STORAGE_DIR / session_id
-    if not sess_dir.exists():
-        return None
+        meta_path = sess_dir / "meta.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    sess = json.load(f)
+                    if "pages" in sess:
+                        sess["processed_count"] = sum(
+                            1 for p in sess["pages"] if p.get("status") == "colorized"
+                        )
+                    if not sess.get("detected_preset") and sess.get("filename"):
+                        detected = detect_manga_preset(sess["filename"])
+                        if detected:
+                            sess["detected_preset"] = detected.id
+                            sess["preset_title"] = detected.title
+                            if not sess.get("recommended_style") and detected.recommended_style:
+                                sess["recommended_style"] = detected.recommended_style
+                    if session_id not in SESSION_PALETTES:
+                        _get_palette(session_id)
+                    SESSIONS[session_id] = sess
+                    if session_id not in EVENT_QUEUES:
+                        EVENT_QUEUES[session_id] = []
+            except Exception as e:
+                print(f"[Session Warning] Error loading meta.json for {session_id}: {e}")
 
-    meta_path = sess_dir / "meta.json"
-    if meta_path.exists():
-        try:
-            with open(meta_path, encoding="utf-8") as f:
-                sess = json.load(f)
-                if "pages" in sess:
-                    sess["processed_count"] = sum(
-                        1 for p in sess["pages"] if p.get("status") == "colorized"
-                    )
-                if not sess.get("detected_preset") and sess.get("filename"):
-                    detected = detect_manga_preset(sess["filename"])
-                    if detected:
-                        sess["detected_preset"] = detected.id
-                        sess["preset_title"] = detected.title
-                        if not sess.get("recommended_style") and detected.recommended_style:
-                            sess["recommended_style"] = detected.recommended_style
-                if session_id not in SESSION_PALETTES:
-                    _get_palette(session_id)
-                SESSIONS[session_id] = sess
-                if session_id not in EVENT_QUEUES:
-                    EVENT_QUEUES[session_id] = []
-                return sess
-        except Exception as e:
-            print(f"[Session Warning] Error loading meta.json for {session_id}: {e}")
-
-    # Fallback auto-recovery from disk session folders
-    orig_dir = sess_dir / "original"
-    if orig_dir.exists():
-        orig_files = sorted(orig_dir.glob("*.*"))
-        if orig_files:
-            pages = []
-            colorized_dir = sess_dir / "colorized"
-            for idx, p_path in enumerate(orig_files):
-                c_path = colorized_dir / p_path.name
-                is_colored = c_path.exists()
-                pages.append(
-                    {
-                        "page_index": idx,
-                        "display_name": f"Page {idx + 1}",
-                        "filename": p_path.name,
-                        "original_path": str(p_path),
-                        "status": "colorized" if is_colored else "pending",
-                        "colorized_url": f"/api/session/{session_id}/image/colorized/{p_path.name}"
-                        if is_colored
-                        else None,
-                        "engine_used": "ResNeXt-50/101 Generator + Vibrant Chroma (MPS)"
-                        if is_colored
-                        else None,
+        # Fallback auto-recovery from disk session folders
+        if not sess:
+            orig_dir = sess_dir / "original"
+            if orig_dir.exists():
+                orig_files = sorted(orig_dir.glob("*.*"))
+                if orig_files:
+                    pages = []
+                    colorized_dir = sess_dir / "colorized"
+                    for idx, p_path in enumerate(orig_files):
+                        c_path = colorized_dir / p_path.name
+                        is_colored = c_path.exists()
+                        pages.append(
+                            {
+                                "page_index": idx,
+                                "display_name": f"Page {idx + 1}",
+                                "filename": p_path.name,
+                                "original_path": str(p_path),
+                                "status": "colorized" if is_colored else "pending",
+                                "colorized_url": f"/api/session/{session_id}/image/colorized/{p_path.name}"
+                                if is_colored
+                                else None,
+                                "engine_used": "ResNeXt-50/101 Generator + Vibrant Chroma (MPS)"
+                                if is_colored
+                                else None,
+                            }
+                        )
+                    recovered = {
+                        "session_id": session_id,
+                        "filename": orig_files[0].name,
+                        "file_path": str(orig_files[0]),
+                        "ext": orig_files[0].suffix.lower(),
+                        "total_pages": len(pages),
+                        "pages": pages,
+                        "status": "completed" if all(p["status"] == "colorized" for p in pages) else "idle",
+                        "processed_count": sum(1 for p in pages if p["status"] == "colorized"),
+                        "model_provider": "resnext_generator",
+                        "model_name": "resnext-v2-manga",
                     }
-                )
-            recovered = {
-                "session_id": session_id,
-                "filename": orig_files[0].name,
-                "file_path": str(orig_files[0]),
-                "ext": orig_files[0].suffix.lower(),
-                "total_pages": len(pages),
-                "pages": pages,
-                "status": "completed" if all(p["status"] == "colorized" for p in pages) else "idle",
-                "processed_count": sum(1 for p in pages if p["status"] == "colorized"),
-                "model_provider": "resnext_generator",
-                "model_name": "resnext-v2-manga",
-            }
-            SESSIONS[session_id] = recovered
-            if session_id not in EVENT_QUEUES:
-                EVENT_QUEUES[session_id] = []
+                    SESSIONS[session_id] = recovered
+                    if session_id not in EVENT_QUEUES:
+                        EVENT_QUEUES[session_id] = []
+                    save_session_meta(session_id)
+                    sess = recovered
+
+    if sess:
+        # Sanitize dangling processing status if no task is actually running
+        if sess.get("status") == "processing" and not is_task_active(session_id):
+            pages = sess.get("pages", [])
+            actual_count = sum(1 for p in pages if p.get("status") == "colorized")
+            sess["processed_count"] = actual_count
+            total = sess.get("total_pages", len(pages))
+            if total > 0 and actual_count >= total:
+                sess["status"] = "completed"
+            elif actual_count > 0:
+                sess["status"] = "pending"
+            else:
+                sess["status"] = "idle"
+
+            # Reset any page that was mid-flight back to pending
+            for p in pages:
+                if p.get("status") == "processing":
+                    p["status"] = "pending"
             save_session_meta(session_id)
-            return recovered
+
+        return sess
+
     return None
 
 
@@ -905,10 +939,48 @@ async def notify_sse_listeners(session_id: str, event_data: dict):
 
 
 @app.get("/api/colorize/stream/{session_id}")
-async def stream_progress(session_id: str):
+async def stream_progress(session_id: str, auto_resume: bool = Query(False)):
     sess = get_or_restore_session(session_id)
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    pages = sess.get("pages", [])
+    colorized_dir = STORAGE_DIR / session_id / "colorized"
+    uncolorized_indices = [
+        idx
+        for idx, p in enumerate(pages)
+        if p.get("status") != "colorized"
+        or not (colorized_dir / p.get("filename", "")).exists()
+        or (colorized_dir / p.get("filename", "")).stat().st_size == 0
+    ]
+
+    # Auto-resume interrupted session if requested or if status was left in processing without an active task
+    if (auto_resume or sess.get("status") == "processing") and not is_task_active(session_id):
+        if uncolorized_indices:
+            req = ColorizeRequest(
+                session_id=session_id,
+                model_provider=sess.get("model_provider") or "google_nano",
+                model_name=sess.get("model_name") or "nano-banana",
+                style=sess.get("style") or sess.get("recommended_style") or "gemini_anime",
+                saturation=sess.get("saturation", 1.2),
+                contrast=sess.get("contrast", 1.1),
+                line_preserve=sess.get("line_preserve", 0.85),
+                selected_pages=uncolorized_indices,
+                skip_if_colored=sess.get("skip_if_colored", False),
+                force_recolorize=False,
+                denoise_screentone=sess.get("denoise_screentone", True),
+                denoise_sigma=sess.get("denoise_sigma", 25),
+                recognition_mode=sess.get("recognition_mode", "auto"),
+            )
+            sess["status"] = "processing"
+            sess["cancel_requested"] = False
+            save_session_meta(session_id)
+            task = asyncio.create_task(_async_colorization_worker(session_id, req))
+            ACTIVE_COLORIZATION_TASKS[session_id] = task
+        elif len(pages) > 0:
+            sess["status"] = "completed"
+            sess["processed_count"] = len(pages)
+            save_session_meta(session_id)
 
     q = asyncio.Queue()
     if session_id not in EVENT_QUEUES:
@@ -918,12 +990,25 @@ async def stream_progress(session_id: str):
     async def event_generator():
         try:
             # Yield initial status
-            init_data = {"type": "init", "session": sess}
+            init_data = {
+                "type": "init",
+                "session": sess,
+                "is_active": is_task_active(session_id),
+                "uncolorized_count": len(uncolorized_indices),
+            }
             yield f"data: {json.dumps(init_data)}\n\n"
 
-            # If the session is already finished, emit terminal event so client doesn't wait
-            if sess.get("status") in ["completed", "cancelled", "error"]:
+            # If the session is already finished and no task is active, emit terminal event
+            if (
+                sess.get("status") in ["completed", "cancelled", "error"]
+                and not is_task_active(session_id)
+            ):
                 yield f"data: {json.dumps({'type': sess.get('status'), 'total_processed': sess.get('processed_count', 0)})}\n\n"
+                return
+
+            # If no task is active and session is idle/pending (not auto-resumed), emit idle event
+            if not is_task_active(session_id) and sess.get("status") in ["idle", "pending"]:
+                yield f"data: {json.dumps({'type': 'idle', 'total_processed': sess.get('processed_count', 0), 'total': sess.get('total_pages', 0)})}\n\n"
                 return
 
             while True:
@@ -955,6 +1040,14 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
     sess["cancel_requested"] = False
     sess["model_provider"] = req.model_provider
     sess["model_name"] = req.model_name
+    sess["style"] = req.style
+    sess["saturation"] = req.saturation
+    sess["contrast"] = req.contrast
+    sess["line_preserve"] = req.line_preserve
+    sess["skip_if_colored"] = req.skip_if_colored
+    sess["denoise_screentone"] = getattr(req, "denoise_screentone", True)
+    sess["denoise_sigma"] = getattr(req, "denoise_sigma", 25)
+    sess["recognition_mode"] = getattr(req, "recognition_mode", "auto")
 
     await notify_sse_listeners(
         session_id,
@@ -976,124 +1069,14 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
     # Ensure processed_count strictly reflects actual colorized pages
     sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
 
-    for idx in target_pages:
-        # Check if cancellation was requested before processing next page
-        if sess.get("cancel_requested"):
-            sess["status"] = "cancelled"
-            for p in pages:
-                if p.get("status") == "processing":
-                    p["status"] = "pending"
-            await notify_sse_listeners(
-                session_id,
-                {
-                    "type": "cancelled",
-                    "processed_count": sess["processed_count"],
-                    "total": sess["total_pages"],
-                },
-            )
-            return
-
-        if idx >= len(pages):
-            continue
-
-        page_info = pages[idx]
-        orig_path = page_info["original_path"]
-        color_filename = page_info["filename"]
-        output_path = str(colorized_dir / color_filename)
-
-        # Skip if page is already colorized and output file exists on disk,
-        # UNLESS the caller explicitly requested a force recolorize.
-        if (
-            not req.force_recolorize
-            and page_info.get("status") == "colorized"
-            and Path(output_path).exists()
-            and Path(output_path).stat().st_size > 0
-        ):
-            if not page_info.get("colorized_url"):
-                page_info["colorized_url"] = (
-                    f"/api/session/{session_id}/image/colorized/{color_filename}"
-                )
-            continue
-
-        # When forcing recolorize, reset page status so the UI shows it as in-flight
-        if req.force_recolorize:
-            page_info["status"] = "pending"
-            page_info.pop("skipped_colored", None)
-
-        # Fast pre-flight check: if page already has color and user wants to skip colored pages,
-        # copy original immediately and NEVER show as "processing" in-flight
-        if req.skip_if_colored and is_colored_page(orig_path):
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            shutil.copy2(orig_path, output_path)
-            page_info["status"] = "colorized"
-            page_info["skipped_colored"] = True
-            page_info["colorized_url"] = (
-                f"/api/session/{session_id}/image/colorized/{color_filename}"
-            )
-            page_info["engine_used"] = "original (already colored)"
-            sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
-            save_session_meta(session_id)
-
-            await notify_sse_listeners(
-                session_id,
-                {
-                    "type": "page_update",
-                    "page_index": idx,
-                    "status": "colorized",
-                    "skipped_colored": True,
-                    "colorized_url": page_info["colorized_url"],
-                    "engine": page_info["engine_used"],
-                    "processed_count": sess["processed_count"],
-                    "total": sess["total_pages"],
-                    "message": f"Page {idx + 1}: Preserved original color (skipped)",
-                },
-            )
-            continue
-        page_info["status"] = "processing"
-
-        await notify_sse_listeners(
-            session_id,
-            {
-                "type": "page_update",
-                "page_index": idx,
-                "status": "processing",
-                "progress": f"{idx + 1}/{len(pages)}",
-            },
-        )
-
-        try:
-            # Resolve palette for this session (if any characters are defined)
-            palette = _get_palette(session_id)
-            if palette and not palette.characters:
-                palette = None
-
-            # Run CPU-bound colorization in a thread without blocking main asyncio loop
-            res = await asyncio.to_thread(
-                colorizer_engine.colorize_page,
-                image_path=orig_path,
-                output_path=output_path,
-                model_provider=req.model_provider,
-                model_name=req.model_name,
-                api_key=req.api_key or "",
-                style=req.style,
-                saturation=req.saturation,
-                contrast=req.contrast,
-                line_preserve=req.line_preserve,
-                skip_if_colored=req.skip_if_colored,
-                character_palette=palette,
-                denoise_screentone=getattr(req, "denoise_screentone", True),
-                denoise_sigma=getattr(req, "denoise_sigma", 25),
-                recognition_mode=getattr(req, "recognition_mode", "auto"),
-            )
-
-            # Check again immediately after colorizing in case cancel was pressed mid-task
+    try:
+        for idx in target_pages:
+            # Check if cancellation was requested before processing next page
             if sess.get("cancel_requested"):
                 sess["status"] = "cancelled"
-                page_info["status"] = "colorized"
-                page_info["colorized_url"] = (
-                    f"/api/session/{session_id}/image/colorized/{color_filename}"
-                )
-                sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+                for p in pages:
+                    if p.get("status") == "processing":
+                        p["status"] = "pending"
                 await notify_sse_listeners(
                     session_id,
                     {
@@ -1104,50 +1087,187 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 )
                 return
 
-            # "skipped_colored" counts as colorized — output was copied as-is
-            eff_status = "colorized"
-            page_info["status"] = eff_status
-            page_info["colorized_url"] = (
-                f"/api/session/{session_id}/image/colorized/{color_filename}"
-            )
-            page_info["engine_used"] = res.get("engine", req.model_provider)
-            if res.get("status") == "skipped_colored":
-                page_info["skipped_colored"] = True
+            if idx >= len(pages):
+                continue
 
-            sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
-            save_session_meta(session_id)
+            page_info = pages[idx]
+            orig_path = page_info["original_path"]
+            color_filename = page_info["filename"]
+            output_path = str(colorized_dir / color_filename)
+
+            # Skip if page is already colorized and output file exists on disk,
+            # UNLESS the caller explicitly requested a force recolorize.
+            if (
+                not req.force_recolorize
+                and page_info.get("status") == "colorized"
+                and Path(output_path).exists()
+                and Path(output_path).stat().st_size > 0
+            ):
+                if not page_info.get("colorized_url"):
+                    page_info["colorized_url"] = (
+                        f"/api/session/{session_id}/image/colorized/{color_filename}"
+                    )
+                continue
+
+            # When forcing recolorize, reset page status so the UI shows it as in-flight
+            if req.force_recolorize:
+                page_info["status"] = "pending"
+                page_info.pop("skipped_colored", None)
+
+            # Fast pre-flight check: if page already has color and user wants to skip colored pages,
+            # copy original immediately and NEVER show as "processing" in-flight
+            if req.skip_if_colored and is_colored_page(orig_path):
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                shutil.copy2(orig_path, output_path)
+                page_info["status"] = "colorized"
+                page_info["skipped_colored"] = True
+                page_info["colorized_url"] = (
+                    f"/api/session/{session_id}/image/colorized/{color_filename}"
+                )
+                page_info["engine_used"] = "original (already colored)"
+                sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+                save_session_meta(session_id)
+
+                await notify_sse_listeners(
+                    session_id,
+                    {
+                        "type": "page_update",
+                        "page_index": idx,
+                        "status": "colorized",
+                        "skipped_colored": True,
+                        "colorized_url": page_info["colorized_url"],
+                        "engine": page_info["engine_used"],
+                        "processed_count": sess["processed_count"],
+                        "total": sess["total_pages"],
+                        "message": f"Page {idx + 1}: Preserved original color (skipped)",
+                    },
+                )
+                continue
+            page_info["status"] = "processing"
 
             await notify_sse_listeners(
                 session_id,
                 {
                     "type": "page_update",
                     "page_index": idx,
-                    "status": "colorized",
-                    "skipped_colored": bool(page_info.get("skipped_colored")),
-                    "colorized_url": page_info["colorized_url"],
-                    "engine": page_info["engine_used"],
-                    "processed_count": sess["processed_count"],
-                    "total": sess["total_pages"],
+                    "status": "processing",
+                    "progress": f"{idx + 1}/{len(pages)}",
                 },
             )
 
-        except Exception as e:
-            print(f"Error colorizing page {idx}: {e}")
-            page_info["status"] = "error"
-            page_info["error_msg"] = str(e)
-            save_session_meta(session_id)
+            try:
+                # Resolve palette for this session (if any characters are defined)
+                palette = _get_palette(session_id)
+                if palette and not palette.characters:
+                    palette = None
 
+                # Run CPU-bound colorization in a thread without blocking main asyncio loop
+                res = await asyncio.to_thread(
+                    colorizer_engine.colorize_page,
+                    image_path=orig_path,
+                    output_path=output_path,
+                    model_provider=req.model_provider,
+                    model_name=req.model_name,
+                    api_key=req.api_key or "",
+                    style=req.style,
+                    saturation=req.saturation,
+                    contrast=req.contrast,
+                    line_preserve=req.line_preserve,
+                    skip_if_colored=req.skip_if_colored,
+                    character_palette=palette,
+                    denoise_screentone=getattr(req, "denoise_screentone", True),
+                    denoise_sigma=getattr(req, "denoise_sigma", 25),
+                    recognition_mode=getattr(req, "recognition_mode", "auto"),
+                )
+
+                # Check again immediately after colorizing in case cancel was pressed mid-task
+                if sess.get("cancel_requested"):
+                    sess["status"] = "cancelled"
+                    page_info["status"] = "colorized"
+                    page_info["colorized_url"] = (
+                        f"/api/session/{session_id}/image/colorized/{color_filename}"
+                    )
+                    sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+                    await notify_sse_listeners(
+                        session_id,
+                        {
+                            "type": "cancelled",
+                            "processed_count": sess["processed_count"],
+                            "total": sess["total_pages"],
+                        },
+                    )
+                    return
+
+                # "skipped_colored" counts as colorized — output was copied as-is
+                eff_status = "colorized"
+                page_info["status"] = eff_status
+                page_info["colorized_url"] = (
+                    f"/api/session/{session_id}/image/colorized/{color_filename}"
+                )
+                page_info["engine_used"] = res.get("engine", req.model_provider)
+                if res.get("status") == "skipped_colored":
+                    page_info["skipped_colored"] = True
+
+                sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+                save_session_meta(session_id)
+
+                await notify_sse_listeners(
+                    session_id,
+                    {
+                        "type": "page_update",
+                        "page_index": idx,
+                        "status": "colorized",
+                        "skipped_colored": bool(page_info.get("skipped_colored")),
+                        "colorized_url": page_info["colorized_url"],
+                        "engine": page_info["engine_used"],
+                        "processed_count": sess["processed_count"],
+                        "total": sess["total_pages"],
+                    },
+                )
+
+            except Exception as e:
+                print(f"Error colorizing page {idx}: {e}")
+                page_info["status"] = "error"
+                page_info["error_msg"] = str(e)
+                save_session_meta(session_id)
+
+                await notify_sse_listeners(
+                    session_id,
+                    {"type": "page_update", "page_index": idx, "status": "error", "error": str(e)},
+                )
+
+        actual_count = sum(1 for p in pages if p.get("status") == "colorized")
+        sess["processed_count"] = actual_count
+        total_p = sess.get("total_pages", len(pages))
+        if total_p > 0 and actual_count >= total_p:
+            sess["status"] = "completed"
+        else:
+            sess["status"] = "pending"
+        save_session_meta(session_id)
+
+        if sess["status"] == "completed":
             await notify_sse_listeners(
-                session_id,
-                {"type": "page_update", "page_index": idx, "status": "error", "error": str(e)},
+                session_id, {"type": "completed", "total_processed": actual_count}
             )
-
-    sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
-    sess["status"] = "completed"
-    save_session_meta(session_id)
-    await notify_sse_listeners(
-        session_id, {"type": "completed", "total_processed": sess["processed_count"]}
-    )
+        else:
+            await notify_sse_listeners(
+                session_id, {"type": "idle", "total_processed": actual_count}
+            )
+    finally:
+        ACTIVE_COLORIZATION_TASKS.pop(session_id, None)
+        # Ensure if task was terminated/cancelled unexpectedly while in processing, status is updated
+        if sess.get("status") == "processing":
+            actual_count = sum(1 for p in pages if p.get("status") == "colorized")
+            sess["processed_count"] = actual_count
+            total_p = sess.get("total_pages", len(pages))
+            if total_p > 0 and actual_count >= total_p:
+                sess["status"] = "completed"
+            else:
+                sess["status"] = "pending" if actual_count > 0 else "idle"
+            for p in pages:
+                if p.get("status") == "processing":
+                    p["status"] = "pending"
+            save_session_meta(session_id)
 
 
 @app.post("/api/colorize/start")
@@ -1157,16 +1277,103 @@ async def start_colorization(req: ColorizeRequest):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if sess["status"] == "processing":
+    if is_task_active(session_id):
         raise HTTPException(status_code=400, detail="Colorization already in progress")
 
     sess["cancel_requested"] = False
     sess["status"] = "processing"
     save_session_meta(session_id)
 
-    # Launch worker directly on main event loop using asyncio.create_task
-    asyncio.create_task(_async_colorization_worker(session_id, req))
+    # Launch worker directly on main event loop using asyncio.create_task and track
+    task = asyncio.create_task(_async_colorization_worker(session_id, req))
+    ACTIVE_COLORIZATION_TASKS[session_id] = task
     return JSONResponse({"status": "started", "session_id": session_id})
+
+
+@app.post("/api/colorize/resume/{session_id}")
+async def resume_colorization(session_id: str, req: Optional[ColorizeRequest] = None):
+    """
+    Resumes an interrupted or pending colorization session from the first uncolored page.
+    Skips already colorized pages unless force_recolorize is requested.
+    """
+    sess = get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if is_task_active(session_id):
+        return JSONResponse(
+            {
+                "status": "already_running",
+                "message": "Colorization is already actively in progress",
+                "session_id": session_id,
+                "processed_count": sess.get("processed_count", 0),
+                "total_pages": sess.get("total_pages", 0),
+            }
+        )
+
+    pages = sess.get("pages", [])
+    colorized_dir = STORAGE_DIR / session_id / "colorized"
+    uncolorized_indices = [
+        idx
+        for idx, p in enumerate(pages)
+        if p.get("status") != "colorized"
+        or not (colorized_dir / p.get("filename", "")).exists()
+        or (colorized_dir / p.get("filename", "")).stat().st_size == 0
+    ]
+
+    if not uncolorized_indices and len(pages) > 0:
+        sess["status"] = "completed"
+        sess["processed_count"] = len(pages)
+        save_session_meta(session_id)
+        return JSONResponse(
+            {
+                "status": "already_completed",
+                "message": "All pages are already colorized",
+                "session_id": session_id,
+                "processed_count": len(pages),
+                "total_pages": len(pages),
+            }
+        )
+
+    if req is None:
+        req = ColorizeRequest(
+            session_id=session_id,
+            model_provider=sess.get("model_provider") or "google_nano",
+            model_name=sess.get("model_name") or "nano-banana",
+            style=sess.get("style") or sess.get("recommended_style") or "gemini_anime",
+            saturation=sess.get("saturation", 1.2),
+            contrast=sess.get("contrast", 1.1),
+            line_preserve=sess.get("line_preserve", 0.85),
+            selected_pages=uncolorized_indices,
+            skip_if_colored=sess.get("skip_if_colored", False),
+            force_recolorize=False,
+            denoise_screentone=sess.get("denoise_screentone", True),
+            denoise_sigma=sess.get("denoise_sigma", 25),
+            recognition_mode=sess.get("recognition_mode", "auto"),
+        )
+    else:
+        req.session_id = session_id
+        req.force_recolorize = False
+        if req.selected_pages is None:
+            req.selected_pages = uncolorized_indices
+
+    sess["cancel_requested"] = False
+    sess["status"] = "processing"
+    save_session_meta(session_id)
+
+    task = asyncio.create_task(_async_colorization_worker(session_id, req))
+    ACTIVE_COLORIZATION_TASKS[session_id] = task
+
+    return JSONResponse(
+        {
+            "status": "resumed",
+            "message": f"Resumed colorization for {len(uncolorized_indices)} pending pages",
+            "session_id": session_id,
+            "processed_count": sess.get("processed_count", 0),
+            "total_pages": sess.get("total_pages", len(pages)),
+            "remaining_pages": len(uncolorized_indices),
+        }
+    )
 
 
 @app.post("/api/colorize/cancel/{session_id}")
@@ -1183,6 +1390,8 @@ async def cancel_colorization(session_id: str):
             p["status"] = "pending"
 
     save_session_meta(session_id)
+
+    ACTIVE_COLORIZATION_TASKS.pop(session_id, None)
 
     await notify_sse_listeners(
         session_id,
@@ -2109,12 +2318,20 @@ async def list_sessions(batch_id: Optional[str] = None):
     for sess in SESSIONS.values():
         if batch_id and sess.get("batch_id") != batch_id:
             continue
+        sid = sess["session_id"]
         pages = sess.get("pages", [])
         if pages:
             actual_count = sum(1 for p in pages if p.get("status") == "colorized")
             sess["processed_count"] = actual_count
-            if actual_count >= len(pages):
+            total_p = sess.get("total_pages", len(pages))
+            if total_p > 0 and actual_count >= total_p:
                 sess["status"] = "completed"
+            elif sess.get("status") == "processing" and not is_task_active(sid):
+                sess["status"] = "pending" if actual_count > 0 else "idle"
+                for p in pages:
+                    if p.get("status") == "processing":
+                        p["status"] = "pending"
+                save_session_meta(sid)
 
         results.append(
             {
@@ -2125,6 +2342,7 @@ async def list_sessions(batch_id: Optional[str] = None):
                 "total_pages": sess.get("total_pages", 0),
                 "processed_count": sess.get("processed_count", 0),
                 "status": sess.get("status", "idle"),
+                "is_active": is_task_active(sess["session_id"]),
             }
         )
 
@@ -2228,7 +2446,13 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     line_preserve=req.line_preserve,
                     skip_if_colored=req.skip_if_colored,
                 )
-                await _async_colorization_worker(sid, single_req)
+                task = asyncio.current_task()
+                if task:
+                    ACTIVE_COLORIZATION_TASKS[sid] = task
+                try:
+                    await _async_colorization_worker(sid, single_req)
+                finally:
+                    ACTIVE_COLORIZATION_TASKS.pop(sid, None)
                 CURRENT_BATCH["completed_docs"] += 1
         finally:
             CURRENT_BATCH["is_running"] = False
@@ -2242,6 +2466,60 @@ async def start_batch_colorization(req: BatchColorizeRequest):
             "session_ids": valid_sessions,
         }
     )
+
+
+@app.post("/api/colorize/batch/resume")
+async def resume_batch_colorization(req: Optional[BatchColorizeRequest] = None):
+    """
+    Resumes batch colorization for pending sessions (where processed_count < total_pages).
+    """
+    global CURRENT_BATCH
+    if CURRENT_BATCH.get("is_running"):
+        return JSONResponse(
+            {
+                "status": "already_running",
+                "message": "Batch colorization is already running",
+                "batch": CURRENT_BATCH,
+            }
+        )
+
+    target_sessions = []
+    if req and req.session_ids:
+        candidate_ids = req.session_ids
+    elif CURRENT_BATCH.get("session_ids"):
+        candidate_ids = CURRENT_BATCH.get("session_ids")
+    else:
+        existing_dirs = {d.name for d in STORAGE_DIR.iterdir() if d.is_dir()}
+        for d_name in existing_dirs:
+            if d_name not in SESSIONS:
+                get_or_restore_session(d_name)
+        candidate_ids = list(SESSIONS.keys())
+
+    for sid in candidate_ids:
+        sess = SESSIONS.get(sid) or get_or_restore_session(sid)
+        if sess and sess.get("pages"):
+            colorized_dir = STORAGE_DIR / sid / "colorized"
+            has_pending = any(
+                p.get("status") != "colorized"
+                or not (colorized_dir / p.get("filename", "")).exists()
+                or (colorized_dir / p.get("filename", "")).stat().st_size == 0
+                for p in sess.get("pages", [])
+            )
+            if has_pending:
+                target_sessions.append(sid)
+
+    if not target_sessions:
+        return JSONResponse(
+            {
+                "status": "completed",
+                "message": "No pending sessions to resume",
+                "batch": CURRENT_BATCH,
+            }
+        )
+
+    batch_req = req or BatchColorizeRequest(session_ids=target_sessions)
+    batch_req.session_ids = target_sessions
+    return await start_batch_colorization(batch_req)
 
 
 def remove_single_session_artifacts(session_id: str) -> bool:
