@@ -99,472 +99,521 @@
       </div>
     </section>
 
+    <!-- Floating Edge Button to expand Sidebar when hidden -->
+    <button class="sidebar-edge-tab hidden" id="btn-sidebar-edge-expand" onclick="toggleSidebarDrawer(false)" aria-label="Expand Sidebar" title="Expand Sidebar (⌘B)" type="button">
+      <i class="ri-arrow-right-s-line edge-tab-icon"></i>
+    </button>
+
     <!-- App Dashboard (Hidden until file uploaded) -->
     <section class="dashboard-grid hidden" id="dashboard-section">
 
       <!-- Left Column: File Info & Controls -->
-      <aside class="sidebar">
+      <aside class="sidebar" id="app-sidebar" aria-label="Sidebar Controls">
+
+        <!-- Sidebar Collapse Trigger Button -->
+        <button class="btn-sidebar-collapse" id="btn-sidebar-collapse" onclick="toggleSidebarDrawer(true)" title="Collapse Sidebar (⌘B)" aria-label="Collapse Sidebar" type="button">
+          <div class="collapse-btn-content">
+            <i class="ri-arrow-left-s-line collapse-arrow-icon"></i>
+            <span class="collapse-btn-text">Collapse Sidebar</span>
+          </div>
+          <kbd class="collapse-shortcut-badge">⌘B</kbd>
+        </button>
 
         <!-- File Info & Documents Queue Card -->
-        <div class="card file-info-card">
-          <div class="card-header space-between file-info-header">
+        <div class="card file-info-card" id="card-doc-queue">
+          <div class="card-header space-between file-info-header card-collapsible-header" id="header-doc-queue" role="button" tabindex="0" aria-expanded="true" aria-controls="card-body-doc-queue" title="Click to collapse / expand">
             <div class="header-left">
               <i class="ri-folders-line queue-header-icon"></i>
               <h3 class="queue-header-title">Document Queue</h3>
-              <span class="badge badge-accent doc-queue-count-badge" id="doc-queue-badge" title="1 document in queue">1 doc</span>
             </div>
             <div class="header-right">
-              <button class="btn-queue-history" onclick="openHistoryModal()" title="View full document history">
-                <i class="ri-history-line"></i> History
+              <span class="sidebar-card-badge doc-queue-count-badge" id="doc-queue-badge" title="1 document in queue">1 doc</span>
+              <button class="btn-icon btn-card-collapse" id="btn-collapse-doc-queue" aria-label="Toggle Document Queue" aria-expanded="true" aria-controls="card-body-doc-queue" title="Collapse / Expand Document Queue" type="button">
+                <i class="ri-arrow-down-s-line"></i>
               </button>
             </div>
           </div>
 
-          <!-- Active Document Highlight -->
-          <div class="file-details active-doc-box">
-            <div class="file-icon-box" id="file-type-icon">
-              <i class="ri-file-pdf-fill"></i>
+          <div class="card-collapsible-body" id="card-body-doc-queue">
+            <div class="card-collapsible-inner">
+              <!-- Active Document Highlight -->
+              <div class="file-details active-doc-box">
+                <div class="file-icon-box" id="file-type-icon">
+                  <i class="ri-file-pdf-fill"></i>
+                </div>
+                <div class="file-meta">
+                  <h4 id="doc-filename">manga_volume.pdf</h4>
+                  <p><span id="doc-total-pages">0</span> Pages Loaded</p>
+                </div>
+                <button class="btn-icon btn-delete-doc-active" id="btn-delete-active-doc" title="Delete this document" onclick="deleteActiveDocument(event)">
+                  <i class="ri-delete-bin-line"></i>
+                </button>
+              </div>
+
+              <!-- Search filter for queue when many documents loaded -->
+              <div class="doc-queue-filter-wrap hidden" id="doc-queue-filter-wrap">
+                <i class="ri-search-line doc-queue-search-icon"></i>
+                <input type="text" id="doc-queue-search" placeholder="Filter queued documents..." oninput="filterDocumentQueue(this.value)" />
+                <button class="btn-icon doc-queue-filter-clear hidden" id="doc-queue-filter-clear" onclick="clearQueueFilter()" title="Clear filter">
+                  <i class="ri-close-line"></i>
+                </button>
+              </div>
+
+              <!-- Multi-document list (when 2+ files are queued) -->
+              <div class="doc-queue-list hidden" id="doc-queue-list">
+                <!-- Rendered dynamically -->
+              </div>
+
+              <!-- Queue Control Buttons -->
+              <div class="queue-btn-group">
+                <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="triggerAddFiles()">
+                  <i class="ri-add-line"></i> Add Files
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="openFolderImportModal()" title="Import whole folders with +1000 ebooks directly from disk">
+                  <i class="ri-folder-open-line"></i> Folder
+                </button>
+                <button class="btn btn-danger btn-sm hidden" id="btn-delete-selected-queue" onclick="deleteSelectedQueueDocuments(event)" title="Delete checked documents from queue">
+                  <i class="ri-delete-bin-line"></i> Delete Selected (<span id="queue-selected-count">0</span>)
+                </button>
+                <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-delete-all-files" onclick="clearAllDocuments(event)">
+                  <i class="ri-delete-bin-line"></i> Delete All
+                </button>
+                <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip,.cbz" style="display: none;" />
+              </div>
             </div>
-            <div class="file-meta">
-              <h4 id="doc-filename">manga_volume.pdf</h4>
-              <p><span id="doc-total-pages">0</span> Pages Loaded</p>
-            </div>
-            <button class="btn-icon btn-delete-doc-active" id="btn-delete-active-doc" title="Delete this document" onclick="deleteActiveDocument(event)">
-              <i class="ri-delete-bin-line"></i>
-            </button>
-          </div>
-
-          <!-- Search filter for queue when many documents loaded -->
-          <div class="doc-queue-filter-wrap hidden" id="doc-queue-filter-wrap">
-            <i class="ri-search-line doc-queue-search-icon"></i>
-            <input type="text" id="doc-queue-search" placeholder="Filter queued documents..." oninput="filterDocumentQueue(this.value)" />
-            <button class="btn-icon doc-queue-filter-clear hidden" id="doc-queue-filter-clear" onclick="clearQueueFilter()" title="Clear filter">
-              <i class="ri-close-line"></i>
-            </button>
-          </div>
-
-          <!-- Multi-document list (when 2+ files are queued) -->
-          <div class="doc-queue-list hidden" id="doc-queue-list">
-            <!-- Rendered dynamically -->
-          </div>
-
-          <!-- Queue Control Buttons -->
-          <div class="queue-btn-group">
-            <button class="btn btn-secondary btn-sm" id="btn-add-files" onclick="triggerAddFiles()">
-              <i class="ri-add-line"></i> Add Files
-            </button>
-            <button class="btn btn-secondary btn-sm" onclick="openFolderImportModal()" title="Import whole folders with +1000 ebooks directly from disk">
-              <i class="ri-folder-open-line"></i> Folder
-            </button>
-            <button class="btn btn-danger btn-sm hidden" id="btn-delete-selected-queue" onclick="deleteSelectedQueueDocuments(event)" title="Delete checked documents from queue">
-              <i class="ri-delete-bin-line"></i> Delete Selected (<span id="queue-selected-count">0</span>)
-            </button>
-            <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-delete-all-files" onclick="clearAllDocuments(event)">
-              <i class="ri-delete-bin-line"></i> Delete All
-            </button>
-            <input type="file" id="add-more-input" multiple accept=".pdf,.epub,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff,.zip,.cbz" style="display: none;" />
           </div>
         </div>
 
         <!-- Model Configuration Card -->
-        <div class="card config-card">
-          <div class="card-header">
-            <i class="ri-cpu-line"></i>
-            <h3>AI Engine & Models</h3>
-          </div>
-
-          <!-- Model Provider Tabs -->
-          <div class="form-group">
-            <label>AI Colorization Model</label>
-            <div class="model-selector-grid">
-              <button class="model-option active" data-provider="resnext_generator" onclick="selectProvider('resnext_generator')">
-                <span class="model-emoji">🧬</span>
-                <span class="model-name">ResNeXt Net</span>
-                <span class="model-tag">Deep Generator</span>
-              </button>
-
-              <button class="model-option" data-provider="google_nano" onclick="selectProvider('google_nano')">
-                <span class="model-emoji">🍌</span>
-                <span class="model-name">Google Nano</span>
-                <span class="model-tag">Google AI</span>
-              </button>
-
-              <button class="model-option" data-provider="apple_foundation" onclick="selectProvider('apple_foundation')">
-                <span class="model-emoji">🍏</span>
-                <span class="model-name">Apple AI</span>
-                <span class="model-tag">Apple Silicon</span>
-              </button>
-
-              <button class="model-option" data-provider="local_smart" onclick="selectProvider('local_smart')">
-                <span class="model-emoji">🎨</span>
-                <span class="model-name">Smart Local</span>
-                <span class="model-tag">Offline Palette</span>
+        <div class="card config-card" id="config-card">
+          <div class="card-header space-between config-card-header card-collapsible-header" id="header-config" role="button" tabindex="0" aria-expanded="true" aria-controls="card-body-config" title="Click to collapse / expand">
+            <div class="header-left">
+              <i class="ri-cpu-line" style="color: var(--accent-cyan);"></i>
+              <h3>AI Engine &amp; Models</h3>
+            </div>
+            <div class="header-right">
+              <span class="sidebar-card-badge config-model-summary-badge" id="config-card-summary-badge" title="Active AI model">🧬 ResNeXt Net</span>
+              <button class="btn-icon btn-card-collapse" id="btn-collapse-config" aria-label="Toggle AI Engine &amp; Models" aria-expanded="true" aria-controls="card-body-config" title="Collapse / Expand AI Engine &amp; Models" type="button">
+                <i class="ri-arrow-down-s-line"></i>
               </button>
             </div>
           </div>
 
-          <!-- Sub-Model Selection -->
-          <div class="form-group">
-            <label for="model-variant-select">Model Variant</label>
-            <select id="model-variant-select" class="form-select">
-              <!-- Dynamically populated -->
-            </select>
-          </div>
+          <div class="card-collapsible-body" id="card-body-config">
+            <div class="card-collapsible-inner">
+              <!-- Model Provider Tabs -->
+              <div class="form-group">
+                <label>AI Colorization Model</label>
+                <div class="model-selector-grid">
+                  <button class="model-option active" data-provider="resnext_generator" onclick="selectProvider('resnext_generator')">
+                    <span class="model-emoji">🧬</span>
+                    <span class="model-name">ResNeXt Net</span>
+                    <span class="model-tag">Deep Generator</span>
+                  </button>
 
-          <!-- API Key Input (Optional) -->
-          <div class="form-group" id="api-key-group">
-            <div class="label-with-hint">
-              <label for="api-key-input">Google API Key</label>
-              <span class="hint-text">(Optional for Google Nano API)</span>
+                  <button class="model-option" data-provider="google_nano" onclick="selectProvider('google_nano')">
+                    <span class="model-emoji">🍌</span>
+                    <span class="model-name">Google Nano</span>
+                    <span class="model-tag">Google AI</span>
+                  </button>
+
+                  <button class="model-option" data-provider="apple_foundation" onclick="selectProvider('apple_foundation')">
+                    <span class="model-emoji">🍏</span>
+                    <span class="model-name">Apple AI</span>
+                    <span class="model-tag">Apple Silicon</span>
+                  </button>
+
+                  <button class="model-option" data-provider="local_smart" onclick="selectProvider('local_smart')">
+                    <span class="model-emoji">🎨</span>
+                    <span class="model-name">Smart Local</span>
+                    <span class="model-tag">Offline Palette</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Sub-Model Selection -->
+              <div class="form-group">
+                <label for="model-variant-select">Model Variant</label>
+                <select id="model-variant-select" class="form-select">
+                  <!-- Dynamically populated -->
+                </select>
+              </div>
+
+              <!-- API Key Input (Optional) -->
+              <div class="form-group" id="api-key-group">
+                <div class="label-with-hint">
+                  <label for="api-key-input">Google API Key</label>
+                  <span class="hint-text">(Optional for Google Nano API)</span>
+                </div>
+                <div class="input-with-icon">
+                  <input type="password" id="api-key-input" placeholder="AIzaSy..." class="form-input" />
+                  <button class="btn-icon" type="button" onclick="toggleApiKeyVisibility()">
+                    <i class="ri-eye-line" id="api-key-toggle-icon"></i>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Color Style Preset -->
+              <div class="form-group">
+                <label for="style-select">Manga Color Aesthetic</label>
+                <select id="style-select" class="form-select">
+                  <option value="gemini_anime" selected>✨ Gemini Anime Vibrant (Demo Style)</option>
+                  <option value="shonen_vivid">🔥 Shonen Vivid (Vibrant Anime Style)</option>
+                  <option value="anime_pastel">🌸 Soft Pastel Anime (Gentle Lighting)</option>
+                  <option value="retro_90s">📼 Retro 90s Anime (Classic Cell Shading)</option>
+                  <option value="dark_fantasy">🦇 Dark Fantasy (Moody Shading)</option>
+                  <option value="cyberpunk">⚡ Cyberpunk Neon (Cyan & Magenta Tones)</option>
+                </select>
+              </div>
+
+              <!-- Advanced Sliders -->
+              <div class="form-group">
+                <div class="slider-header">
+                  <label for="slider-line">Line Art Preservation</label>
+                  <span class="slider-value" id="val-line">85%</span>
+                </div>
+                <input type="range" id="slider-line" min="50" max="100" value="85" class="form-slider" />
+              </div>
+
+              <div class="form-group">
+                <div class="slider-header">
+                  <label for="slider-saturation">Color Saturation</label>
+                  <span class="slider-value" id="val-saturation">1.4x</span>
+                </div>
+                <input type="range" id="slider-saturation" min="5" max="25" value="14" class="form-slider" />
+              </div>
+
+              <!-- Skip Colored Pages Toggle -->
+              <div class="form-group" style="margin-top: 0.25rem;">
+                <label class="toggle-label" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+                  <input type="checkbox" id="chk-skip-colored" style="width:16px;height:16px;accent-color:var(--accent-green);" />
+                  <span style="font-size:0.85rem;color:var(--text-secondary);">
+                    <i class="ri-image-2-line" style="color:var(--accent-green);"></i>
+                    Skip pages that already have color
+                  </span>
+                </label>
+              </div>
+
+              <!-- Screentone Denoising (FFDNet) Toggle -->
+              <div class="form-group" style="margin-top: 0.25rem;">
+                <label class="toggle-label" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" title="Removes halftone screentone dots and compression noise before neural colorization while preserving 100% native ink lines.">
+                  <input type="checkbox" id="chk-denoise-screentone" checked style="width:16px;height:16px;accent-color:var(--accent-purple);" />
+                  <span style="font-size:0.85rem;color:var(--text-secondary);">
+                    <i class="ri-contrast-drop-line" style="color:var(--accent-purple);"></i>
+                    Screentone Denoising (FFDNet)
+                  </span>
+                </label>
+              </div>
+
+              <!-- Action Buttons -->
+              <div class="action-btn-group">
+                <button class="btn btn-secondary btn-block" id="btn-preview-page" onclick="previewCurrentPage()">
+                  <i class="ri-sparkles-line"></i> Preview Page 1
+                </button>
+                <button class="btn btn-accent btn-block" id="btn-start-colorize">
+                  <i class="ri-magic-line"></i> Colorize Current Document
+                </button>
+                <button class="btn btn-primary btn-block hidden" id="btn-start-batch-colorize" onclick="startBatchColorization()">
+                  <i class="ri-play-list-add-line"></i> Colorize All (<span id="batch-count-text">0</span>) Documents
+                </button>
+              </div>
             </div>
-            <div class="input-with-icon">
-              <input type="password" id="api-key-input" placeholder="AIzaSy..." class="form-input" />
-              <button class="btn-icon" type="button" onclick="toggleApiKeyVisibility()">
-                <i class="ri-eye-line" id="api-key-toggle-icon"></i>
-              </button>
-            </div>
-          </div>
-
-          <!-- Color Style Preset -->
-          <div class="form-group">
-            <label for="style-select">Manga Color Aesthetic</label>
-            <select id="style-select" class="form-select">
-              <option value="gemini_anime" selected>✨ Gemini Anime Vibrant (Demo Style)</option>
-              <option value="shonen_vivid">🔥 Shonen Vivid (Vibrant Anime Style)</option>
-              <option value="anime_pastel">🌸 Soft Pastel Anime (Gentle Lighting)</option>
-              <option value="retro_90s">📼 Retro 90s Anime (Classic Cell Shading)</option>
-              <option value="dark_fantasy">🦇 Dark Fantasy (Moody Shading)</option>
-              <option value="cyberpunk">⚡ Cyberpunk Neon (Cyan & Magenta Tones)</option>
-            </select>
-          </div>
-
-          <!-- Advanced Sliders -->
-          <div class="form-group">
-            <div class="slider-header">
-              <label for="slider-line">Line Art Preservation</label>
-              <span class="slider-value" id="val-line">85%</span>
-            </div>
-            <input type="range" id="slider-line" min="50" max="100" value="85" class="form-slider" />
-          </div>
-
-          <div class="form-group">
-            <div class="slider-header">
-              <label for="slider-saturation">Color Saturation</label>
-              <span class="slider-value" id="val-saturation">1.4x</span>
-            </div>
-            <input type="range" id="slider-saturation" min="5" max="25" value="14" class="form-slider" />
-          </div>
-
-          <!-- Skip Colored Pages Toggle -->
-          <div class="form-group" style="margin-top: 0.25rem;">
-            <label class="toggle-label" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
-              <input type="checkbox" id="chk-skip-colored" style="width:16px;height:16px;accent-color:var(--accent-green);" />
-              <span style="font-size:0.85rem;color:var(--text-secondary);">
-                <i class="ri-image-2-line" style="color:var(--accent-green);"></i>
-                Skip pages that already have color
-              </span>
-            </label>
-          </div>
-
-          <!-- Screentone Denoising (FFDNet) Toggle -->
-          <div class="form-group" style="margin-top: 0.25rem;">
-            <label class="toggle-label" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" title="Removes halftone screentone dots and compression noise before neural colorization while preserving 100% native ink lines.">
-              <input type="checkbox" id="chk-denoise-screentone" checked style="width:16px;height:16px;accent-color:var(--accent-purple);" />
-              <span style="font-size:0.85rem;color:var(--text-secondary);">
-                <i class="ri-contrast-drop-line" style="color:var(--accent-purple);"></i>
-                Screentone Denoising (FFDNet)
-              </span>
-            </label>
-          </div>
-
-          <!-- Action Buttons -->
-          <div class="action-btn-group">
-            <button class="btn btn-secondary btn-block" id="btn-preview-page" onclick="previewCurrentPage()">
-              <i class="ri-sparkles-line"></i> Preview Page 1
-            </button>
-            <button class="btn btn-accent btn-block" id="btn-start-colorize">
-              <i class="ri-magic-line"></i> Colorize Current Document
-            </button>
-            <button class="btn btn-primary btn-block hidden" id="btn-start-batch-colorize" onclick="startBatchColorization()">
-              <i class="ri-play-list-add-line"></i> Colorize All (<span id="batch-count-text">0</span>) Documents
-            </button>
           </div>
         </div>
 
         <!-- Character Palette Memory Card -->
         <div class="card" id="palette-card" style="display:none;">
-          <div class="card-header space-between">
+          <div class="card-header space-between card-collapsible-header" id="header-palette" role="button" tabindex="0" aria-expanded="true" aria-controls="card-body-palette" title="Click to collapse / expand">
             <div class="header-left">
               <i class="ri-palette-line" style="color:var(--accent-purple,#a855f7);"></i>
               <h3>Character Palette</h3>
             </div>
-            <span class="badge badge-accent" id="palette-badge-count">0 Characters</span>
-          </div>
-
-          <!-- Preset Selection & Auto-detection row -->
-          <div class="palette-preset-section" style="margin-bottom:0.75rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border-color);">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
-              <span style="font-size:0.75rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:4px;">
-                <i class="ri-magic-line" style="color:var(--accent-cyan,#00e5ff);"></i> Manga Preset
-              </span>
-              <span id="palette-detected-badge" class="badge" style="display:none;font-size:0.7rem;padding:2px 7px;background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);">
-                <i class="ri-sparkling-fill" style="margin-right:2px;"></i> Auto-Detected
-              </span>
-            </div>
-            <div style="display:flex;gap:0.4rem;">
-              <select id="palette-preset-select" class="form-select form-select-sm" style="flex:1;" onchange="onMangaPresetSelected(this.value)">
-                <option value="">Custom / None</option>
-              </select>
-              <button class="btn btn-secondary btn-sm" id="btn-search-preset-online" title="Search internet for manga character colors" onclick="openSearchPresetModal()" style="white-space:nowrap;padding:0.4rem 0.6rem;font-size:0.78rem;">
-                <i class="ri-global-line"></i> Search Web
+            <div class="header-right">
+              <span class="sidebar-card-badge" id="palette-badge-count">0 Characters</span>
+              <button class="btn-icon btn-card-collapse" id="btn-collapse-palette" aria-label="Toggle Character Palette" aria-expanded="true" aria-controls="card-body-palette" title="Collapse / Expand Character Palette" type="button">
+                <i class="ri-arrow-down-s-line"></i>
               </button>
             </div>
-            <div id="palette-preset-desc" style="font-size:0.73rem;color:var(--text-secondary);margin-top:0.35rem;line-height:1.3;display:none;"></div>
           </div>
 
-          <p style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.65rem;">
-            Canonical colors ensure hair &amp; costume stay consistent across panels.
-          </p>
+          <div class="card-collapsible-body" id="card-body-palette">
+            <div class="card-collapsible-inner">
+              <!-- Preset Selection & Auto-detection row -->
+              <div class="palette-preset-section" style="margin-bottom:0.75rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border-color);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
+                  <span style="font-size:0.75rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:4px;">
+                    <i class="ri-magic-line" style="color:var(--accent-cyan,#00e5ff);"></i> Manga Preset
+                  </span>
+                  <span id="palette-detected-badge" class="badge" style="display:none;font-size:0.7rem;padding:2px 7px;background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);">
+                    <i class="ri-sparkling-fill" style="margin-right:2px;"></i> Auto-Detected
+                  </span>
+                </div>
+                <div style="display:flex;gap:0.4rem;">
+                  <select id="palette-preset-select" class="form-select form-select-sm" style="flex:1;" onchange="onMangaPresetSelected(this.value)">
+                    <option value="">Custom / None</option>
+                  </select>
+                  <button class="btn btn-secondary btn-sm" id="btn-search-preset-online" title="Search internet for manga character colors" onclick="openSearchPresetModal()" style="white-space:nowrap;padding:0.4rem 0.6rem;font-size:0.78rem;">
+                    <i class="ri-global-line"></i> Search Web
+                  </button>
+                </div>
+                <div id="palette-preset-desc" style="font-size:0.73rem;color:var(--text-secondary);margin-top:0.35rem;line-height:1.3;display:none;"></div>
+              </div>
 
-          <!-- Character list -->
-          <div id="palette-character-list" style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:0.75rem;"></div>
+              <p style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.65rem;">
+                Canonical colors ensure hair &amp; costume stay consistent across panels.
+              </p>
 
-          <!-- Page Recognition & Active Character Chips -->
-          <div id="palette-page-recognition-section" style="margin-bottom:0.75rem;padding:0.5rem 0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;">
-            <!-- Row 1: title + action buttons -->
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:4px;margin-bottom:0.3rem;">
-              <span style="font-size:0.72rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:3px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                <i class="ri-user-search-line" style="color:var(--accent-purple,#a855f7);flex-shrink:0;"></i>
-                <span id="palette-page-title-text">Page Characters</span>
-              </span>
-              <div style="display:flex;align-items:center;gap:3px;flex-shrink:0;">
-                <!-- Scan: icon + short label -->
-                <button class="btn btn-secondary btn-sm" id="btn-recognize-page"
-                        onclick="recognizeCurrentPageCharacters()"
-                        title="Auto-scan this page to detect characters"
-                        style="padding:2px 6px;font-size:0.7rem;height:22px;white-space:nowrap;display:flex;align-items:center;gap:3px;">
-                  <i class="ri-scan-line"></i><span class="btn-label-scan">Scan</span>
-                </button>
-                <!-- Specify: icon + short label, purple accent -->
-                <button class="btn btn-secondary btn-sm" id="btn-specify-page-chars"
-                        onclick="openCharacterPickerModal()"
-                        title="Manually pick which characters are on this page"
-                        style="padding:2px 6px;font-size:0.7rem;height:22px;white-space:nowrap;display:flex;align-items:center;gap:3px;border-color:var(--accent-purple,#a855f7);color:var(--accent-purple,#a855f7);">
-                  <i class="ri-edit-2-line"></i><span class="btn-label-specify">Pick</span>
+              <!-- Character list -->
+              <div id="palette-character-list" style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:0.75rem;"></div>
+
+              <!-- Page Recognition & Active Character Chips -->
+              <div id="palette-page-recognition-section" style="margin-bottom:0.75rem;padding:0.5rem 0.6rem;background:rgba(255,255,255,0.02);border:1px solid var(--border-color);border-radius:8px;">
+                <!-- Row 1: title + action buttons -->
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:4px;margin-bottom:0.3rem;">
+                  <span style="font-size:0.72rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.04em;display:flex;align-items:center;gap:3px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    <i class="ri-user-search-line" style="color:var(--accent-purple,#a855f7);flex-shrink:0;"></i>
+                    <span id="palette-page-title-text">Page Characters</span>
+                  </span>
+                  <div style="display:flex;align-items:center;gap:3px;flex-shrink:0;">
+                    <!-- Scan: icon + short label -->
+                    <button class="btn btn-secondary btn-sm" id="btn-recognize-page"
+                            onclick="recognizeCurrentPageCharacters()"
+                            title="Auto-scan this page to detect characters"
+                            style="padding:2px 6px;font-size:0.7rem;height:22px;white-space:nowrap;display:flex;align-items:center;gap:3px;">
+                      <i class="ri-scan-line"></i><span class="btn-label-scan">Scan</span>
+                    </button>
+                    <!-- Specify: icon + short label, purple accent -->
+                    <button class="btn btn-secondary btn-sm" id="btn-specify-page-chars"
+                            onclick="openCharacterPickerModal()"
+                            title="Manually pick which characters are on this page"
+                            style="padding:2px 6px;font-size:0.7rem;height:22px;white-space:nowrap;display:flex;align-items:center;gap:3px;border-color:var(--accent-purple,#a855f7);color:var(--accent-purple,#a855f7);">
+                      <i class="ri-edit-2-line"></i><span class="btn-label-specify">Pick</span>
+                    </button>
+                  </div>
+                </div>
+                <!-- Row 2: recognition engine selector (compact, secondary) -->
+                <div style="display:flex;align-items:center;gap:4px;margin-bottom:0.35rem;">
+                  <i class="ri-cpu-line" style="font-size:0.68rem;color:var(--text-muted);flex-shrink:0;"></i>
+                  <select id="recognition-mode-select"
+                          class="no-custom"
+                          style="flex:1;font-size:0.68rem;padding:1px 4px;height:20px;background:transparent;color:var(--text-secondary);border:none;border-bottom:1px solid var(--border-color);border-radius:0;cursor:pointer;outline:none;"
+                          title="Recognition engine used when clicking Scan">
+                    <option value="auto" selected>Auto detect</option>
+                    <option value="offline_ai">Offline AI (CLIP)</option>
+                    <option value="heuristics">Fast heuristics</option>
+                    <option value="gemini">Google Gemini</option>
+                  </select>
+                </div>
+                <!-- Character chips -->
+                <div id="palette-page-characters-chips" style="display:flex;flex-wrap:wrap;gap:0.3rem;min-height:20px;align-items:center;">
+                  <span id="palette-page-chips-placeholder" style="font-size:0.7rem;color:var(--text-secondary);font-style:italic;">
+                    Scan or pick characters to optimize palette
+                  </span>
+                </div>
+              </div>
+
+              <!-- Add character form -->
+              <div style="border-top:1px solid var(--border-color);padding-top:0.75rem;">
+                <div class="form-group" style="margin-bottom:0.5rem;">
+                  <input type="text" id="pal-char-name" placeholder="Character name (e.g. Arale)" class="form-input" style="font-size:0.82rem;" />
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.5rem;">
+                  <label style="font-size:0.75rem;color:var(--text-secondary);">
+                    Hair
+                    <input type="color" id="pal-hair" value="#8B2BE2" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+                  </label>
+                  <label style="font-size:0.75rem;color:var(--text-secondary);">
+                    Skin
+                    <input type="color" id="pal-skin" value="#F4C5A0" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+                  </label>
+                  <label style="font-size:0.75rem;color:var(--text-secondary);">
+                    Costume
+                    <input type="color" id="pal-costume" value="#3A7BFF" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+                  </label>
+                  <label style="font-size:0.75rem;color:var(--text-secondary);">
+                    Extra
+                    <input type="color" id="pal-extra" value="#FFCE47" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
+                  </label>
+                </div>
+                <button class="btn btn-secondary btn-sm btn-block" onclick="paletteAddCharacter()">
+                  <i class="ri-add-line"></i> Add / Update Character
                 </button>
               </div>
             </div>
-            <!-- Row 2: recognition engine selector (compact, secondary) -->
-            <div style="display:flex;align-items:center;gap:4px;margin-bottom:0.35rem;">
-              <i class="ri-cpu-line" style="font-size:0.68rem;color:var(--text-muted);flex-shrink:0;"></i>
-              <select id="recognition-mode-select"
-                      class="no-custom"
-                      style="flex:1;font-size:0.68rem;padding:1px 4px;height:20px;background:transparent;color:var(--text-secondary);border:none;border-bottom:1px solid var(--border-color);border-radius:0;cursor:pointer;outline:none;"
-                      title="Recognition engine used when clicking Scan">
-                <option value="auto" selected>Auto detect</option>
-                <option value="offline_ai">Offline AI (CLIP)</option>
-                <option value="heuristics">Fast heuristics</option>
-                <option value="gemini">Google Gemini</option>
-              </select>
-            </div>
-            <!-- Character chips -->
-            <div id="palette-page-characters-chips" style="display:flex;flex-wrap:wrap;gap:0.3rem;min-height:20px;align-items:center;">
-              <span id="palette-page-chips-placeholder" style="font-size:0.7rem;color:var(--text-secondary);font-style:italic;">
-                Scan or pick characters to optimize palette
-              </span>
-            </div>
-          </div>
-
-          <!-- Add character form -->
-          <div style="border-top:1px solid var(--border-color);padding-top:0.75rem;">
-            <div class="form-group" style="margin-bottom:0.5rem;">
-              <input type="text" id="pal-char-name" placeholder="Character name (e.g. Arale)" class="form-input" style="font-size:0.82rem;" />
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem;margin-bottom:0.5rem;">
-              <label style="font-size:0.75rem;color:var(--text-secondary);">
-                Hair
-                <input type="color" id="pal-hair" value="#8B2BE2" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
-              </label>
-              <label style="font-size:0.75rem;color:var(--text-secondary);">
-                Skin
-                <input type="color" id="pal-skin" value="#F4C5A0" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
-              </label>
-              <label style="font-size:0.75rem;color:var(--text-secondary);">
-                Costume
-                <input type="color" id="pal-costume" value="#3A7BFF" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
-              </label>
-              <label style="font-size:0.75rem;color:var(--text-secondary);">
-                Extra
-                <input type="color" id="pal-extra" value="#FFCE47" style="width:100%;height:28px;border:none;background:none;cursor:pointer;" />
-              </label>
-            </div>
-            <button class="btn btn-secondary btn-sm btn-block" onclick="paletteAddCharacter()">
-              <i class="ri-add-line"></i> Add / Update Character
-            </button>
           </div>
         </div>
 
         <!-- Export Options Card in Sidebar -->
         <div class="card export-sidebar-card" id="sidebar-export-card">
-          <div class="card-header space-between">
+          <div class="card-header space-between card-collapsible-header" id="header-export" role="button" tabindex="0" aria-expanded="true" aria-controls="card-body-export" title="Click to collapse / expand">
             <div class="header-left">
               <i class="ri-download-cloud-2-fill" style="color: var(--accent-green);"></i>
               <h3>Export Manga</h3>
             </div>
-            <span class="badge badge-accent" id="export-badge-count">Ready</span>
-          </div>
-          <p class="export-sidebar-hint">Download active document in your preferred format:</p>
-          <div class="sidebar-export-buttons">
-            <button class="btn btn-success btn-block" id="btn-sidebar-export-pdf" onclick="exportDocument('pdf')">
-              <i class="ri-file-pdf-2-line"></i> Download as PDF
-            </button>
-            <button class="btn btn-accent btn-block" id="btn-sidebar-export-epub" onclick="exportDocument('epub')">
-              <i class="ri-book-open-line"></i> Download as EPUB
-            </button>
-            <button class="btn btn-warning btn-block" id="btn-sidebar-export-mobi" onclick="exportDocument('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
-              <i class="ri-amazon-line"></i> Download Kindle (MOBI)
-            </button>
-            <button class="btn btn-secondary btn-block" id="btn-sidebar-export-zip" onclick="exportDocument('zip')">
-              <i class="ri-file-zip-line"></i> Download Images ZIP
-            </button>
-          </div>
-
-          <!-- Batch Export section (visible when 2+ documents are present) -->
-          <div class="batch-export-section hidden" id="sidebar-batch-export">
-            <div class="batch-export-divider"></div>
-            <div class="batch-export-header">
-              <i class="ri-archive-line"></i>
-              <h4>Export All Documents</h4>
-            </div>
-            <p class="export-sidebar-hint">Bundle all queued documents into a single archive:</p>
-            <div class="sidebar-export-buttons">
-              <button class="btn btn-success btn-block" id="btn-batch-export-auto" onclick="exportBatch('auto')">
-                <i class="ri-folder-zip-line"></i> Export All (Original Formats)
-              </button>
-              <button class="btn btn-accent btn-block" id="btn-batch-export-epub" onclick="exportBatch('epub')">
-                <i class="ri-book-open-line"></i> Export All as EPUBs ZIP
-              </button>
-              <button class="btn btn-warning btn-block" id="btn-batch-export-mobi" onclick="exportBatch('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
-                <i class="ri-amazon-line"></i> Export All as Kindle (.mobi) ZIP
-              </button>
-              <button class="btn btn-secondary btn-block" id="btn-batch-export-pdf" onclick="exportBatch('pdf')">
-                <i class="ri-file-pdf-2-line"></i> Export All as PDFs ZIP
+            <div class="header-right">
+              <span class="sidebar-card-badge" id="export-badge-count">Ready</span>
+              <button class="btn-icon btn-card-collapse" id="btn-collapse-export" aria-label="Toggle Export Manga" aria-expanded="true" aria-controls="card-body-export" title="Collapse / Expand Export Manga" type="button">
+                <i class="ri-arrow-down-s-line"></i>
               </button>
             </div>
+          </div>
 
-            <!-- Combined single-file export -->
-            <div style="margin-top:1rem;border-top:1px solid var(--border-color);padding-top:0.85rem;">
-              <div style="display:flex;align-items:center;gap:0.4rem;margin-bottom:0.5rem;">
-                <i class="ri-book-2-line" style="color:var(--accent-purple,#a855f7);font-size:1rem;"></i>
-                <span style="font-weight:600;font-size:0.88rem;">Export as Single E-Reader Copy</span>
-              </div>
-              <p style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.6rem;">
-                Merge all volumes into <strong>one file</strong> with a chapter-per-volume TOC — perfect for Kindle, Kobo &amp; Apple Books.
-              </p>
-              <input type="text" id="combined-title-input"
-                     placeholder="Collection title (optional)"
-                     class="form-input"
-                     style="font-size:0.82rem;margin-bottom:0.5rem;"
-                     value="Colorized Manga Collection" />
-
-              <!-- E-Reader Optimization & Omnibus Controls -->
-              <div class="omnibus-controls-box">
-                <div class="omnibus-field">
-                  <label for="combined-chunk-select" class="omnibus-field-label">
-                    <i class="ri-split-cells-vertical"></i> Series Splitting (Kindle Indexing Safe):
-                  </label>
-                  <select id="combined-chunk-select" class="form-select form-select-sm">
-                    <option value="size_250" selected>⚡ Auto-split at ~250 MB (Kindle Paperwhite/Oasis Optimal)</option>
-                    <option value="size_200">⚡ Auto-split at ~200 MB (Send-to-Kindle Web Max)</option>
-                    <option value="size_100">⚡ Auto-split at ~100 MB (Send-to-Kindle Email Safe)</option>
-                    <option value="size_350">⚡ Auto-split at ~350 MB (Colorsoft / Kobo Optimal)</option>
-                    <option value="size_500">⚡ Auto-split at ~500 MB (Large Tablets / iPad)</option>
-                    <option value="size_custom">⚙️ Auto-split at Custom MB Size...</option>
-                    <option value="volumes_1">📖 1 Volume per Part (Single volumes ZIP)</option>
-                    <option value="volumes_2">📚 2-in-1 Omnibus Edition (2-vol parts)</option>
-                    <option value="volumes_3">📚 3-in-1 Omnibus Edition (3-vol parts)</option>
-                    <option value="volumes_5">📦 5-in-1 Omnibus Edition (5-vol parts)</option>
-                    <option value="none">📜 Single Continuous File (No splitting - All merged)</option>
-                  </select>
-                </div>
-                <div id="combined-custom-size-box" class="omnibus-field hidden" style="margin-top:0.35rem;">
-                  <label for="combined-custom-size-input" class="omnibus-field-label">
-                    <i class="ri-ruler-line"></i> Custom Auto-Split Target:
-                  </label>
-                  <div style="display:flex;align-items:center;gap:0.4rem;">
-                    <input type="number" id="combined-custom-size-input" class="form-input form-input-sm"
-                           min="30" max="2000" step="10" value="200" style="font-size:0.8rem;padding:4px 8px;width:100px;" />
-                    <span style="font-size:0.78rem;color:var(--text-secondary);">MB limit per part</span>
-                  </div>
-                </div>
-                <div class="omnibus-field">
-                  <label for="combined-preset-select" class="omnibus-field-label">
-                    <i class="ri-aspect-ratio-line"></i> Resolution &amp; Compression:
-                  </label>
-                  <select id="combined-preset-select" class="form-select form-select-sm">
-                    <option value="colorsoft" selected>🌈 Kindle Colorsoft / Color E-Ink (1600px, Vibrancy Boost)</option>
-                    <option value="kindle">📖 Kindle B&amp;W Paperwhite/Oasis (1600px, 80%)</option>
-                    <option value="tablet">📱 Tablet / iPad HD (1920px, 85% quality)</option>
-                    <option value="original">🔍 Original Scan Resolution (90% quality)</option>
-                  </select>
-                </div>
-                <div class="omnibus-check-row">
-                  <input type="checkbox" id="combined-grayscale-check" class="omnibus-checkbox" />
-                  <label for="combined-grayscale-check" class="omnibus-check-label">
-                    16-level Grayscale (Kindle Paperwhite/Oasis)
-                  </label>
-                </div>
-                <div class="omnibus-check-row">
-                  <input type="checkbox" id="combined-original-check" class="omnibus-checkbox" />
-                  <label for="combined-original-check" class="omnibus-check-label" style="color:var(--text-primary);font-weight:600;">
-                    <i class="ri-file-copy-2-line" style="color:var(--accent-blue,#3b82f6);"></i> Export Original Versions (No colorization needed)
-                  </label>
-                </div>
-              </div>
-
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.35rem;">
-                <button class="btn btn-block" id="btn-combined-epub"
-                        onclick="exportCombined('epub')"
-                        style="background:var(--accent-purple,#a855f7);border-color:var(--accent-purple,#a855f7);color:#fff;font-size:0.76rem;padding:6px 2px;"
-                        title="Combined EPUB3 for Send-to-Kindle, Apple Books &amp; Kobo">
-                  <i class="ri-book-2-line"></i> Single EPUB
+          <div class="card-collapsible-body" id="card-body-export">
+            <div class="card-collapsible-inner">
+              <p class="export-sidebar-hint">Download active document in your preferred format:</p>
+              <div class="sidebar-export-buttons">
+                <button class="btn btn-success btn-block" id="btn-sidebar-export-pdf" onclick="exportDocument('pdf')">
+                  <i class="ri-file-pdf-2-line"></i> Download as PDF
                 </button>
-                <button class="btn btn-block" id="btn-combined-mobi"
-                        onclick="exportCombined('mobi')"
-                        style="background:#eab308;border-color:#ca8a04;color:#000;font-size:0.76rem;padding:6px 2px;font-weight:600;"
-                        title="Combined MOBI for direct Kindle e-reader USB sideloading">
-                  <i class="ri-amazon-line"></i> Kindle MOBI
+                <button class="btn btn-accent btn-block" id="btn-sidebar-export-epub" onclick="exportDocument('epub')">
+                  <i class="ri-book-open-line"></i> Download as EPUB
                 </button>
-                <button class="btn btn-block" id="btn-combined-pdf"
-                        onclick="exportCombined('pdf')"
-                        style="background:var(--accent-green,#22c55e);border-color:var(--accent-green,#22c55e);color:#fff;font-size:0.76rem;padding:6px 2px;"
-                        title="Combined PDF with volume bookmarks">
-                  <i class="ri-file-pdf-2-line"></i> Single PDF
+                <button class="btn btn-warning btn-block" id="btn-sidebar-export-mobi" onclick="exportDocument('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+                  <i class="ri-amazon-line"></i> Download Kindle (MOBI)
+                </button>
+                <button class="btn btn-secondary btn-block" id="btn-sidebar-export-zip" onclick="exportDocument('zip')">
+                  <i class="ri-file-zip-line"></i> Download Images ZIP
                 </button>
               </div>
 
-              <!-- Combined Export Progress & Cancellation Box -->
-              <div id="combined-export-progress-box" class="hidden" style="margin-top:0.75rem;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:8px;padding:0.75rem;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
-                  <span id="combined-progress-title" style="font-size:0.8rem;font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:0.35rem;">
-                    <i class="ri-loader-4-line spin" style="color:var(--accent-purple,#a855f7);"></i>
-                    <span id="combined-progress-title-text">Exporting Single Volume...</span>
-                  </span>
-                  <span id="combined-progress-pct" style="font-size:0.78rem;font-weight:700;color:var(--accent-purple,#a855f7);">0%</span>
+              <!-- Batch Export section (visible when 2+ documents are present) -->
+              <div class="batch-export-section hidden" id="sidebar-batch-export">
+                <div class="batch-export-divider"></div>
+                <div class="batch-export-header">
+                  <i class="ri-archive-line"></i>
+                  <h4>Export All Documents</h4>
                 </div>
-                <div style="background:rgba(255,255,255,0.08);border-radius:999px;height:6px;overflow:hidden;margin-bottom:0.45rem;">
-                  <div id="combined-progress-bar-fill" style="width:0%;height:100%;background:linear-gradient(90deg, var(--accent-purple,#a855f7), var(--accent-green,#22c55e));transition:width 0.2s ease;"></div>
-                </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;">
-                  <span id="combined-progress-subtext" style="font-size:0.72rem;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">Preparing volume pages...</span>
-                  <button class="btn btn-danger btn-sm" id="btn-cancel-combined-export" onclick="cancelCombinedExport()" style="padding:2px 8px;font-size:0.72rem;flex-shrink:0;">
-                    <i class="ri-close-circle-line"></i> Cancel
+                <p class="export-sidebar-hint">Bundle all queued documents into a single archive:</p>
+                <div class="sidebar-export-buttons">
+                  <button class="btn btn-success btn-block" id="btn-batch-export-auto" onclick="exportBatch('auto')">
+                    <i class="ri-folder-zip-line"></i> Export All (Original Formats)
+                  </button>
+                  <button class="btn btn-accent btn-block" id="btn-batch-export-epub" onclick="exportBatch('epub')">
+                    <i class="ri-book-open-line"></i> Export All as EPUBs ZIP
+                  </button>
+                  <button class="btn btn-warning btn-block" id="btn-batch-export-mobi" onclick="exportBatch('mobi')" style="background:#eab308;border-color:#ca8a04;color:#000;font-weight:600;">
+                    <i class="ri-amazon-line"></i> Export All as Kindle (.mobi) ZIP
+                  </button>
+                  <button class="btn btn-secondary btn-block" id="btn-batch-export-pdf" onclick="exportBatch('pdf')">
+                    <i class="ri-file-pdf-2-line"></i> Export All as PDFs ZIP
                   </button>
                 </div>
+
+                <!-- Combined single-file export -->
+                <div style="margin-top:1rem;border-top:1px solid var(--border-color);padding-top:0.85rem;">
+                  <div style="display:flex;align-items:center;gap:0.4rem;margin-bottom:0.5rem;">
+                    <i class="ri-book-2-line" style="color:var(--accent-purple,#a855f7);font-size:1rem;"></i>
+                    <span style="font-weight:600;font-size:0.88rem;">Export as Single E-Reader Copy</span>
+                  </div>
+                  <p style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.6rem;">
+                    Merge all volumes into <strong>one file</strong> with a chapter-per-volume TOC — perfect for Kindle, Kobo &amp; Apple Books.
+                  </p>
+                  <input type="text" id="combined-title-input"
+                         placeholder="Collection title (optional)"
+                         class="form-input"
+                         style="font-size:0.82rem;margin-bottom:0.5rem;"
+                         value="Colorized Manga Collection" />
+
+                  <!-- E-Reader Optimization & Omnibus Controls -->
+                  <div class="omnibus-controls-box">
+                    <div class="omnibus-field">
+                      <label for="combined-chunk-select" class="omnibus-field-label">
+                        <i class="ri-split-cells-vertical"></i> Series Splitting (Kindle Indexing Safe):
+                      </label>
+                      <select id="combined-chunk-select" class="form-select form-select-sm">
+                        <option value="size_250" selected>⚡ Auto-split at ~250 MB (Kindle Paperwhite/Oasis Optimal)</option>
+                        <option value="size_200">⚡ Auto-split at ~200 MB (Send-to-Kindle Web Max)</option>
+                        <option value="size_100">⚡ Auto-split at ~100 MB (Send-to-Kindle Email Safe)</option>
+                        <option value="size_350">⚡ Auto-split at ~350 MB (Colorsoft / Kobo Optimal)</option>
+                        <option value="size_500">⚡ Auto-split at ~500 MB (Large Tablets / iPad)</option>
+                        <option value="size_custom">⚙️ Auto-split at Custom MB Size...</option>
+                        <option value="volumes_1">📖 1 Volume per Part (Single volumes ZIP)</option>
+                        <option value="volumes_2">📚 2-in-1 Omnibus Edition (2-vol parts)</option>
+                        <option value="volumes_3">📚 3-in-1 Omnibus Edition (3-vol parts)</option>
+                        <option value="volumes_5">📦 5-in-1 Omnibus Edition (5-vol parts)</option>
+                        <option value="none">📜 Single Continuous File (No splitting - All merged)</option>
+                      </select>
+                    </div>
+                    <div id="combined-custom-size-box" class="omnibus-field hidden" style="margin-top:0.35rem;">
+                      <label for="combined-custom-size-input" class="omnibus-field-label">
+                        <i class="ri-ruler-line"></i> Custom Auto-Split Target:
+                      </label>
+                      <div style="display:flex;align-items:center;gap:0.4rem;">
+                        <input type="number" id="combined-custom-size-input" class="form-input form-input-sm"
+                               min="30" max="2000" step="10" value="200" style="font-size:0.8rem;padding:4px 8px;width:100px;" />
+                        <span style="font-size:0.78rem;color:var(--text-secondary);">MB limit per part</span>
+                      </div>
+                    </div>
+                    <div class="omnibus-field">
+                      <label for="combined-preset-select" class="omnibus-field-label">
+                        <i class="ri-aspect-ratio-line"></i> Resolution &amp; Compression:
+                      </label>
+                      <select id="combined-preset-select" class="form-select form-select-sm">
+                        <option value="colorsoft" selected>🌈 Kindle Colorsoft / Color E-Ink (1600px, Vibrancy Boost)</option>
+                        <option value="kindle">📖 Kindle B&amp;W Paperwhite/Oasis (1600px, 80%)</option>
+                        <option value="tablet">📱 Tablet / iPad HD (1920px, 85% quality)</option>
+                        <option value="original">🔍 Original Scan Resolution (90% quality)</option>
+                      </select>
+                    </div>
+                    <div class="omnibus-check-row">
+                      <input type="checkbox" id="combined-grayscale-check" class="omnibus-checkbox" />
+                      <label for="combined-grayscale-check" class="omnibus-check-label">
+                        16-level Grayscale (Kindle Paperwhite/Oasis)
+                      </label>
+                    </div>
+                    <div class="omnibus-check-row">
+                      <input type="checkbox" id="combined-original-check" class="omnibus-checkbox" />
+                      <label for="combined-original-check" class="omnibus-check-label" style="color:var(--text-primary);font-weight:600;">
+                        <i class="ri-file-copy-2-line" style="color:var(--accent-blue,#3b82f6);"></i> Export Original Versions (No colorization needed)
+                      </label>
+                    </div>
+                  </div>
+
+                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.35rem;">
+                    <button class="btn btn-block" id="btn-combined-epub"
+                            onclick="exportCombined('epub')"
+                            style="background:var(--accent-purple,#a855f7);border-color:var(--accent-purple,#a855f7);color:#fff;font-size:0.76rem;padding:6px 2px;"
+                            title="Combined EPUB3 for Send-to-Kindle, Apple Books &amp; Kobo">
+                      <i class="ri-book-2-line"></i> Single EPUB
+                    </button>
+                    <button class="btn btn-block" id="btn-combined-mobi"
+                            onclick="exportCombined('mobi')"
+                            style="background:#eab308;border-color:#ca8a04;color:#000;font-size:0.76rem;padding:6px 2px;font-weight:600;"
+                            title="Combined MOBI for direct Kindle e-reader USB sideloading">
+                      <i class="ri-amazon-line"></i> Kindle MOBI
+                    </button>
+                    <button class="btn btn-block" id="btn-combined-pdf"
+                            onclick="exportCombined('pdf')"
+                            style="background:var(--accent-green,#22c55e);border-color:var(--accent-green,#22c55e);color:#fff;font-size:0.76rem;padding:6px 2px;"
+                            title="Combined PDF with volume bookmarks">
+                      <i class="ri-file-pdf-2-line"></i> Single PDF
+                    </button>
+                  </div>
+
+                  <!-- Combined Export Progress & Cancellation Box -->
+                  <div id="combined-export-progress-box" class="hidden" style="margin-top:0.75rem;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);border-radius:8px;padding:0.75rem;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
+                      <span id="combined-progress-title" style="font-size:0.8rem;font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:0.35rem;">
+                        <i class="ri-loader-4-line spin" style="color:var(--accent-purple,#a855f7);"></i>
+                        <span id="combined-progress-title-text">Exporting Single Volume...</span>
+                      </span>
+                      <span id="combined-progress-pct" style="font-size:0.78rem;font-weight:700;color:var(--accent-purple,#a855f7);">0%</span>
+                    </div>
+                    <div style="background:rgba(255,255,255,0.08);border-radius:999px;height:6px;overflow:hidden;margin-bottom:0.45rem;">
+                      <div id="combined-progress-bar-fill" style="width:0%;height:100%;background:linear-gradient(90deg, var(--accent-purple,#a855f7), var(--accent-green,#22c55e));transition:width 0.2s ease;"></div>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:0.4rem;">
+                      <span id="combined-progress-subtext" style="font-size:0.72rem;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">Preparing volume pages...</span>
+                      <button class="btn btn-danger btn-sm" id="btn-cancel-combined-export" onclick="cancelCombinedExport()" style="padding:2px 8px;font-size:0.72rem;flex-shrink:0;">
+                        <i class="ri-close-circle-line"></i> Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
+
             </div>
           </div>
-
         </div>
 
       </aside>
