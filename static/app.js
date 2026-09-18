@@ -285,11 +285,258 @@ document.addEventListener("click", (e) => {
 });
 
 
+// Sidebar Cards Collapsible & Expandable System
+const SIDEBAR_CARDS = [
+  { id: "card-doc-queue", headerId: "header-doc-queue", btnId: "btn-collapse-doc-queue", key: "doc_queue", label: "Document Queue" },
+  { id: "config-card", headerId: "header-config", btnId: "btn-collapse-config", key: "config", label: "AI Engine & Models" },
+  { id: "palette-card", headerId: "header-palette", btnId: "btn-collapse-palette", key: "palette", label: "Character Palette" },
+  { id: "sidebar-export-card", headerId: "header-export", btnId: "btn-collapse-export", key: "export", label: "Export Manga" }
+];
+
+function loadSidebarCollapsedStates() {
+  try {
+    return JSON.parse(localStorage.getItem("kobean_sidebar_cards_collapsed") || "{}");
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveSidebarCollapsedState(key, isCollapsed) {
+  try {
+    const states = loadSidebarCollapsedStates();
+    states[key] = isCollapsed;
+    localStorage.setItem("kobean_sidebar_cards_collapsed", JSON.stringify(states));
+  } catch (e) {}
+}
+
+function toggleSidebarCard(cardId, forceState) {
+  const cfg = SIDEBAR_CARDS.find(c => c.id === cardId);
+  const card = document.getElementById(cardId);
+  if (!card) return;
+
+  const header = cfg ? document.getElementById(cfg.headerId) : card.querySelector(".card-collapsible-header");
+  const btn = cfg ? document.getElementById(cfg.btnId) : card.querySelector(".btn-card-collapse");
+  const body = card.querySelector(".card-collapsible-body");
+  const label = cfg ? cfg.label : "Card";
+
+  const isCurrentlyCollapsed = card.classList.contains("collapsed");
+  const willCollapse = (forceState !== undefined) ? forceState : !isCurrentlyCollapsed;
+
+  // Add animating flag for smooth transition
+  card.classList.add("is-animating");
+
+  if (body) {
+    const onEnd = (e) => {
+      if (e.target === body && (e.propertyName === "grid-template-rows" || e.propertyName === "opacity")) {
+        card.classList.remove("is-animating");
+        body.removeEventListener("transitionend", onEnd);
+      }
+    };
+    body.addEventListener("transitionend", onEnd);
+    setTimeout(() => card.classList.remove("is-animating"), 400);
+  }
+
+  if (willCollapse) {
+    card.classList.add("collapsed");
+    if (header) header.setAttribute("aria-expanded", "false");
+    if (btn) {
+      btn.setAttribute("aria-expanded", "false");
+      btn.title = `Expand ${label}`;
+      btn.setAttribute("aria-label", `Expand ${label}`);
+    }
+    // Close any active custom-select dropdowns within this card
+    card.querySelectorAll(".custom-select-container.open").forEach(c => {
+      c.classList.remove("open");
+      const trig = c.querySelector(".custom-select-trigger");
+      if (trig) trig.setAttribute("aria-expanded", "false");
+    });
+  } else {
+    card.classList.remove("collapsed");
+    if (header) header.setAttribute("aria-expanded", "true");
+    if (btn) {
+      btn.setAttribute("aria-expanded", "true");
+      btn.title = `Collapse ${label}`;
+      btn.setAttribute("aria-label", `Collapse ${label}`);
+    }
+  }
+
+  if (cfg) {
+    saveSidebarCollapsedState(cfg.key, willCollapse);
+  }
+}
+
+function updateSidebarConfigSummary(provider) {
+  const summaryBadge = document.getElementById("config-card-summary-badge");
+  if (!summaryBadge) return;
+  if (provider === "resnext_generator") {
+    summaryBadge.innerText = "🧬 ResNeXt Net";
+  } else if (provider === "google_nano") {
+    summaryBadge.innerText = "🍌 Google Nano";
+  } else if (provider === "apple_foundation") {
+    summaryBadge.innerText = "🍏 Apple AI";
+  } else {
+    summaryBadge.innerText = "🎨 Smart Local";
+  }
+}
+
+function initSidebarCollapsibleCards() {
+  const savedStates = loadSidebarCollapsedStates();
+
+  SIDEBAR_CARDS.forEach(cfg => {
+    const card = document.getElementById(cfg.id);
+    const header = document.getElementById(cfg.headerId);
+    const btn = document.getElementById(cfg.btnId);
+    if (!card) return;
+
+    // Restore saved state without animation
+    if (savedStates[cfg.key] === true) {
+      card.classList.add("collapsed");
+      if (header) header.setAttribute("aria-expanded", "false");
+      if (btn) {
+        btn.setAttribute("aria-expanded", "false");
+        btn.title = `Expand ${cfg.label}`;
+        btn.setAttribute("aria-label", `Expand ${cfg.label}`);
+      }
+    }
+
+    // Bind header click
+    if (header) {
+      header.addEventListener("click", (e) => {
+        // Prevent toggle if clicking interactive controls
+        if (e.target.closest("button:not(.btn-card-collapse), a, input, select, textarea, .custom-select-container, .badge")) {
+          return;
+        }
+        toggleSidebarCard(cfg.id);
+      });
+
+      header.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          if (e.target.closest("button, a, input, select, textarea")) return;
+          e.preventDefault();
+          toggleSidebarCard(cfg.id);
+        }
+      });
+    }
+
+    // Bind button click
+    if (btn) {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleSidebarCard(cfg.id);
+      });
+    }
+  });
+}
+
+/* ============================================================
+   Sidebar Drawer Collapse & Expand System (Left Edge Dock)
+   ============================================================ */
+
+const SIDEBAR_DRAWER_STORAGE_KEY = "kobean_sidebar_drawer_collapsed";
+
+function isSidebarDrawerCollapsed() {
+  const dashboard = document.getElementById("dashboard-section");
+  return dashboard ? dashboard.classList.contains("sidebar-collapsed") : false;
+}
+
+function toggleSidebarDrawer(forceCollapsed) {
+  const dashboard = document.getElementById("dashboard-section");
+  const edgeBtn = document.getElementById("btn-sidebar-edge-expand");
+  const collapseBtn = document.getElementById("btn-sidebar-collapse");
+  const sidebar = document.getElementById("app-sidebar");
+  if (!dashboard) return;
+
+  const isCurrentlyCollapsed = dashboard.classList.contains("sidebar-collapsed");
+  const willCollapse = (forceCollapsed !== undefined) ? forceCollapsed : !isCurrentlyCollapsed;
+
+  if (willCollapse) {
+    dashboard.classList.add("sidebar-collapsed");
+    if (sidebar) sidebar.setAttribute("aria-hidden", "true");
+    if (edgeBtn) {
+      // Only reveal floating edge button if dashboard section is active
+      if (!dashboard.classList.contains("hidden")) {
+        edgeBtn.classList.remove("hidden");
+      }
+      edgeBtn.setAttribute("aria-expanded", "false");
+    }
+    if (collapseBtn) {
+      collapseBtn.setAttribute("aria-expanded", "false");
+    }
+  } else {
+    dashboard.classList.remove("sidebar-collapsed");
+    if (sidebar) sidebar.removeAttribute("aria-hidden");
+    if (edgeBtn) {
+      edgeBtn.classList.add("hidden");
+      edgeBtn.setAttribute("aria-expanded", "true");
+    }
+    if (collapseBtn) {
+      collapseBtn.setAttribute("aria-expanded", "true");
+    }
+  }
+
+  try {
+    localStorage.setItem(SIDEBAR_DRAWER_STORAGE_KEY, willCollapse ? "true" : "false");
+  } catch (e) {}
+}
+
+function initSidebarDrawer() {
+  const dashboard = document.getElementById("dashboard-section");
+  const edgeBtn = document.getElementById("btn-sidebar-edge-expand");
+  const collapseBtn = document.getElementById("btn-sidebar-collapse");
+  const sidebar = document.getElementById("app-sidebar");
+  if (!dashboard) return;
+
+  let savedCollapsed = false;
+  try {
+    savedCollapsed = localStorage.getItem(SIDEBAR_DRAWER_STORAGE_KEY) === "true";
+  } catch (e) {}
+
+  if (savedCollapsed) {
+    dashboard.classList.add("sidebar-collapsed");
+    if (sidebar) sidebar.setAttribute("aria-hidden", "true");
+    if (edgeBtn && !dashboard.classList.contains("hidden")) {
+      edgeBtn.classList.remove("hidden");
+      edgeBtn.setAttribute("aria-expanded", "false");
+    }
+    if (collapseBtn) {
+      collapseBtn.setAttribute("aria-expanded", "false");
+    }
+  } else {
+    if (collapseBtn) {
+      collapseBtn.setAttribute("aria-expanded", "true");
+    }
+  }
+
+  // Keyboard shortcut: Cmd+B (Mac) or Ctrl+B (Windows/Linux)
+  window.addEventListener("keydown", (e) => {
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable)) {
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+      e.preventDefault();
+      // Only toggle when dashboard is visible
+      if (!dashboard.classList.contains("hidden")) {
+        toggleSidebarDrawer();
+      }
+    }
+  });
+
+  if (collapseBtn) {
+    collapseBtn.addEventListener("click", () => toggleSidebarDrawer(true));
+  }
+  if (edgeBtn) {
+    edgeBtn.addEventListener("click", () => toggleSidebarDrawer(false));
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
   updateModelVariants("resnext_generator");
   initAllCustomSelects();
   loadMangaPresets();
+  initSidebarCollapsibleCards();
+  initSidebarDrawer();
 
   // Auto-restore session from sessionStorage or fetch the latest active session
   const savedSessionId = sessionStorage.getItem("active_session_id");
@@ -684,6 +931,7 @@ function selectProvider(provider) {
   const apiKeyGroup = document.getElementById("api-key-group");
   apiKeyGroup.style.display = (provider === "google_nano") ? "block" : "none";
 
+  updateSidebarConfigSummary(provider);
   updateModelVariants(provider);
   triggerLivePreview(100);
 }
@@ -1410,6 +1658,10 @@ async function switchActiveDocument(sessionId) {
 function renderDashboard() {
   document.getElementById("upload-section").classList.add("hidden");
   document.getElementById("dashboard-section").classList.remove("hidden");
+  if (isSidebarDrawerCollapsed()) {
+    const edgeBtn = document.getElementById("btn-sidebar-edge-expand");
+    if (edgeBtn) edgeBtn.classList.remove("hidden");
+  }
 
   document.getElementById("doc-filename").innerText = currentSession.filename;
   document.getElementById("doc-total-pages").innerText = currentSession.total_pages;
@@ -3364,6 +3616,8 @@ function resetUpload() {
   selectedQueueSessions.clear();
   updateQueueSelectionUI();
   document.getElementById("dashboard-section").classList.add("hidden");
+  const edgeBtn = document.getElementById("btn-sidebar-edge-expand");
+  if (edgeBtn) edgeBtn.classList.add("hidden");
   document.getElementById("upload-section").classList.remove("hidden");
   
   const idleContent = document.getElementById("dropzone-idle-content");
