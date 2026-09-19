@@ -530,13 +530,236 @@ function initSidebarDrawer() {
   }
 }
 
+// ==========================================================================
+// Multi-Theme Studio Engine (7 Curated Aesthetics)
+// ==========================================================================
+const THEMES = [
+  {
+    id: "cyber-neon",
+    name: "Cyber Neon",
+    tagline: "Tokyo Midnight Flagship",
+    icon: "ri-flashlight-line",
+    metaColor: "#090d16",
+    swatches: ["#090d16", "#06b6d4", "#8b5cf6", "#ec4899"]
+  },
+  {
+    id: "manga-ink",
+    name: "Manga Ink",
+    tagline: "Monochrome Dark Studio",
+    icon: "ri-ink-bottle-line",
+    metaColor: "#0a0b0e",
+    swatches: ["#0a0b0e", "#f1f5f9", "#94a3b8", "#64748b"]
+  },
+  {
+    id: "shonen-sunrise",
+    name: "Shonen Sunrise",
+    tagline: "Fiery Flame & Amber Gold",
+    icon: "ri-fire-line",
+    metaColor: "#0f0a09",
+    swatches: ["#0f0a09", "#f59e0b", "#ef4444", "#f97316"]
+  },
+  {
+    id: "sakura-twilight",
+    name: "Sakura Twilight",
+    tagline: "Pastel Rose & Violet Plum",
+    icon: "ri-heart-3-line",
+    metaColor: "#0f0a17",
+    swatches: ["#0f0a17", "#f472b6", "#c084fc", "#818cf8"]
+  },
+  {
+    id: "emerald-alchemist",
+    name: "Emerald Alchemist",
+    tagline: "Neo Matrix & Cyber Forest",
+    icon: "ri-leaf-line",
+    metaColor: "#06120d",
+    swatches: ["#06120d", "#10b981", "#2dd4bf", "#84cc16"]
+  },
+  {
+    id: "nord-frost",
+    name: "Nord Frost",
+    tagline: "Arctic Slate & Polar Blue",
+    icon: "ri-compass-3-line",
+    metaColor: "#0b111e",
+    swatches: ["#0b111e", "#38bdf8", "#6366f1", "#2dd4bf"]
+  },
+  {
+    id: "paper-studio",
+    name: "Paper Studio",
+    tagline: "Editorial Daybreak Light",
+    icon: "ri-sun-line",
+    metaColor: "#f6f5f0",
+    swatches: ["#f6f5f0", "#4f46e5", "#ea580c", "#d946ef"]
+  }
+];
+
+let activeThemeId = "cyber-neon";
+let isThemeDropdownOpen = false;
+
+function initThemeSystem() {
+  const savedTheme = localStorage.getItem("kobean_theme") || "cyber-neon";
+  const matched = THEMES.some(t => t.id === savedTheme);
+  const initialTheme = matched ? savedTheme : "cyber-neon";
+  applyTheme(initialTheme, false);
+  renderThemeDropdownMenu();
+
+  // Guarded event listeners (.betterleaks audited)
+  document.addEventListener("click", handleThemeOutsideClick);
+  document.addEventListener("keydown", handleThemeKeydown);
+}
+
+function renderThemeDropdownMenu() {
+  const menuList = document.getElementById("theme-menu-list");
+  if (!menuList) return;
+
+  menuList.innerHTML = THEMES.map(theme => {
+    const isActive = theme.id === activeThemeId;
+    const swatchDots = theme.swatches.map(color =>
+      `<span class="theme-swatch-dot" style="background-color: ${color};" title="${color}"></span>`
+    ).join("");
+
+    return `
+      <div class="theme-option-item ${isActive ? "active" : ""}"
+           role="menuitemradio"
+           aria-checked="${isActive}"
+           tabindex="0"
+           onclick="selectTheme('${theme.id}')"
+           onkeydown="if(event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectTheme('${theme.id}'); }"
+           data-theme-id="${theme.id}"
+           title="${theme.name} — ${theme.tagline}">
+        <div class="theme-option-left">
+          <div class="theme-option-icon" style="color: ${theme.swatches[1]};">
+            <i class="${theme.icon}"></i>
+          </div>
+          <div class="theme-option-text">
+            <span class="theme-option-name">${theme.name}</span>
+            <span class="theme-option-desc">${theme.tagline}</span>
+          </div>
+        </div>
+        <div class="theme-option-right">
+          <div class="theme-swatch-strip">
+            ${swatchDots}
+          </div>
+          <span class="theme-check-icon"><i class="ri-check-line"></i></span>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function applyTheme(themeId, notify = true) {
+  const theme = THEMES.find(t => t.id === themeId) || THEMES[0];
+  activeThemeId = theme.id;
+  localStorage.setItem("kobean_theme", activeThemeId);
+
+  // Set attribute on both <html> and <body>
+  document.documentElement.setAttribute("data-theme", activeThemeId);
+  if (document.body) {
+    document.body.setAttribute("data-theme", activeThemeId);
+  }
+
+  // Update mobile status bar tint
+  const metaTheme = document.getElementById("meta-theme-color") || document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) {
+    metaTheme.setAttribute("content", theme.metaColor);
+  }
+
+  // Update header toggle button label and icon
+  const btnLabel = document.getElementById("theme-btn-label");
+  if (btnLabel) {
+    btnLabel.textContent = theme.name;
+  }
+  const btnIcon = document.getElementById("theme-btn-icon");
+  if (btnIcon) {
+    btnIcon.className = `${theme.icon}`;
+    btnIcon.style.color = theme.swatches[1];
+  }
+
+  // Update active state in dropdown
+  const items = document.querySelectorAll(".theme-option-item");
+  items.forEach(el => {
+    const isCur = el.dataset.themeId === activeThemeId;
+    el.classList.toggle("active", isCur);
+    el.setAttribute("aria-checked", isCur ? "true" : "false");
+  });
+
+  if (notify && typeof showToast === "function") {
+    showToast(`🎨 Theme switched to ${theme.name}`, "info");
+  }
+}
+
+function selectTheme(themeId) {
+  applyTheme(themeId, true);
+  closeThemeDropdown();
+}
+
+function toggleThemeDropdown(event) {
+  if (event) {
+    event.stopPropagation();
+    event.preventDefault();
+  }
+  if (isThemeDropdownOpen) {
+    closeThemeDropdown();
+  } else {
+    openThemeDropdown();
+  }
+}
+
+function openThemeDropdown() {
+  const menu = document.getElementById("theme-dropdown-menu");
+  const container = document.getElementById("theme-switcher-container");
+  const btn = document.getElementById("btn-theme-toggle");
+  if (!menu) return;
+
+  menu.classList.remove("hidden");
+  if (container) container.classList.add("open");
+  if (btn) btn.setAttribute("aria-expanded", "true");
+  isThemeDropdownOpen = true;
+
+  // Focus active theme item for keyboard navigation
+  setTimeout(() => {
+    const activeItem = menu.querySelector(".theme-option-item.active");
+    if (activeItem) activeItem.focus();
+  }, 50);
+}
+
+function closeThemeDropdown() {
+  const menu = document.getElementById("theme-dropdown-menu");
+  const container = document.getElementById("theme-switcher-container");
+  const btn = document.getElementById("btn-theme-toggle");
+  if (!menu) return;
+
+  menu.classList.add("hidden");
+  if (container) container.classList.remove("open");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+  isThemeDropdownOpen = false;
+}
+
+function handleThemeOutsideClick(event) {
+  if (!isThemeDropdownOpen) return;
+  const container = document.getElementById("theme-switcher-container");
+  if (container && !container.contains(event.target)) {
+    closeThemeDropdown();
+  }
+}
+
+function handleThemeKeydown(event) {
+  if (!isThemeDropdownOpen) return;
+  if (event.key === "Escape") {
+    closeThemeDropdown();
+    const btn = document.getElementById("btn-theme-toggle");
+    if (btn) btn.focus();
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  initThemeSystem();
   setupEventListeners();
   updateModelVariants("resnext_generator");
   initAllCustomSelects();
   loadMangaPresets();
   initSidebarCollapsibleCards();
   initSidebarDrawer();
+  initComparatorPageCounter();
 
   // Auto-restore session from sessionStorage or fetch the latest active session
   const savedSessionId = sessionStorage.getItem("active_session_id");
@@ -854,6 +1077,9 @@ function setupEventListeners() {
     } else if (e.key === "f" || e.key === "F") {
       e.preventDefault();
       toggleComparatorFullscreen();
+    } else if (e.key === "t" || e.key === "T") {
+      e.preventDefault();
+      toggleComparatorThumbPanel();
     } else if (e.key === "+" || e.key === "=") {
       e.preventDefault();
       changeComparatorZoom(0.25);
@@ -2355,6 +2581,7 @@ function renderDashboard() {
   document.getElementById("gallery-total-count").innerText = currentSession.total_pages;
   renderGalleryGrid();
   renderDocumentQueue();
+  renderComparatorNavPanel();
 
   // Show palette card and load existing characters for this session
   const paletteCard = document.getElementById("palette-card");
@@ -2436,11 +2663,7 @@ function renderGalleryGrid() {
     // Show a small recolorize button on colorized pages
     const recolorizeBtn = page.status === "colorized"
       ? `<button class="page-recolorize-btn" title="Force re-colorize this page"
-               onclick="event.stopPropagation(); recolorizePage(${idx})"
-               style="position:absolute;bottom:28px;right:6px;z-index:4;
-                      background:rgba(249,115,22,0.92);border:none;border-radius:4px;
-                      padding:3px 7px;cursor:pointer;color:#fff;font-size:0.7rem;
-                      display:flex;align-items:center;gap:3px;">
+               onclick="event.stopPropagation(); recolorizePage(${idx})">
            <i class="ri-refresh-line"></i> Recolorize
          </button>`
       : "";
@@ -3182,6 +3405,14 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   // Reset handle with container dimensions applied
   requestAnimationFrame(() => setSplitPosition(currentSplitPct));
 
+  // Update left thumbnail navigation panel and editable page counter
+  updateComparatorPageCounter(pageIdx, totalPages);
+  updateComparatorNavActive(pageIdx);
+  const thumbList = document.getElementById("comparator-nav-list");
+  if (thumbList && thumbList.children.length === 0) {
+    renderComparatorNavPanel();
+  }
+
   if (typeof updatePageCharacterChips === "function") {
     updatePageCharacterChips(pageIdx);
   }
@@ -3695,6 +3926,218 @@ function navigatePreviewPage(direction) {
   }
 }
 window.navigatePreviewPage = navigatePreviewPage;
+
+// --- Comparator Thumbnail Navigation Panel & Editable Page Counter ---
+
+let isComparatorPageCounterInitialized = false;
+
+/**
+ * Initializes listeners for the editable page counter input (Enter, Arrows, Escape, Focus, Blur).
+ */
+function initComparatorPageCounter() {
+  const input = document.getElementById("comparator-page-input");
+  if (!input || isComparatorPageCounterInitialized) return;
+  isComparatorPageCounterInitialized = true;
+
+  // Select all characters on focus for instant replacement
+  input.addEventListener("focus", () => {
+    input.select();
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitPageCounterJump();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      navigatePreviewPage(1);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      navigatePreviewPage(-1);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      revertPageCounterInput();
+      input.blur();
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    revertPageCounterInput();
+  });
+}
+window.initComparatorPageCounter = initComparatorPageCounter;
+
+/**
+ * Commits the user's typed page number and jumps to that page if valid.
+ */
+function commitPageCounterJump() {
+  const input = document.getElementById("comparator-page-input");
+  if (!input || !currentSession || !currentSession.pages || currentSession.pages.length === 0) return;
+
+  const totalPages = currentSession.pages.length;
+  const rawVal = input.value.trim();
+  const parsed = parseInt(rawVal, 10);
+
+  if (!isNaN(parsed) && parsed >= 1 && parsed <= totalPages) {
+    const targetIdx = parsed - 1;
+    openSplitPreview(targetIdx, true);
+    input.blur();
+  } else {
+    input.classList.add("input-error");
+    setTimeout(() => input.classList.remove("input-error"), 500);
+    showToast(`Please enter a page number between 1 and ${totalPages}`, "warning");
+    revertPageCounterInput();
+  }
+}
+
+/**
+ * Restores the page counter input value to the current active page formatted.
+ */
+function revertPageCounterInput() {
+  const input = document.getElementById("comparator-page-input");
+  if (!input || !currentSession || !currentSession.pages || currentSession.pages.length === 0) return;
+  const totalPages = currentSession.pages.length;
+  const padDigits = totalPages >= 10 ? 2 : 1;
+  input.value = String(currentPreviewPageIndex + 1).padStart(padDigits, "0");
+}
+
+/**
+ * Updates the page counter displays (input and total) in the comparator header.
+ */
+function updateComparatorPageCounter(pageIdx, totalPages) {
+  const input = document.getElementById("comparator-page-input");
+  const total = document.getElementById("comparator-page-total");
+  if (!input || !total) return;
+
+  const count = typeof totalPages === "number" ? totalPages : (currentSession?.pages?.length || 0);
+  const padDigits = count >= 10 ? 2 : 1;
+
+  if (document.activeElement !== input) {
+    input.value = String(pageIdx + 1).padStart(padDigits, "0");
+  }
+  total.innerText = String(count).padStart(padDigits, "0");
+}
+window.updateComparatorPageCounter = updateComparatorPageCounter;
+
+/**
+ * Renders the full list of page thumbnails in the left navigation panel.
+ */
+function renderComparatorNavPanel() {
+  const navList = document.getElementById("comparator-nav-list");
+  const countBadge = document.getElementById("comparator-nav-count");
+  if (!navList || !currentSession || !currentSession.pages) return;
+
+  const pages = currentSession.pages;
+  const totalPages = pages.length;
+  if (countBadge) countBadge.innerText = totalPages;
+
+  navList.innerHTML = "";
+  const padDigits = totalPages >= 10 ? 2 : 1;
+
+  pages.forEach((page, idx) => {
+    const item = document.createElement("div");
+    item.className = "comparator-thumb-item" + (idx === currentPreviewPageIndex ? " active" : "");
+    item.dataset.pageIndex = idx;
+    item.title = `Jump to ${page.display_name || 'Page ' + (idx + 1)}`;
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `Page ${idx + 1}`);
+
+    const origUrl = `/api/session/${currentSession.session_id}/image/original/${page.filename}`;
+    const thumbUrl = page.colorized_url || origUrl;
+
+    const imgWrapper = document.createElement("div");
+    imgWrapper.className = "comp-thumb-img-wrapper";
+
+    const img = document.createElement("img");
+    img.className = "comp-thumb-img";
+    img.id = `comp-thumb-img-${idx}`;
+    img.src = thumbUrl;
+    img.alt = page.display_name || `Page ${idx + 1}`;
+    img.loading = "lazy";
+    img.draggable = false;
+
+    const badge = document.createElement("span");
+    badge.className = "comp-thumb-badge";
+    badge.innerText = String(idx + 1).padStart(padDigits, "0");
+
+    imgWrapper.appendChild(img);
+    imgWrapper.appendChild(badge);
+    item.appendChild(imgWrapper);
+
+    item.addEventListener("click", () => {
+      openSplitPreview(idx, true);
+    });
+
+    item.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openSplitPreview(idx, true);
+      }
+    });
+
+    navList.appendChild(item);
+  });
+
+  // Restore collapsed state from localStorage preference
+  const isCollapsed = localStorage.getItem("kobean_comparator_nav_collapsed") === "true";
+  const navPanel = document.getElementById("comparator-nav-panel");
+  const toggleBtn = document.getElementById("btn-toggle-comparator-thumbs");
+  if (navPanel) {
+    navPanel.classList.toggle("collapsed", isCollapsed);
+  }
+  if (toggleBtn) {
+    toggleBtn.classList.toggle("active", !isCollapsed);
+    toggleBtn.title = isCollapsed ? "Show Page Thumbnails (T)" : "Hide Page Thumbnails (T)";
+  }
+
+  // Ensure active thumbnail is highlighted and visible
+  updateComparatorNavActive(currentPreviewPageIndex);
+}
+window.renderComparatorNavPanel = renderComparatorNavPanel;
+
+/**
+ * Synchronizes active class and smoothly scrolls active thumbnail into view.
+ */
+function updateComparatorNavActive(pageIdx) {
+  const navList = document.getElementById("comparator-nav-list");
+  if (!navList) return;
+
+  const items = navList.querySelectorAll(".comparator-thumb-item");
+  items.forEach((item) => {
+    const idx = parseInt(item.dataset.pageIndex, 10);
+    const isActive = idx === pageIdx;
+    item.classList.toggle("active", isActive);
+    if (isActive) {
+      item.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    }
+  });
+}
+window.updateComparatorNavActive = updateComparatorNavActive;
+
+/**
+ * Toggles the left thumbnail panel between expanded and collapsed states.
+ */
+function toggleComparatorThumbPanel(forceState) {
+  const panel = document.getElementById("comparator-nav-panel");
+  const btn = document.getElementById("btn-toggle-comparator-thumbs");
+  if (!panel) return;
+
+  const willBeCollapsed = typeof forceState === "boolean" ? !forceState : !panel.classList.contains("collapsed");
+  panel.classList.toggle("collapsed", willBeCollapsed);
+
+  if (btn) {
+    btn.classList.toggle("active", !willBeCollapsed);
+    btn.title = willBeCollapsed ? "Show Page Thumbnails (T)" : "Hide Page Thumbnails (T)";
+  }
+
+  localStorage.setItem("kobean_comparator_nav_collapsed", willBeCollapsed ? "true" : "false");
+
+  if (!willBeCollapsed) {
+    updateComparatorNavActive(currentPreviewPageIndex);
+  }
+}
+window.toggleComparatorThumbPanel = toggleComparatorThumbPanel;
 
 async function exportDocument(format = "auto") {
   if (!currentSession) return;
@@ -5927,6 +6370,10 @@ async function recolorizePage(pageIdx) {
       const imgElem = document.getElementById(`page-img-${pageIdx}`);
       if (imgElem) imgElem.src = `${data.colorized_url}?t=${ts}`;
 
+      // Update comparator navigation thumbnail if rendered
+      const compThumbImg = document.getElementById(`comp-thumb-img-${pageIdx}`);
+      if (compThumbImg) compThumbImg.src = `${data.colorized_url}?t=${ts}`;
+
       if (badge) { badge.className = "page-status-badge status-colorized"; badge.innerText = "COLORIZED"; }
 
       // Refresh split preview images
@@ -6713,4 +7160,10 @@ window.updateAdapterTrainingProgressUI = updateAdapterTrainingProgressUI;
 window.updateQualityPreviewChip = updateQualityPreviewChip;
 window.fetchSeriesAutoRefineStatus = fetchSeriesAutoRefineStatus;
 window.toggleAutoRefineAdapter = toggleAutoRefineAdapter;
+window.THEMES = THEMES;
+window.initThemeSystem = initThemeSystem;
+window.applyTheme = applyTheme;
+window.selectTheme = selectTheme;
+window.toggleThemeDropdown = toggleThemeDropdown;
+window.closeThemeDropdown = closeThemeDropdown;
 
