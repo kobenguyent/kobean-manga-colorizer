@@ -50,6 +50,13 @@
 | <img src="demo/original.png" width="380" alt="Original B&W Manga Page" /> | <img src="demo/colorized.png" width="380" alt="Colorized Manga Page" /> |
 | *Crisp original line art & screentones* |           *Vibrant anime palette, pure white speech bubbles*            |
 
+### 📸 Real App Screenshots
+
+| Studio Dashboard | Workspace & Controls |
+| :---: | :---: |
+| <img src="demo/studio-desktop.png" width="460" alt="Kobean Manga Colorizer studio dashboard" /> | <img src="demo/studio-workspace.png" width="460" alt="Kobean Manga Colorizer workspace controls and document area" /> |
+| *Live web studio home interface* | *Document workflow area with tuning controls* |
+
 ---
 
 ## ⚡ Disk Space Optimization
