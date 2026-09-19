@@ -15,13 +15,23 @@
   <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
   
   <!-- Main Stylesheet -->
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=2.3">
 
   <!-- Favicons -->
-  <meta name="theme-color" content="#090d16">
+  <meta name="theme-color" id="meta-theme-color" content="#090d16">
   <link rel="icon" type="image/png" href="kobean-favicon.png">
   <link rel="apple-touch-icon" href="brand-icon.png">
   <link rel="shortcut icon" href="kobean-favicon.ico">
+
+  <!-- Instant Anti-FOUC Theme Bootstrap -->
+  <script>
+    (function() {
+      try {
+        var t = localStorage.getItem('kobean_theme') || 'cyber-neon';
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
 
@@ -42,6 +52,26 @@
     </div>
 
     <div class="header-status">
+      <!-- Theme Switcher Component -->
+      <div class="theme-switcher-container" id="theme-switcher-container">
+        <button class="theme-toggle-btn" id="btn-theme-toggle" type="button"
+                onclick="toggleThemeDropdown(event)" aria-haspopup="true" aria-expanded="false"
+                title="Choose Appearance Theme">
+          <i class="ri-palette-line" id="theme-btn-icon" aria-hidden="true"></i>
+          <span class="theme-btn-label" id="theme-btn-label">Cyber Neon</span>
+          <i class="ri-arrow-down-s-line theme-caret-icon" aria-hidden="true"></i>
+        </button>
+        <div class="theme-dropdown-menu hidden" id="theme-dropdown-menu" role="menu" aria-label="Appearance Themes">
+          <div class="theme-menu-header">
+            <span class="theme-menu-title"><i class="ri-palette-line"></i> Appearance</span>
+            <span class="theme-menu-badge" id="theme-menu-count">7 Themes</span>
+          </div>
+          <div class="theme-menu-list" id="theme-menu-list">
+            <!-- Dynamically populated by app.js with rich swatches -->
+          </div>
+        </div>
+      </div>
+
       <button class="btn btn-secondary btn-sm header-history-btn" id="btn-open-history" onclick="openHistoryModal()" title="View processing and document history">
         <i class="ri-history-line"></i> History <span class="badge badge-accent" id="history-badge-count">0</span>
       </button>

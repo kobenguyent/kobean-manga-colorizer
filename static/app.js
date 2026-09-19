@@ -530,7 +530,229 @@ function initSidebarDrawer() {
   }
 }
 
+// ==========================================================================
+// Multi-Theme Studio Engine (7 Curated Aesthetics)
+// ==========================================================================
+const THEMES = [
+  {
+    id: "cyber-neon",
+    name: "Cyber Neon",
+    tagline: "Tokyo Midnight Flagship",
+    icon: "ri-flashlight-line",
+    metaColor: "#090d16",
+    swatches: ["#090d16", "#06b6d4", "#8b5cf6", "#ec4899"]
+  },
+  {
+    id: "manga-ink",
+    name: "Manga Ink",
+    tagline: "Monochrome Dark Studio",
+    icon: "ri-ink-bottle-line",
+    metaColor: "#0a0b0e",
+    swatches: ["#0a0b0e", "#f1f5f9", "#94a3b8", "#64748b"]
+  },
+  {
+    id: "shonen-sunrise",
+    name: "Shonen Sunrise",
+    tagline: "Fiery Flame & Amber Gold",
+    icon: "ri-fire-line",
+    metaColor: "#0f0a09",
+    swatches: ["#0f0a09", "#f59e0b", "#ef4444", "#f97316"]
+  },
+  {
+    id: "sakura-twilight",
+    name: "Sakura Twilight",
+    tagline: "Pastel Rose & Violet Plum",
+    icon: "ri-heart-3-line",
+    metaColor: "#0f0a17",
+    swatches: ["#0f0a17", "#f472b6", "#c084fc", "#818cf8"]
+  },
+  {
+    id: "emerald-alchemist",
+    name: "Emerald Alchemist",
+    tagline: "Neo Matrix & Cyber Forest",
+    icon: "ri-leaf-line",
+    metaColor: "#06120d",
+    swatches: ["#06120d", "#10b981", "#2dd4bf", "#84cc16"]
+  },
+  {
+    id: "nord-frost",
+    name: "Nord Frost",
+    tagline: "Arctic Slate & Polar Blue",
+    icon: "ri-compass-3-line",
+    metaColor: "#0b111e",
+    swatches: ["#0b111e", "#38bdf8", "#6366f1", "#2dd4bf"]
+  },
+  {
+    id: "paper-studio",
+    name: "Paper Studio",
+    tagline: "Editorial Daybreak Light",
+    icon: "ri-sun-line",
+    metaColor: "#f6f5f0",
+    swatches: ["#f6f5f0", "#4f46e5", "#ea580c", "#d946ef"]
+  }
+];
+
+let activeThemeId = "cyber-neon";
+let isThemeDropdownOpen = false;
+
+function initThemeSystem() {
+  const savedTheme = localStorage.getItem("kobean_theme") || "cyber-neon";
+  const matched = THEMES.some(t => t.id === savedTheme);
+  const initialTheme = matched ? savedTheme : "cyber-neon";
+  applyTheme(initialTheme, false);
+  renderThemeDropdownMenu();
+
+  // Guarded event listeners (.betterleaks audited)
+  document.addEventListener("click", handleThemeOutsideClick);
+  document.addEventListener("keydown", handleThemeKeydown);
+}
+
+function renderThemeDropdownMenu() {
+  const menuList = document.getElementById("theme-menu-list");
+  if (!menuList) return;
+
+  menuList.innerHTML = THEMES.map(theme => {
+    const isActive = theme.id === activeThemeId;
+    const swatchDots = theme.swatches.map(color =>
+      `<span class="theme-swatch-dot" style="background-color: ${color};" title="${color}"></span>`
+    ).join("");
+
+    return `
+      <div class="theme-option-item ${isActive ? "active" : ""}"
+           role="menuitemradio"
+           aria-checked="${isActive}"
+           tabindex="0"
+           onclick="selectTheme('${theme.id}')"
+           onkeydown="if(event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectTheme('${theme.id}'); }"
+           data-theme-id="${theme.id}"
+           title="${theme.name} — ${theme.tagline}">
+        <div class="theme-option-left">
+          <div class="theme-option-icon" style="color: ${theme.swatches[1]};">
+            <i class="${theme.icon}"></i>
+          </div>
+          <div class="theme-option-text">
+            <span class="theme-option-name">${theme.name}</span>
+            <span class="theme-option-desc">${theme.tagline}</span>
+          </div>
+        </div>
+        <div class="theme-option-right">
+          <div class="theme-swatch-strip">
+            ${swatchDots}
+          </div>
+          <span class="theme-check-icon"><i class="ri-check-line"></i></span>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function applyTheme(themeId, notify = true) {
+  const theme = THEMES.find(t => t.id === themeId) || THEMES[0];
+  activeThemeId = theme.id;
+  localStorage.setItem("kobean_theme", activeThemeId);
+
+  // Set attribute on both <html> and <body>
+  document.documentElement.setAttribute("data-theme", activeThemeId);
+  if (document.body) {
+    document.body.setAttribute("data-theme", activeThemeId);
+  }
+
+  // Update mobile status bar tint
+  const metaTheme = document.getElementById("meta-theme-color") || document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) {
+    metaTheme.setAttribute("content", theme.metaColor);
+  }
+
+  // Update header toggle button label and icon
+  const btnLabel = document.getElementById("theme-btn-label");
+  if (btnLabel) {
+    btnLabel.textContent = theme.name;
+  }
+  const btnIcon = document.getElementById("theme-btn-icon");
+  if (btnIcon) {
+    btnIcon.className = `${theme.icon}`;
+    btnIcon.style.color = theme.swatches[1];
+  }
+
+  // Update active state in dropdown
+  const items = document.querySelectorAll(".theme-option-item");
+  items.forEach(el => {
+    const isCur = el.dataset.themeId === activeThemeId;
+    el.classList.toggle("active", isCur);
+    el.setAttribute("aria-checked", isCur ? "true" : "false");
+  });
+
+  if (notify && typeof showToast === "function") {
+    showToast(`🎨 Theme switched to ${theme.name}`, "info");
+  }
+}
+
+function selectTheme(themeId) {
+  applyTheme(themeId, true);
+  closeThemeDropdown();
+}
+
+function toggleThemeDropdown(event) {
+  if (event) {
+    event.stopPropagation();
+    event.preventDefault();
+  }
+  if (isThemeDropdownOpen) {
+    closeThemeDropdown();
+  } else {
+    openThemeDropdown();
+  }
+}
+
+function openThemeDropdown() {
+  const menu = document.getElementById("theme-dropdown-menu");
+  const container = document.getElementById("theme-switcher-container");
+  const btn = document.getElementById("btn-theme-toggle");
+  if (!menu) return;
+
+  menu.classList.remove("hidden");
+  if (container) container.classList.add("open");
+  if (btn) btn.setAttribute("aria-expanded", "true");
+  isThemeDropdownOpen = true;
+
+  // Focus active theme item for keyboard navigation
+  setTimeout(() => {
+    const activeItem = menu.querySelector(".theme-option-item.active");
+    if (activeItem) activeItem.focus();
+  }, 50);
+}
+
+function closeThemeDropdown() {
+  const menu = document.getElementById("theme-dropdown-menu");
+  const container = document.getElementById("theme-switcher-container");
+  const btn = document.getElementById("btn-theme-toggle");
+  if (!menu) return;
+
+  menu.classList.add("hidden");
+  if (container) container.classList.remove("open");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+  isThemeDropdownOpen = false;
+}
+
+function handleThemeOutsideClick(event) {
+  if (!isThemeDropdownOpen) return;
+  const container = document.getElementById("theme-switcher-container");
+  if (container && !container.contains(event.target)) {
+    closeThemeDropdown();
+  }
+}
+
+function handleThemeKeydown(event) {
+  if (!isThemeDropdownOpen) return;
+  if (event.key === "Escape") {
+    closeThemeDropdown();
+    const btn = document.getElementById("btn-theme-toggle");
+    if (btn) btn.focus();
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  initThemeSystem();
   setupEventListeners();
   updateModelVariants("resnext_generator");
   initAllCustomSelects();
@@ -2441,11 +2663,7 @@ function renderGalleryGrid() {
     // Show a small recolorize button on colorized pages
     const recolorizeBtn = page.status === "colorized"
       ? `<button class="page-recolorize-btn" title="Force re-colorize this page"
-               onclick="event.stopPropagation(); recolorizePage(${idx})"
-               style="position:absolute;bottom:28px;right:6px;z-index:4;
-                      background:rgba(249,115,22,0.92);border:none;border-radius:4px;
-                      padding:3px 7px;cursor:pointer;color:#fff;font-size:0.7rem;
-                      display:flex;align-items:center;gap:3px;">
+               onclick="event.stopPropagation(); recolorizePage(${idx})">
            <i class="ri-refresh-line"></i> Recolorize
          </button>`
       : "";
@@ -6942,4 +7160,10 @@ window.updateAdapterTrainingProgressUI = updateAdapterTrainingProgressUI;
 window.updateQualityPreviewChip = updateQualityPreviewChip;
 window.fetchSeriesAutoRefineStatus = fetchSeriesAutoRefineStatus;
 window.toggleAutoRefineAdapter = toggleAutoRefineAdapter;
+window.THEMES = THEMES;
+window.initThemeSystem = initThemeSystem;
+window.applyTheme = applyTheme;
+window.selectTheme = selectTheme;
+window.toggleThemeDropdown = toggleThemeDropdown;
+window.closeThemeDropdown = closeThemeDropdown;
 
