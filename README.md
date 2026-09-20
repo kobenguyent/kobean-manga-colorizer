@@ -11,9 +11,18 @@
 **Next-Gen AI Manga & Comic Colorization Studio**  
 *Transform black & white manga volumes into vibrant, publication-grade full-color editions with sub-second neural inference, strict aspect ratio preservation, and speech bubble protection.*
 
-[Features](#-key-features) • [Showcase](#-visual-showcase) • [Model Weights](#-model-weights-generatorzip) • [Quickstart](#-quickstart) • [Architecture](#-architecture) • [Storage Optimization](#-disk-space-optimization) • [API](#-api-reference)
+[Recent Highlights](#-recent-highlights) • [Features](#-key-features) • [Showcase](#-visual-showcase) • [Model Weights](#-model-weights-generatorzip) • [Quickstart](#-quickstart) • [Architecture](#-architecture) • [Storage Optimization](#-disk-space-optimization) • [API](#-api-reference)
 
 </div>
+
+---
+
+## 🔥 Recent Highlights
+
+- Added **real web studio screenshots** in the Visual Showcase to reflect the live product interface.
+- Added a **real end-to-end run** (upload → imported page → colorizing progress → final comparator result) using `demo/original.png`.
+- Added the **generated output artifact** from that run: `demo/process-output-colorized.png`.
+- Clarified workflow behavior: the **Start Colorize** action is enabled after selecting at least one page in the gallery.
 
 ---
 
