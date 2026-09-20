@@ -11,9 +11,18 @@
 **Next-Gen AI Manga & Comic Colorization Studio**  
 *Transform black & white manga volumes into vibrant, publication-grade full-color editions with sub-second neural inference, strict aspect ratio preservation, and speech bubble protection.*
 
-[Features](#-key-features) • [Showcase](#-visual-showcase) • [Model Weights](#-model-weights-generatorzip) • [Quickstart](#-quickstart) • [Architecture](#-architecture) • [Storage Optimization](#-disk-space-optimization) • [API](#-api-reference)
+[Recent Highlights](#-recent-highlights) • [Features](#-key-features) • [Showcase](#-visual-showcase) • [Model Weights](#-model-weights-generatorzip) • [Quickstart](#-quickstart) • [Architecture](#-architecture) • [Storage Optimization](#-disk-space-optimization) • [API](#-api-reference)
 
 </div>
+
+---
+
+## 🔥 Recent Highlights
+
+- Added **real web studio screenshots** in the Visual Showcase to reflect the live product interface.
+- Added a **real end-to-end run** (upload → imported page → colorizing progress → final comparator result) using `demo/original.png`.
+- Added the **generated output artifact** from that run: `demo/process-output-colorized.png`.
+- Clarified workflow behavior: the **Start Colorize** action is enabled after selecting at least one page in the gallery.
 
 ---
 
@@ -49,6 +58,31 @@
 | :---: |:-----------------------------------------------------------------------:|
 | <img src="demo/original.png" width="380" alt="Original B&W Manga Page" /> | <img src="demo/colorized.png" width="380" alt="Colorized Manga Page" /> |
 | *Crisp original line art & screentones* |           *Vibrant anime palette, pure white speech bubbles*            |
+
+### 📸 Real App Screenshots
+
+| Studio Dashboard | Workspace & Controls |
+| :---: | :---: |
+| <img src="demo/studio-desktop.png" width="460" alt="Kobean Manga Colorizer studio dashboard" /> | <img src="demo/studio-workspace.png" width="460" alt="Kobean Manga Colorizer workspace controls and document area" /> |
+| *Live web studio home interface* | *Document workflow area with tuning controls* |
+
+### 🧪 End-to-End Process (Real Run)
+
+| Step 1: Upload Screen | Step 2: Original Image Imported |
+| :---: | :---: |
+| <img src="demo/process-step-1-upload-screen.png" width="460" alt="Upload screen before importing manga page" /> | <img src="demo/process-step-2-file-imported.png" width="460" alt="Original manga image imported into workspace" /> |
+| *Choose input files from local disk* | *`demo/original.png` loaded into page gallery* |
+
+| Step 3: Colorization Running | Step 4: Colorized Result in Comparator |
+| :---: | :---: |
+| <img src="demo/process-step-3-colorizing.png" width="460" alt="Colorization process running with progress indicator" /> | <img src="demo/process-step-4-colorized-result.png" width="460" alt="Final colorized output shown in split comparator" /> |
+| *Batch colorization started for selected page* | *Before/after split view with generated color output* |
+
+<p align="center">
+  <img src="demo/process-output-colorized.png" width="420" alt="Generated colorized image output from original demo page" />
+  <br />
+  <em>Generated colorized image exported from this run.</em>
+</p>
 
 ---
 
