@@ -934,18 +934,21 @@ def protect_page_margins_and_speech_bubbles(
     color_img: np.ndarray,
     orig_img: np.ndarray,
     orig_gray: Optional[np.ndarray] = None,
-    protect_bubbles: bool = True,
+    protect_bubbles: bool = False,
 ) -> np.ndarray:
     """
-    Protects outer page margins and enclosed speech bubbles from unwanted color bleeding
-    without washing out unshaded artwork inside manga panels (skin, clothing, backgrounds).
+    Protects outer page margins from unwanted color bleeding without washing out
+    unshaded artwork inside manga panels (skin, clothing, backgrounds).
 
-    1. Margin Protection:
+    Margin Protection:
        Detects the content bounding box from dark ink line distribution.
        Restricts paper fade (brightness >= 220) strictly to outer margins beyond this box.
-    2. Dialogue Bubble Protection:
-       Uses contour hierarchy, geometric solidity, circularity, and child stroke counts
-       to isolate true speech bubbles while strictly excluding manga panels and drawing whitespace.
+
+    Note on speech bubbles:
+       The neural ResNeXt model natively outputs pure white for dialogue bubbles.
+       Contour-based bubble heuristics are disabled by default because human faces
+       (e.g., in clean line-art manga like Dr. Slump) form closed contours with facial
+       features that false-positive as dialogue text and get bleached white.
     """
     h, w = orig_img.shape[:2]
     if orig_gray is None:
@@ -1024,6 +1027,16 @@ def protect_page_margins_and_speech_bubbles(
                         result[mask_idx] = orig_img[mask_idx]
         except Exception as e:
             print(f"[MangaColorizer WARNING] Speech bubble protection: {e}")
+
+    # 3. Clean paper background protection for borderless/splash pages
+    # Genuine un-inked paper from the scan (orig_gray >= 0.96) that received faint neural tint
+    # is smoothly restored to crisp paper white [255, 255, 255] (matching Hugging Face).
+    if orig_gray is not None and result.ndim == 3 and result.shape[2] == 3:
+        color_hsv = cv2.cvtColor(result, cv2.COLOR_RGB2HSV).astype(np.float32)
+        sat_val = color_hsv[:, :, 1]
+        val_val = color_hsv[:, :, 2]
+        paper_bg = (orig_gray >= 0.96) & (sat_val < 32.0) & (val_val >= 225.0)
+        result[paper_bg] = 255
 
     return result
 
@@ -1846,6 +1859,13 @@ class MangaCharacterRecognizer:
 # ─────────────────────────────────────────────────────────────────────
 
 STYLE_PROFILES = {
+    "natural": {
+        "name": "Natural / Authentic (Hugging Face Clean)",
+        "sat_multiplier": 1.0,
+        "contrast_multiplier": 1.0,
+        "warmth": 1.0,
+        "description": "Authentic, noise-free manga colorization matching Hugging Face Spaces with pure neural balance.",
+    },
     "gemini_anime": {
         "name": "✨ Gemini Anime Vibrant (Demo Style)",
         "sat_multiplier": 1.75,
@@ -2075,16 +2095,16 @@ class MangaColorizerEngine:
         model_provider: str = "resnext_generator",
         model_name: str = "resnext-v2-manga",
         api_key: str = "",
-        style: str = "shonen_vivid",
-        saturation: float = 1.4,
-        contrast: float = 1.1,
+        style: str = "natural",
+        saturation: float = 1.0,
+        contrast: float = 1.0,
         line_preserve: float = 0.85,
         skip_if_colored: bool = False,
         character_palette: Optional["CharacterPalette"] = None,
         denoise_screentone: bool = True,
         denoise_sigma: int = 25,
-        recognition_mode: str = "auto",
-        skip_recognition: bool = False,
+        recognition_mode: str = "none",
+        skip_recognition: bool = True,
         exemplar_image_path: Optional[str] = None,
         exemplar_image_paths: Optional[list[str]] = None,
         series_key: Optional[str] = None,
@@ -2130,9 +2150,10 @@ class MangaColorizerEngine:
             active_ex_path = exemplar_image_paths[0]
 
         # ── Page-specific Character Recognition & Palette Optimization ──
-        active_palette = character_palette
+        active_palette = None
         recognized_chars: list[dict] = []
-        if character_palette is not None and character_palette.characters and not skip_recognition:
+        rec_mode = (recognition_mode or "none").lower()
+        if rec_mode not in ("none", "off", "disabled") and not skip_recognition and character_palette is not None and character_palette.characters:
             if any(c.bounding_box is not None for c in character_palette.characters):
                 active_palette = character_palette
                 recognized_chars = [
@@ -2167,43 +2188,6 @@ class MangaColorizerEngine:
                 except Exception as e:
                     print(f"[MangaColorizer WARNING] Character recognition error: {e}")
                     active_palette = None
-        elif skip_recognition and character_palette is not None:
-            # Caller pre-filtered the palette. If bounding boxes are not already provided,
-            # localize characters spatially so their distinct colors do not cross-contaminate.
-            if not any(c.bounding_box for c in character_palette.characters):
-                try:
-                    recs = self.recognizer.recognize_page_characters(
-                        image_path=image_path,
-                        palette=character_palette,
-                        api_key=api_key,
-                        model_name=model_name,
-                        recognition_mode=recognition_mode,
-                    )
-                    actual_detected = [
-                        r for r in recs
-                        if r.detection_method != "fallback_principal" and r.bounding_box is not None
-                    ]
-                    if actual_detected:
-                        active_palette = character_palette.optimize_for_page(actual_detected)
-                        recognized_chars = [r.to_dict() for r in actual_detected]
-                    else:
-                        active_palette = None
-                        recognized_chars = []
-                except Exception as e:
-                    print(f"[MangaColorizer WARNING] Character localization error: {e}")
-                    active_palette = None
-                    recognized_chars = []
-            else:
-                active_palette = character_palette
-                recognized_chars = [
-                    {
-                        "name": c.name,
-                        "confidence": 1.0,
-                        "detection_method": "pre_filtered",
-                        **({"bounding_box": list(c.bounding_box)} if c.bounding_box else {}),
-                    }
-                    for c in character_palette.characters
-                ]
             if active_palette and active_palette.characters:
                 print(
                     f"[MangaColorizer] Active palette: "
@@ -2367,17 +2351,9 @@ class MangaColorizerEngine:
         img_pad, pad = resize_pad_manga(denoised_sketch, size=inference_size)
         tens_in = ToTensor()(img_pad).unsqueeze(0).to(self.device)
 
-        # 3. Build hint tensor — inject character palette when provided
+        # 3. Clean hint tensor for noise-free neural inference (matching Hugging Face Spaces)
         _, _, pad_h, pad_w = tens_in.shape
-        if character_palette is not None:
-            hint = character_palette.build_hint_tensor(
-                pad_h, pad_w, self.device, sketch_gray=img_pad[:, :, 0]
-            )
-            print(
-                f"[MangaColorizer] Palette hint injected ({len(character_palette.characters)} characters)"
-            )
-        else:
-            hint = torch.zeros(1, 4, pad_h, pad_w, dtype=torch.float32, device=self.device)
+        hint = torch.zeros(1, 4, pad_h, pad_w, dtype=torch.float32, device=self.device)
 
         # 4. Authentic Neural Inference (Automatic Manga Colorization)
         adapter_used = False
@@ -2477,12 +2453,8 @@ class MangaColorizerEngine:
             b = np.clip(b * 1.28, 0, 255)
             color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
 
-        # 7. Apply Canonical Character Palette Harmonization
+        # 7. Post-processing color preparation
         gray_orig = cv2.cvtColor(orig_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-        if character_palette is not None:
-            color_vivid_rgb = apply_character_palette_harmonization(
-                color_vivid_rgb, character_palette, orig_gray=gray_orig
-            )
 
         # 8. Native Line Art Multiply Blending (100% crisp ink, no midtone crushing)
         # Line art multiply blending: preserve 100% ink sharpness on pure black/dark ink lines,
@@ -2505,7 +2477,7 @@ class MangaColorizerEngine:
             color_img=final_rgb,
             orig_img=orig_rgb,
             orig_gray=gray_orig,
-            protect_bubbles=True,
+            protect_bubbles=False,
         )
 
         # 9b. Optional Cross-Page Exemplar Palette Alignment (Phase 2)
@@ -2599,12 +2571,12 @@ class MangaColorizerEngine:
         line_mult = np.clip(orig_gray / max(0.60, line_preserve), 0.0, 1.0)[:, :, np.newaxis]
         fused = np.clip(gen_scaled.astype(np.float32) * line_mult, 0, 255).astype(np.uint8)
 
-        # Preserve outer margins and speech bubbles pure white
+        # Preserve outer margins pure white
         fused = protect_page_margins_and_speech_bubbles(
             color_img=fused,
             orig_img=orig_img,
             orig_gray=orig_gray,
-            protect_bubbles=True,
+            protect_bubbles=False,
         )
 
         self._write_optimized_image(output_path, fused, quality=88)
@@ -2697,12 +2669,12 @@ class MangaColorizerEngine:
                                 gem_scaled.astype(np.float32) * line_mult, 0, 255
                             ).astype(np.uint8)
 
-                            # Preserve outer margins and speech bubbles pure white
+                            # Preserve outer margins pure white
                             fused = protect_page_margins_and_speech_bubbles(
                                 color_img=fused,
                                 orig_img=orig_img,
                                 orig_gray=orig_gray,
-                                protect_bubbles=True,
+                                protect_bubbles=False,
                             )
 
                             self._write_optimized_image(output_path, fused, quality=88)
@@ -2976,12 +2948,12 @@ class MangaColorizerEngine:
                 orig_gray=gray.astype(np.float32) / 255.0,
             )
 
-        # Protect outer page margins and speech bubbles from color bleeding
+        # Protect outer page margins from color bleeding
         rgb = protect_page_margins_and_speech_bubbles(
             color_img=rgb,
             orig_img=cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB),
             orig_gray=gray.astype(np.float32) / 255.0,
-            protect_bubbles=True,
+            protect_bubbles=False,
         )
 
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)

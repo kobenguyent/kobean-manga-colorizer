@@ -251,34 +251,34 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
 
 class ColorizeRequest(BaseModel):
     session_id: str
-    model_provider: str = "google_nano"  # "google_nano", "apple_foundation", "local_smart"
-    model_name: str = "nano-banana"
+    model_provider: str = "resnext_generator"  # "resnext_generator", "google_nano", "local_smart"
+    model_name: str = "resnext-v2-manga"
     api_key: Optional[str] = ""
-    style: str = "gemini_anime"
-    saturation: float = 1.2
-    contrast: float = 1.1
+    style: str = "natural"
+    saturation: float = 1.0
+    contrast: float = 1.0
     line_preserve: float = 0.85
     selected_pages: Optional[list[int]] = None
     skip_if_colored: bool = False
     force_recolorize: bool = False  # when True, re-run even if page already has a colorized file
-    denoise_screentone: bool = True
+    denoise_screentone: bool = False
     denoise_sigma: int = 25
-    recognition_mode: Optional[str] = "auto"
+    recognition_mode: Optional[str] = "none"
 
 
 class BatchColorizeRequest(BaseModel):
     session_ids: list[str]
-    model_provider: str = "google_nano"
-    model_name: str = "nano-banana"
+    model_provider: str = "resnext_generator"
+    model_name: str = "resnext-v2-manga"
     api_key: Optional[str] = ""
-    style: str = "gemini_anime"
-    saturation: float = 1.2
-    contrast: float = 1.1
+    style: str = "natural"
+    saturation: float = 1.0
+    contrast: float = 1.0
     line_preserve: float = 0.85
     skip_if_colored: bool = False
-    denoise_screentone: bool = True
+    denoise_screentone: bool = False
     denoise_sigma: int = 25
-    recognition_mode: Optional[str] = "auto"
+    recognition_mode: Optional[str] = "none"
 
 
 class BatchExportRequest(BaseModel):
@@ -1532,10 +1532,11 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     contrast=req.contrast,
                     line_preserve=req.line_preserve,
                     skip_if_colored=req.skip_if_colored,
-                    character_palette=palette,
-                    denoise_screentone=getattr(req, "denoise_screentone", True),
+                    character_palette=None,
+                    denoise_screentone=getattr(req, "denoise_screentone", False),
                     denoise_sigma=getattr(req, "denoise_sigma", 25),
-                    recognition_mode=getattr(req, "recognition_mode", "auto"),
+                    recognition_mode="none",
+                    skip_recognition=True,
                     exemplar_image_path=exemplar_path,
                     exemplar_image_paths=exemplar_paths,
                     series_key=s_key,
@@ -1882,11 +1883,11 @@ async def preview_single_page(req: PreviewRequest):
             contrast=req.contrast,
             line_preserve=req.line_preserve,
             skip_if_colored=req.skip_if_colored,
-            character_palette=palette,
-            denoise_screentone=getattr(req, "denoise_screentone", True),
+            character_palette=None,
+            denoise_screentone=getattr(req, "denoise_screentone", False),
             denoise_sigma=getattr(req, "denoise_sigma", 25),
-            recognition_mode=getattr(req, "recognition_mode", "auto"),
-            skip_recognition=bool(getattr(req, "skip_recognition", False)),
+            recognition_mode="none",
+            skip_recognition=True,
             exemplar_image_path=exemplar_path,
             exemplar_image_paths=exemplar_paths,
             series_key=s_key,
