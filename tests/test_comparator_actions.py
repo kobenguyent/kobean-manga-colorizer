@@ -50,3 +50,15 @@ def test_comparator_header_chips_uncluttered():
     assert "function updateComparatorMetaBar" in js
     assert "window.updateComparatorMetaBar = updateComparatorMetaBar" in js
 
+
+def test_chrome_devtools_probe_endpoint():
+    """Verify Chrome DevTools workspace probing endpoint returns 200 with empty JSON to prevent console noise."""
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = TestClient(app)
+    resp = client.get("/.well-known/appspecific/com.chrome.devtools.json")
+    assert resp.status_code == 200
+    assert resp.json() == {}
+
+

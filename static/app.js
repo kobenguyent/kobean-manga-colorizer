@@ -900,16 +900,32 @@ function setupEventListeners() {
     });
   });
 
-  dropzone.addEventListener("drop", (e) => {
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
+  dropzone.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    const files = await scanFilesFromDataTransfer(e.dataTransfer);
+    if (files && files.length > 0) {
       handleFileSelection(files);
     }
   });
 
+  // Dedicated click on the Select Files button
+  const btnSelectFiles = document.getElementById("btn-select-files");
+  if (btnSelectFiles) {
+    btnSelectFiles.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const loadingContent = document.getElementById("dropzone-loading-content");
+      if (loadingContent && !loadingContent.classList.contains("hidden")) return;
+      fileInput.click();
+    });
+  }
+
   // Click handler on entire dropzone box to open file explorer
   dropzone.addEventListener("click", (e) => {
     if (e.target === fileInput) return;
+    // Don't trigger file picker if user clicked a specific button (e.g. "Import Local Folder" or "View History")
+    if (e.target.closest("button")) return;
     const loadingContent = document.getElementById("dropzone-loading-content");
     if (loadingContent && !loadingContent.classList.contains("hidden")) return;
     fileInput.click();
@@ -953,7 +969,7 @@ function setupEventListeners() {
     });
   });
 
-  window.addEventListener("drop", (e) => {
+  window.addEventListener("drop", async (e) => {
     const folderModal = document.getElementById("folder-import-modal-overlay");
     const browserModal = document.getElementById("folder-browser-modal-overlay");
     const confirmModal = document.getElementById("custom-confirm-modal-overlay");
@@ -966,8 +982,11 @@ function setupEventListeners() {
     e.preventDefault();
     const dropzone = document.getElementById("dropzone");
     if (dropzone) dropzone.classList.remove("dragover");
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFileSelection(e.dataTransfer.files);
+    if (e.dataTransfer) {
+      const files = await scanFilesFromDataTransfer(e.dataTransfer);
+      if (files && files.length > 0) {
+        handleFileSelection(files);
+      }
     }
   });
 
@@ -1292,6 +1311,13 @@ async function handleFileSelection(fileOrFiles) {
     return;
   }
 
+  // Visual feedback on the Add Files button in the sidebar (if present)
+  const addBtn = document.getElementById("btn-add-files");
+  let origAddBtnHTML = "";
+  if (addBtn) {
+    origAddBtnHTML = addBtn.innerHTML;
+  }
+
   // If selecting more than 5 files (or large batch up to +1076 files), use chunked batch uploader
   if (validFiles.length > 5) {
     if (addBtn) {
@@ -1302,11 +1328,7 @@ async function handleFileSelection(fileOrFiles) {
     return;
   }
 
-  // Visual feedback on the Add Files button in the sidebar
-  const addBtn = document.getElementById("btn-add-files");
-  let origAddBtnHTML = "";
   if (addBtn) {
-    origAddBtnHTML = addBtn.innerHTML;
     addBtn.disabled = true;
     addBtn.innerHTML = '<i class="ri-loader-4-line spin"></i> Adding...';
   }
@@ -1433,9 +1455,13 @@ async function handleBulkChunkedUpload(files) {
       });
       const data = await resp.json();
       if (resp.ok && data.status === "success") {
-        successCount += chunk.length;
-        if (!firstUploadedSessionId && data.session_id) {
-          firstUploadedSessionId = data.session_id;
+        successCount += (data.total_files || chunk.length);
+        if (!firstUploadedSessionId) {
+          if (data.session_id) {
+            firstUploadedSessionId = data.session_id;
+          } else if (data.sessions && data.sessions.length > 0) {
+            firstUploadedSessionId = data.sessions[0].session_id;
+          }
         }
         if (data.batch_id) {
           currentBatchId = data.batch_id;
@@ -1443,7 +1469,7 @@ async function handleBulkChunkedUpload(files) {
         }
       } else {
         failCount += chunk.length;
-        console.error("Chunk upload error:", data.detail);
+        console.error("Chunk upload error:", data.detail || (data.message || resp.statusText));
       }
     } catch (err) {
       failCount += chunk.length;
@@ -1472,19 +1498,40 @@ async function handleBulkChunkedUpload(files) {
       }
     }
 
-    if (firstUploadedSessionId && (!currentSession || !activeSessions.some(s => s.session_id === currentSession.session_id))) {
-      const fullSessRes = await fetch(`/api/session/${firstUploadedSessionId}`);
-      if (fullSessRes.ok) {
-        currentSession = await fullSessRes.json();
-        sessionStorage.setItem("active_session_id", currentSession.session_id);
+    const targetSessionId = firstUploadedSessionId || (activeSessions && activeSessions.length > 0 ? activeSessions[0].session_id : null);
+    if (targetSessionId && (!currentSession || !activeSessions.some(s => s.session_id === currentSession.session_id))) {
+      try {
+        const fullSessRes = await fetch(`/api/session/${targetSessionId}`);
+        if (fullSessRes.ok) {
+          currentSession = await fullSessRes.json();
+          sessionStorage.setItem("active_session_id", currentSession.session_id);
+        }
+      } catch (e) {
+        console.error("Error fetching target session:", e);
       }
     }
   } catch (err) {
     console.error("Error refreshing sessions after bulk upload:", err);
   }
 
-  renderDashboard();
+  if (currentSession) {
+    renderDashboard();
+  } else {
+    const uploadSec = document.getElementById("upload-section");
+    const dashSec = document.getElementById("dashboard-section");
+    if (uploadSec) uploadSec.classList.remove("hidden");
+    if (dashSec) dashSec.classList.add("hidden");
+    const idleContent = document.getElementById("dropzone-idle-content");
+    const loadingContent = document.getElementById("dropzone-loading-content");
+    if (idleContent) idleContent.classList.remove("hidden");
+    if (loadingContent) loadingContent.classList.add("hidden");
+  }
   renderDocumentQueue();
+
+  const addBtn = document.getElementById("btn-add-files");
+  if (addBtn) {
+    addBtn.disabled = false;
+  }
 
   setTimeout(() => {
     closeImportProgressModal();
@@ -2218,7 +2265,9 @@ function pollFolderImport(importId) {
           }
         }
 
-        renderDashboard();
+        if (currentSession) {
+          renderDashboard();
+        }
         renderDocumentQueue();
 
         setTimeout(() => {
@@ -2552,33 +2601,47 @@ async function switchActiveDocument(sessionId) {
 }
 
 function renderDashboard() {
-  document.getElementById("upload-section").classList.add("hidden");
-  document.getElementById("dashboard-section").classList.remove("hidden");
+  if (!currentSession) {
+    if (activeSessions && activeSessions.length > 0) {
+      switchActiveDocument(activeSessions[0].session_id);
+    }
+    return;
+  }
+
+  const uploadSec = document.getElementById("upload-section");
+  const dashSec = document.getElementById("dashboard-section");
+  if (uploadSec) uploadSec.classList.add("hidden");
+  if (dashSec) dashSec.classList.remove("hidden");
   if (isSidebarDrawerCollapsed()) {
     const edgeBtn = document.getElementById("btn-sidebar-edge-expand");
     if (edgeBtn) edgeBtn.classList.remove("hidden");
   }
 
-  document.getElementById("doc-filename").innerText = currentSession.filename;
-  document.getElementById("doc-total-pages").innerText = currentSession.total_pages;
+  const docFilename = document.getElementById("doc-filename");
+  if (docFilename) docFilename.innerText = currentSession.filename || "Untitled";
+  const docTotalPages = document.getElementById("doc-total-pages");
+  if (docTotalPages) docTotalPages.innerText = currentSession.total_pages || (currentSession.pages ? currentSession.pages.length : 0);
 
   // Default to none selected as requested
   selectedPages = new Set();
   exportBannerDismissed = false;
 
   const iconBox = document.getElementById("file-type-icon");
-  const fn = currentSession.filename.toLowerCase();
-  if (fn.endsWith(".epub")) {
-    iconBox.innerHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
-  } else if (fn.endsWith(".pdf")) {
-    iconBox.innerHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
-  } else if (fn.endsWith(".zip") || fn.endsWith(".cbz")) {
-    iconBox.innerHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
-  } else {
-    iconBox.innerHTML = '<i class="ri-image-fill" style="color: #06b6d4;"></i>';
+  const fn = (currentSession.filename || "").toLowerCase();
+  if (iconBox) {
+    if (fn.endsWith(".epub")) {
+      iconBox.innerHTML = '<i class="ri-book-2-fill" style="color: #8b5cf6;"></i>';
+    } else if (fn.endsWith(".pdf")) {
+      iconBox.innerHTML = '<i class="ri-file-pdf-fill" style="color: #ef4444;"></i>';
+    } else if (fn.endsWith(".zip") || fn.endsWith(".cbz")) {
+      iconBox.innerHTML = '<i class="ri-folder-zip-fill" style="color: #eab308;"></i>';
+    } else {
+      iconBox.innerHTML = '<i class="ri-image-fill" style="color: #06b6d4;"></i>';
+    }
   }
 
-  document.getElementById("gallery-total-count").innerText = currentSession.total_pages;
+  const galleryTotalCount = document.getElementById("gallery-total-count");
+  if (galleryTotalCount) galleryTotalCount.innerText = currentSession.total_pages || (currentSession.pages ? currentSession.pages.length : 0);
   renderGalleryGrid();
   renderDocumentQueue();
   renderComparatorNavPanel();

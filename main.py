@@ -3961,6 +3961,12 @@ async def get_favicon():
     return JSONResponse(status_code=404, content={"detail": "Favicon not found"})
 
 
+@app.get("/.well-known/appspecific/{path:path}", include_in_schema=False)
+async def chrome_devtools_probe(path: str):
+    """Silences Chrome DevTools workspace probing when inspecting localhost."""
+    return JSONResponse(content={})
+
+
 # Serve Frontend static assets
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
