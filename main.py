@@ -255,9 +255,9 @@ class ColorizeRequest(BaseModel):
     model_name: str = "resnext-v2-manga"
     api_key: Optional[str] = ""
     style: str = "natural"
-    saturation: float = 1.0
+    saturation: float = 0.7
     contrast: float = 1.0
-    line_preserve: float = 0.85
+    line_preserve: float = 0.66
     selected_pages: Optional[list[int]] = None
     skip_if_colored: bool = False
     force_recolorize: bool = False  # when True, re-run even if page already has a colorized file
@@ -272,9 +272,9 @@ class BatchColorizeRequest(BaseModel):
     model_name: str = "resnext-v2-manga"
     api_key: Optional[str] = ""
     style: str = "natural"
-    saturation: float = 1.0
+    saturation: float = 0.7
     contrast: float = 1.0
-    line_preserve: float = 0.85
+    line_preserve: float = 0.66
     skip_if_colored: bool = False
     denoise_screentone: bool = False
     denoise_sigma: int = 25
@@ -330,9 +330,9 @@ class PreviewRequest(BaseModel):
     model_name: str = "resnext-v2-manga"
     api_key: Optional[str] = ""
     style: str = "natural"
-    saturation: float = 1.0
+    saturation: float = 0.7
     contrast: float = 1.0
-    line_preserve: float = 0.85
+    line_preserve: float = 0.66
     skip_if_colored: bool = False
     force_recolorize: bool = False
     denoise_screentone: bool = False
@@ -361,7 +361,7 @@ class CharacterEntryModel(BaseModel):
 class CharacterRecognizeRequest(BaseModel):
     api_key: Optional[str] = ""
     model_name: Optional[str] = ""
-    recognition_mode: Optional[str] = "auto"
+    recognition_mode: Optional[str] = "offline_ai"
 
 
 class PaletteUpsertRequest(BaseModel):
@@ -1244,9 +1244,9 @@ async def stream_progress(session_id: str, auto_resume: bool = Query(False)):
                 model_provider=sess.get("model_provider") or "google_nano",
                 model_name=sess.get("model_name") or "nano-banana",
                 style=sess.get("style") or sess.get("recommended_style") or "gemini_anime",
-                saturation=sess.get("saturation", 1.2),
+                saturation=sess.get("saturation", 0.7),
                 contrast=sess.get("contrast", 1.1),
-                line_preserve=sess.get("line_preserve", 0.85),
+                line_preserve=sess.get("line_preserve", 0.66),
                 selected_pages=uncolorized_indices,
                 skip_if_colored=sess.get("skip_if_colored", False),
                 force_recolorize=False,
@@ -1753,9 +1753,9 @@ async def resume_colorization(session_id: str, req: Optional[ColorizeRequest] = 
             model_provider=sess.get("model_provider") or "google_nano",
             model_name=sess.get("model_name") or "nano-banana",
             style=sess.get("style") or sess.get("recommended_style") or "gemini_anime",
-            saturation=sess.get("saturation", 1.2),
+            saturation=sess.get("saturation", 0.7),
             contrast=sess.get("contrast", 1.1),
-            line_preserve=sess.get("line_preserve", 0.85),
+            line_preserve=sess.get("line_preserve", 0.66),
             selected_pages=uncolorized_indices,
             skip_if_colored=sess.get("skip_if_colored", False),
             force_recolorize=False,
@@ -1907,7 +1907,7 @@ async def preview_single_page(req: PreviewRequest):
             page_info["adapter_used"] = True
         if res.get("quality_score"):
             page_info["quality_score"] = res["quality_score"]
-        if "recognized_characters" in res:
+        if res.get("recognized_characters"):
             page_info["recognized_characters"] = res["recognized_characters"]
 
         # Update processed_count and status
@@ -1942,7 +1942,7 @@ async def preview_single_page(req: PreviewRequest):
                 "engine": page_info["engine_used"],
                 "page_info": page_info,
                 "quality_score": page_info.get("quality_score"),
-                "recognized_characters": res.get("recognized_characters", []),
+                "recognized_characters": res.get("recognized_characters") or page_info.get("recognized_characters", []),
                 "exemplar_used": res.get("exemplar_used"),
                 "exemplars_used": res.get("exemplars_used", []),
                 "adapter_used": bool(res.get("adapter_used")),

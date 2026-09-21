@@ -1375,3 +1375,122 @@ def test_arale_violet_hair_blue_eye_multi_character_harmonization():
     assert abs(int(senbei_hair[0]) - int(senbei_hair[2])) < 25, f"Dr. Senbei hair must stay neutral: {senbei_hair}"
 
 
+def test_offline_manga109_yolo_detection():
+    """Verifies that Manga109 YOLO detector initializes and isolates character faces and bodies."""
+    pytest.importorskip("ultralytics")
+    from colorizer_engine import CharacterPalette, CharacterEntry, MangaCharacterRecognizer
+    from PIL import Image
+    from pathlib import Path
+
+    recognizer = MangaCharacterRecognizer()
+    yolo_model, device = recognizer._ensure_manga_yolo()
+    if yolo_model is None:
+        pytest.skip("Manga109 YOLO model weights could not be loaded")
+
+    demo_path = Path("demo/original.png")
+    if not demo_path.exists():
+        pytest.skip("demo/original.png not available")
+
+    pil_img = Image.open(demo_path).convert("RGB")
+    regions = recognizer._detect_manga_yolo_regions(pil_img, conf=0.15)
+    assert len(regions) >= 1
+    # Check that regions have format (y0, x0, y1, x1, cls_name, conf)
+    first_reg = regions[0]
+    assert len(first_reg) == 6
+    assert first_reg[4] in ("body", "face")
+    assert first_reg[5] >= 0.15
+
+    # Test full end-to-end recognize_page_characters with offline_ai
+    palette = CharacterPalette(
+        preset_title="One Piece",
+        characters=[
+            CharacterEntry(name="Monkey D. Luffy", notes="Straw hat pirate captain with red vest and black hair"),
+            CharacterEntry(name="Tony Tony Chopper", notes="Small reindeer doctor with pink top hat and blue nose"),
+        ],
+    )
+    recs = recognizer.recognize_page_characters(
+        image_path=str(demo_path),
+        palette=palette,
+        recognition_mode="offline_ai",
+    )
+    assert len(recs) >= 1
+    top_char = recs[0]
+    assert top_char.bounding_box is not None
+    assert len(top_char.bounding_box) == 4
+    assert top_char.confidence >= 0.35
+
+
+def test_preview_preserves_recognized_characters(tmp_path):
+    """Verifies that colorization preview preserves previously scanned recognized characters."""
+    from main import app, SESSIONS, SESSION_PALETTES, save_session_meta
+    from colorizer_engine import CharacterEntry, CharacterPalette
+    import uuid
+    import shutil
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    session_id = f"test-preserve-rec-{uuid.uuid4().hex[:8]}"
+    sess_dir = Path("sessions") / session_id
+    orig_dir = sess_dir / "original"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+
+    img_path = orig_dir / "page_0000.jpg"
+    arr = np.ones((100, 100, 3), dtype=np.uint8) * 240
+    Image.fromarray(arr).save(img_path)
+
+    scanned_data = [
+        {"name": "Arale Norimaki", "confidence": 0.95, "bounding_box": [0.1, 0.1, 0.8, 0.8]}
+    ]
+
+    SESSIONS[session_id] = {
+        "session_id": session_id,
+        "filename": "DrSlump.pdf",
+        "total_pages": 1,
+        "processed_count": 0,
+        "status": "ready",
+        "pages": [
+            {
+                "page_index": 0,
+                "original_path": str(img_path),
+                "original_filename": "page_0000.jpg",
+                "filename": "page_0000.jpg",
+                "status": "pending",
+                "recognized_characters": scanned_data,
+            }
+        ],
+    }
+    SESSION_PALETTES[session_id] = CharacterPalette(
+        characters=[
+            CharacterEntry(name="Arale Norimaki", hair_hex="#8A2BE2"),
+        ]
+    )
+    save_session_meta(session_id)
+
+    try:
+        resp = client.post(
+            "/api/colorize/preview",
+            json={
+                "session_id": session_id,
+                "page_index": 0,
+                "model_provider": "resnext_generator",
+                "model_name": "resnext-v2-manga",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        # Must return the preserved recognized characters
+        assert len(data.get("recognized_characters", [])) == 1
+        assert data["recognized_characters"][0]["name"] == "Arale Norimaki"
+        # Must preserve in session page info
+        sess = SESSIONS[session_id]
+        assert len(sess["pages"][0].get("recognized_characters", [])) == 1
+        assert sess["pages"][0]["recognized_characters"][0]["name"] == "Arale Norimaki"
+    finally:
+        shutil.rmtree(sess_dir, ignore_errors=True)
+        SESSIONS.pop(session_id, None)
+        SESSION_PALETTES.pop(session_id, None)
+
+
+
+

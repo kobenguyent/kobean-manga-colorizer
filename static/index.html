@@ -300,17 +300,17 @@
               <div class="form-group">
                 <div class="slider-header">
                   <label for="slider-line">Line Art Preservation</label>
-                  <span class="slider-value" id="val-line">85%</span>
+                  <span class="slider-value" id="val-line">66%</span>
                 </div>
-                <input type="range" id="slider-line" min="50" max="100" value="85" class="form-slider" />
+                <input type="range" id="slider-line" min="50" max="100" value="66" class="form-slider" />
               </div>
 
               <div class="form-group">
                 <div class="slider-header">
                   <label for="slider-saturation">Color Saturation</label>
-                  <span class="slider-value" id="val-saturation">1.4x</span>
+                  <span class="slider-value" id="val-saturation">0.7x</span>
                 </div>
-                <input type="range" id="slider-saturation" min="5" max="25" value="14" class="form-slider" />
+                <input type="range" id="slider-saturation" min="5" max="25" value="7" class="form-slider" />
               </div>
 
               <!-- Skip Colored Pages Toggle -->
@@ -440,8 +440,8 @@
                           class="no-custom"
                           style="flex:1;font-size:0.68rem;padding:1px 4px;height:20px;background:transparent;color:var(--text-secondary);border:none;border-bottom:1px solid var(--border-color);border-radius:0;cursor:pointer;outline:none;"
                           title="Recognition engine used when clicking Scan">
-                    <option value="auto" selected>Auto detect</option>
-                    <option value="offline_ai">Offline AI (CLIP)</option>
+                    <option value="offline_ai" selected>Offline AI (Manga109 YOLO + CLIP)</option>
+                    <option value="auto">Auto detect</option>
                     <option value="heuristics">Fast heuristics</option>
                     <option value="gemini">Google Gemini</option>
                   </select>
@@ -747,28 +747,6 @@
                 <i class="ri-fullscreen-line" id="fullscreen-icon"></i>
               </button>
 
-              <!-- Series Memory Active Badge -->
-              <span class="badge" id="series-memory-preview-badge" style="display:none;background:rgba(168,85,247,0.18);color:#c084fc;border:1px solid rgba(168,85,247,0.35);font-size:0.72rem;padding:3px 8px;gap:4px;align-items:center;" title="Series Memory active">
-                <i class="ri-brain-line"></i> Memory Active
-              </span>
-
-              <!-- Visual Exemplar Reference Chip -->
-              <span class="badge" id="preview-exemplar-chip" style="display:none;cursor:pointer;background:rgba(59,130,246,0.18);color:#60a5fa;border:1px solid rgba(59,130,246,0.35);font-size:0.72rem;padding:3px 8px;gap:4px;align-items:center;" onclick="openExemplarGalleryModal()" title="View series exemplars">
-                <i class="ri-gallery-line"></i> <span id="preview-exemplar-label">Ref: None</span>
-              </span>
-
-              <!-- Quality & Confidence Score Chip -->
-              <span class="badge" id="preview-quality-chip" style="display:none;font-size:0.72rem;padding:3px 8px;gap:4px;align-items:center;" title="Colorization Quality & Confidence Score">
-                <i class="ri-shield-check-line" id="preview-quality-icon"></i> <span id="preview-quality-label">Quality: --</span>
-              </span>
-
-              <!-- Learn Page Button (saves page to Series Memory) -->
-              <button class="btn btn-sm" id="btn-learn-page-memory" onclick="learnCurrentPreviewPage()"
-                      style="background:linear-gradient(135deg,#7e22ce,#9333ea);border-color:#a855f7;color:#fff;"
-                      title="Save this colorized page and its character traits to Series Memory as a learning reference">
-                <i class="ri-brain-line"></i> Learn Page
-              </button>
-
               <div class="header-divider"></div>
 
               <button class="btn btn-sm btn-recolorize-accent" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
@@ -779,6 +757,34 @@
                 <i class="ri-delete-bin-line"></i>
               </button>
               <button class="btn-icon btn-close-comparator" onclick="closeSplitPreview()" title="Close Comparator (Esc)"><i class="ri-close-line"></i></button>
+            </div>
+          </div>
+
+          <!-- Dedicated Comparator Status & Memory Sub-Bar -->
+          <div class="comparator-meta-bar" id="comparator-meta-bar" style="display:none;">
+            <div class="comparator-meta-chips" id="comparator-meta-chips">
+              <!-- Quality & Confidence Score Chip -->
+              <span class="badge" id="preview-quality-chip" style="display:none;" title="Colorization Quality & Confidence Score">
+                <i class="ri-shield-check-line" id="preview-quality-icon"></i> <span id="preview-quality-label">Quality: --</span>
+              </span>
+
+              <!-- Visual Exemplar Reference Chip -->
+              <span class="badge" id="preview-exemplar-chip" style="display:none;" onclick="openExemplarGalleryModal()" title="View series exemplars">
+                <i class="ri-gallery-line"></i> <span id="preview-exemplar-label">Ref: None</span>
+              </span>
+
+              <!-- Series Memory Active Badge -->
+              <span class="badge" id="series-memory-preview-badge" style="display:none;" title="Series Memory active">
+                <i class="ri-brain-line"></i> Memory Active
+              </span>
+            </div>
+
+            <div class="comparator-meta-actions">
+              <!-- Learn Page Button (saves page to Series Memory) -->
+              <button class="btn btn-sm btn-learn-memory" id="btn-learn-page-memory" onclick="learnCurrentPreviewPage()"
+                      title="Save this colorized page and its character traits to Series Memory as a learning reference">
+                <i class="ri-brain-line"></i> Learn Page
+              </button>
             </div>
           </div>
 

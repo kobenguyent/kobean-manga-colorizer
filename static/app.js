@@ -3195,7 +3195,7 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
-      if (data.recognized_characters) {
+      if (data.recognized_characters && data.recognized_characters.length > 0) {
         page.recognized_characters = data.recognized_characters;
         if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
           renderPageCharacterChips(data.recognized_characters);
@@ -3429,6 +3429,9 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   }
   if (typeof updateQualityPreviewChip === "function") {
     updateQualityPreviewChip(page);
+  }
+  if (typeof updateComparatorMetaBar === "function") {
+    updateComparatorMetaBar();
   }
 }
 
@@ -5883,7 +5886,7 @@ async function recognizeCurrentPageCharacters() {
   try {
     const apiKey = typeof getActiveApiKey === "function" ? getActiveApiKey() : (document.getElementById("api-key-input")?.value || "");
     const modeSelect = document.getElementById("recognition-mode-select");
-    const recognitionMode = modeSelect ? modeSelect.value : "auto";
+    const recognitionMode = modeSelect ? modeSelect.value : "offline_ai";
     const resp = await fetch(`/api/session/${currentSession.session_id}/page/${currentPreviewPageIndex}/recognize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -6317,8 +6320,8 @@ async function recolorizePage(pageIdx) {
   const modelVariant  = document.getElementById("model-variant-select")?.value || "";
   const apiKey        = document.getElementById("api-key-input")?.value || "";
   const style         = document.getElementById("style-select")?.value || "gemini_anime";
-  const linePreserve  = parseFloat(document.getElementById("slider-line")?.value || "85") / 100.0;
-  const saturation    = parseFloat(document.getElementById("slider-saturation")?.value || "14") / 10.0;
+  const linePreserve  = parseFloat(document.getElementById("slider-line")?.value || "66") / 100.0;
+  const saturation    = parseFloat(document.getElementById("slider-saturation")?.value || "7") / 10.0;
 
   // Show loading state in split preview header
   const recolorBtn = document.getElementById("btn-recolorize-page");
@@ -6358,7 +6361,7 @@ async function recolorizePage(pageIdx) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
-      if (data.recognized_characters) {
+      if (data.recognized_characters && data.recognized_characters.length > 0) {
         page.recognized_characters = data.recognized_characters;
         if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
           renderPageCharacterChips(data.recognized_characters);
@@ -6429,8 +6432,8 @@ async function recolorizeSelected() {
   const modelVariant = document.getElementById("model-variant-select")?.value || "";
   const apiKey       = document.getElementById("api-key-input")?.value || "";
   const style        = document.getElementById("style-select")?.value || "gemini_anime";
-  const linePreserve = parseFloat(document.getElementById("slider-line")?.value || "85") / 100.0;
-  const saturation   = parseFloat(document.getElementById("slider-saturation")?.value || "14") / 10.0;
+  const linePreserve = parseFloat(document.getElementById("slider-line")?.value || "66") / 100.0;
+  const saturation   = parseFloat(document.getElementById("slider-saturation")?.value || "7") / 10.0;
 
   const payload = {
     session_id:       currentSession.session_id,
@@ -6634,6 +6637,27 @@ async function resetCurrentSeriesMemory(event) {
 
 // ── Visual Exemplars & Cross-Page Color Transfer ───────────────────
 
+function updateComparatorMetaBar() {
+  const metaBar = document.getElementById("comparator-meta-bar");
+  if (!metaBar) return;
+  const memoryBadge = document.getElementById("series-memory-preview-badge");
+  const exemplarChip = document.getElementById("preview-exemplar-chip");
+  const qualityChip = document.getElementById("preview-quality-chip");
+  const page = currentSession?.pages?.[currentPreviewPageIndex];
+  const isColorized = !!(page && (page.status === "colorized" || page.colorized_url));
+
+  const hasVisibleChip =
+    (memoryBadge && memoryBadge.style.display !== "none" && memoryBadge.style.display !== "") ||
+    (exemplarChip && exemplarChip.style.display !== "none" && exemplarChip.style.display !== "") ||
+    (qualityChip && qualityChip.style.display !== "none" && qualityChip.style.display !== "");
+
+  if (hasVisibleChip || isColorized) {
+    metaBar.style.display = "flex";
+  } else {
+    metaBar.style.display = "none";
+  }
+}
+
 function updateExemplarPreviewChip(page) {
   const chip = document.getElementById("preview-exemplar-chip");
   const label = document.getElementById("preview-exemplar-label");
@@ -6641,6 +6665,7 @@ function updateExemplarPreviewChip(page) {
 
   if (!page) {
     chip.style.display = "none";
+    if (typeof updateComparatorMetaBar === "function") updateComparatorMetaBar();
     return;
   }
 
@@ -6663,6 +6688,9 @@ function updateExemplarPreviewChip(page) {
   } else {
     chip.style.display = "none";
   }
+  if (typeof updateComparatorMetaBar === "function") {
+    updateComparatorMetaBar();
+  }
 }
 
 function updateQualityPreviewChip(page) {
@@ -6673,6 +6701,7 @@ function updateQualityPreviewChip(page) {
 
   if (!page || !page.quality_score || page.status !== "colorized") {
     chip.style.display = "none";
+    if (typeof updateComparatorMetaBar === "function") updateComparatorMetaBar();
     return;
   }
 
@@ -6706,6 +6735,9 @@ function updateQualityPreviewChip(page) {
     icon.className = "ri-alert-line";
     label.textContent = `Review Suggested (${scorePct}%)`;
     chip.title = `Review Suggested (${scorePct}%): Potential color bleeding or desaturation. ${metricsDesc}`;
+  }
+  if (typeof updateComparatorMetaBar === "function") {
+    updateComparatorMetaBar();
   }
 }
 
@@ -7166,4 +7198,5 @@ window.applyTheme = applyTheme;
 window.selectTheme = selectTheme;
 window.toggleThemeDropdown = toggleThemeDropdown;
 window.closeThemeDropdown = closeThemeDropdown;
+window.updateComparatorMetaBar = updateComparatorMetaBar;
 

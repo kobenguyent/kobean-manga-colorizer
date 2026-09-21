@@ -1150,6 +1150,8 @@ class MangaCharacterRecognizer:
     _clip_model = None
     _clip_processor = None
     _clip_device = None
+    _yolo_model = None
+    _yolo_device = None
 
     def __init__(self):
         self.device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -1177,6 +1179,112 @@ class MangaCharacterRecognizer:
         except Exception as e:
             print(f"[MangaCharacterRecognizer WARNING] Could not load offline CLIP model: {e}")
             return None, None, None
+
+    @classmethod
+    def _ensure_manga_yolo(cls):
+        """Lazy-loads deepghs/manga109_yolo detector for manga face & body isolation on MPS / CPU."""
+        if cls._yolo_model is not None:
+            return cls._yolo_model, cls._yolo_device
+
+        try:
+            from ultralytics import YOLO
+            from huggingface_hub import hf_hub_download
+
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            model_path = hf_hub_download(repo_id="deepghs/manga109_yolo", filename="v2023.12.07_s/model.pt")
+            model = YOLO(model_path)
+            cls._yolo_model = model
+            cls._yolo_device = device
+            print(f"[MangaCharacterRecognizer] Loaded offline Manga109 YOLO detector on {device}")
+            return cls._yolo_model, cls._yolo_device
+        except Exception as e:
+            print(f"[MangaCharacterRecognizer WARNING] Could not load Manga109 YOLO model: {e}")
+            return None, None
+
+    def _detect_manga_yolo_regions(
+        self,
+        pil_img: Image.Image,
+        cv_img: Optional[np.ndarray] = None,
+        conf: float = 0.16,
+    ) -> list[tuple[int, int, int, int, str, float]]:
+        """
+        Uses Manga109 YOLO detector to identify precise face and body bounding boxes.
+        Applies multi-scale and horizontal panel-band slicing so small faces inside manga panels
+        are reliably detected at full fidelity.
+        Returns list of (y0, x0, y1, x1, cls_name, conf) in pixel coordinates.
+        """
+        yolo_model, device = self._ensure_manga_yolo()
+        if yolo_model is None:
+            return []
+
+        w, h = pil_img.size
+        detected: list[tuple[int, int, int, int, str, float]] = []
+
+        # 1. Full page scan at high resolution
+        try:
+            full_res = yolo_model.predict(pil_img, device=device, conf=conf, imgsz=1280, verbose=False)[0]
+            for b in full_res.boxes:
+                cls_name = yolo_model.names[int(b.cls[0])]
+                if cls_name in ("body", "face"):
+                    bx0, by0, bx1, by1 = b.xyxy[0].tolist()
+                    detected.append((int(by0), int(bx0), int(by1), int(bx1), cls_name, float(b.conf[0])))
+        except Exception as e:
+            print(f"[MangaCharacterRecognizer WARNING] Full-page YOLO scan error: {e}")
+
+        # 2. If page is tall (standard manga page layout), scan horizontal panel bands
+        if h >= int(1.15 * w):
+            bands = [
+                (0, 0, w, int(h * 0.38)),
+                (0, int(h * 0.28), w, int(h * 0.68)),
+                (0, int(h * 0.58), w, h),
+            ]
+            for x0, y0, x1, y1 in bands:
+                try:
+                    crop = pil_img.crop((x0, y0, x1, y1))
+                    band_res = yolo_model.predict(crop, device=device, conf=conf, imgsz=1024, verbose=False)[0]
+                    for b in band_res.boxes:
+                        cls_name = yolo_model.names[int(b.cls[0])]
+                        if cls_name in ("body", "face"):
+                            bx0, by0, bx1, by1 = b.xyxy[0].tolist()
+                            gx0 = max(0, min(w, int(x0 + bx0)))
+                            gy0 = max(0, min(h, int(y0 + by0)))
+                            gx1 = max(0, min(w, int(x0 + bx1)))
+                            gy1 = max(0, min(h, int(y0 + by1)))
+                            detected.append((gy0, gx0, gy1, gx1, cls_name, float(b.conf[0])))
+                except Exception:
+                    pass
+
+        if not detected:
+            return []
+
+        # 3. Apply NMS to merge overlapping detections across bands
+        detected.sort(key=lambda x: x[5], reverse=True)
+        keep: list[tuple[int, int, int, int, str, float]] = []
+
+        for d in detected:
+            dy0, dx0, dy1, dx1, dcls, dconf = d
+            d_area = (dy1 - dy0) * (dx1 - dx0)
+            if d_area <= 0:
+                continue
+
+            suppress = False
+            for k in keep:
+                ky0, kx0, ky1, kx1, kcls, kconf = k
+                k_area = (ky1 - ky0) * (kx1 - kx0)
+                iy0 = max(dy0, ky0)
+                ix0 = max(dx0, kx0)
+                iy1 = min(dy1, ky1)
+                ix1 = min(dx1, kx1)
+                if iy1 > iy0 and ix1 > ix0:
+                    inter = (iy1 - iy0) * (ix1 - ix0)
+                    iou = inter / float(d_area + k_area - inter + 1e-6)
+                    if (dcls == kcls and iou > 0.40) or (iou > 0.65):
+                        suppress = True
+                        break
+            if not suppress:
+                keep.append(d)
+
+        return keep
 
     @staticmethod
     def _canonicalize_name(raw_name: str, palette: CharacterPalette) -> str:
@@ -1249,8 +1357,8 @@ class MangaCharacterRecognizer:
         elif mode in ("heuristics", "fast", "visual_heuristic"):
             results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
 
-        # 3. Explicit Offline Pre-trained Neural AI (CLIP) mode
-        elif mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai"):
+        # 3. Explicit Offline Pre-trained Neural AI (Manga109 YOLO + CLIP) mode
+        elif mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai", "manga_yolo", "offline_manga_ai", "yolo_clip"):
             try:
                 res = self._recognize_with_clip(
                     image_path=image_path,
@@ -1415,11 +1523,20 @@ class MangaCharacterRecognizer:
                 )
         return results
 
-    def _extract_candidate_boxes(self, img: np.ndarray) -> list[tuple[int, int, int, int]]:
+    def _extract_candidate_boxes(self, img: np.ndarray, pil_img: Optional[Image.Image] = None) -> list[tuple[int, int, int, int]]:
         """
         Extracts candidate panel and figure bounding boxes (y0, x0, y1, x1) from grayscale image.
-        Uses morphological closing and contour analysis to locate panel segments and character silhouettes.
+        Prioritizes Manga109 YOLO neural face & body detections when available, falling back to
+        morphological closing and contour analysis.
         """
+        if pil_img is not None:
+            try:
+                yolo_boxes = self._detect_manga_yolo_regions(pil_img, img)
+                if yolo_boxes:
+                    return [(y0, x0, y1, x1) for (y0, x0, y1, x1, _, _) in yolo_boxes]
+            except Exception as e:
+                print(f"[MangaCharacterRecognizer] YOLO candidate extraction fallback: {e}")
+
         h, w = img.shape
         candidate_boxes: list[tuple[int, int, int, int]] = []
         scale = 1.0
@@ -1497,7 +1614,7 @@ class MangaCharacterRecognizer:
         if cv_img is None:
             cv_img = np.array(pil_img.convert("L"))
 
-        candidate_boxes = self._extract_candidate_boxes(cv_img)
+        candidate_boxes = self._extract_candidate_boxes(cv_img, pil_img=pil_img)
         if not candidate_boxes:
             candidate_boxes = [(int(0.05 * h_img), int(0.05 * w_img), int(0.95 * h_img), int(0.95 * w_img))]
 
@@ -1523,8 +1640,12 @@ class MangaCharacterRecognizer:
             )
             for c in palette.characters
         ]
-        neutral_prompt = "manga speech bubble, sound effect, or scenery background without characters"
-        all_prompts = prompts + [neutral_prompt]
+        neutral_prompts = [
+            "manga speech bubble, dialogue text, Japanese sound effect on white background",
+            "manga background scenery, room, wall, trees, speed lines without characters",
+            "blank white paper margin or solid black frame border without characters",
+        ]
+        all_prompts = prompts + neutral_prompts
         num_chars = len(palette.characters)
 
         # Collect candidate crops
@@ -1686,7 +1807,12 @@ class MangaCharacterRecognizer:
                         break
 
         # 2. Candidate panel / figure detection
-        candidate_boxes = self._extract_candidate_boxes(img)
+        pil_img = None
+        try:
+            pil_img = Image.open(image_path).convert("RGB")
+        except Exception:
+            pass
+        candidate_boxes = self._extract_candidate_boxes(img, pil_img=pil_img)
 
         recognized_candidates: list[RecognizedCharacter] = []
 
@@ -2160,9 +2286,9 @@ class MangaColorizerEngine:
         model_name: str = "resnext-v2-manga",
         api_key: str = "",
         style: str = "natural",
-        saturation: float = 1.0,
+        saturation: float = 0.7,
         contrast: float = 1.0,
-        line_preserve: float = 0.85,
+        line_preserve: float = 0.66,
         skip_if_colored: bool = False,
         character_palette: Optional["CharacterPalette"] = None,
         denoise_screentone: bool = False,
@@ -2320,7 +2446,7 @@ class MangaColorizerEngine:
             )
 
         if isinstance(res, dict):
-            if "recognized_characters" not in res:
+            if "recognized_characters" not in res and recognized_chars:
                 res["recognized_characters"] = recognized_chars
             if active_ex_path and "exemplar_used" not in res and os.path.exists(active_ex_path):
                 res["exemplar_used"] = Path(active_ex_path).name
@@ -2354,9 +2480,9 @@ class MangaColorizerEngine:
         model_provider: str = "resnext_generator",
         model_name: str = "resnext-v2-manga",
         style: str = "natural",
-        saturation: float = 1.0,
+        saturation: float = 0.7,
         contrast: float = 1.0,
-        line_preserve: float = 0.85,
+        line_preserve: float = 0.66,
         character_palette: Optional["CharacterPalette"] = None,
         denoise_screentone: bool = False,
         denoise_sigma: int = 25,
@@ -2442,7 +2568,8 @@ class MangaColorizerEngine:
                 adapter = self.adapter_trainer.load_adapter(series_key, device=self.device)
                 if adapter is not None:
                     try:
-                        adapter_tens = tens_in[:, 0:1]
+                        adapter = adapter.to(device=self.device, dtype=fake_color.dtype)
+                        adapter_tens = tens_in[:, 0:1].to(dtype=fake_color.dtype)
                         fake_color = adapter(fake_color, adapter_tens)
                         adapter_used = True
                         print(f"[MangaColorizer] Series LoRA Adapter applied for '{series_key}' ✅")
@@ -2630,7 +2757,7 @@ class MangaColorizerEngine:
     # ── Google Nano / Gemini API Engine ─────────────────────────────
 
     def _blend_and_save_api_result(
-        self, img_bytes: bytes, original_path: str, output_path: str, line_preserve: float = 0.85
+        self, img_bytes: bytes, original_path: str, output_path: str, line_preserve: float = 0.66
     ):
         """Blends API generated color image with native ultra-high resolution line art."""
         orig_img = cv2.imread(original_path)
