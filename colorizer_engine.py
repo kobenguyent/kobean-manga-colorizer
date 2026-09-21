@@ -930,6 +930,104 @@ def apply_character_palette_harmonization(
     )
 
 
+def protect_page_margins_and_speech_bubbles(
+    color_img: np.ndarray,
+    orig_img: np.ndarray,
+    orig_gray: Optional[np.ndarray] = None,
+    protect_bubbles: bool = True,
+) -> np.ndarray:
+    """
+    Protects outer page margins and enclosed speech bubbles from unwanted color bleeding
+    without washing out unshaded artwork inside manga panels (skin, clothing, backgrounds).
+
+    1. Margin Protection:
+       Detects the content bounding box from dark ink line distribution.
+       Restricts paper fade (brightness >= 220) strictly to outer margins beyond this box.
+    2. Dialogue Bubble Protection:
+       Uses contour hierarchy, geometric solidity, circularity, and child stroke counts
+       to isolate true speech bubbles while strictly excluding manga panels and drawing whitespace.
+    """
+    h, w = orig_img.shape[:2]
+    if orig_gray is None:
+        if orig_img.ndim == 2:
+            orig_gray = orig_img.astype(np.float32) / 255.0
+        else:
+            orig_gray = cv2.cvtColor(orig_img, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    elif orig_gray.dtype != np.float32 or orig_gray.max() > 1.0:
+        orig_gray = orig_gray.astype(np.float32) / 255.0
+
+    result = color_img.copy()
+
+    # 1. Content-bounded outer margin protection
+    has_ink_row = np.mean(orig_gray < 0.65, axis=1) > 0.003
+    has_ink_col = np.mean(orig_gray < 0.65, axis=0) > 0.003
+    y_indices = np.where(has_ink_row)[0]
+    x_indices = np.where(has_ink_col)[0]
+
+    top_bound = max(0, y_indices[0] - 8) if len(y_indices) > 0 else int(h * 0.03)
+    bot_bound = min(h, y_indices[-1] + 8) if len(y_indices) > 0 else int(h * 0.97)
+    left_bound = max(0, x_indices[0] - 8) if len(x_indices) > 0 else int(w * 0.03)
+    right_bound = min(w, x_indices[-1] + 8) if len(x_indices) > 0 else int(w * 0.97)
+
+    margin_mask = np.ones((h, w), dtype=bool)
+    margin_mask[top_bound:bot_bound, left_bound:right_bound] = False
+
+    margin_fade = np.clip((orig_gray * 255.0 - 220.0) / 25.0, 0.0, 1.0)
+    apply_margin = margin_mask & (margin_fade > 0.0)
+    num_chans = min(result.shape[2], orig_img.shape[2]) if result.ndim == 3 and orig_img.ndim == 3 else 1
+    if num_chans > 1:
+        for c in range(num_chans):
+            result[apply_margin, c] = (
+                result[apply_margin, c].astype(np.float32) * (1.0 - margin_fade[apply_margin])
+                + orig_img[apply_margin, c].astype(np.float32) * margin_fade[apply_margin]
+            ).astype(np.uint8)
+    else:
+        result[apply_margin] = (
+            result[apply_margin].astype(np.float32) * (1.0 - margin_fade[apply_margin])
+            + orig_img[apply_margin].astype(np.float32) * margin_fade[apply_margin]
+        ).astype(np.uint8)
+
+    # 2. Speech bubble detection & protection
+    if protect_bubbles:
+        try:
+            paper_u = (orig_gray * 255.0 >= 205.0).astype(np.uint8) * 255
+            contours, hierarchy = cv2.findContours(paper_u, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            if hierarchy is not None and len(hierarchy[0]) > 0:
+                max_area = min(350000, max(8000, int(0.05 * h * w)))
+                bubble_mask = np.zeros((h, w), dtype=np.uint8)
+                for cnt, hier in zip(contours, hierarchy[0]):
+                    if hier[2] != -1:  # Contour has inner child strokes (text in dialogue bubble)
+                        area = cv2.contourArea(cnt)
+                        if 400 < area < max_area:
+                            bx, by, bw, bh = cv2.boundingRect(cnt)
+                            aspect = bw / float(max(1, bh))
+                            if 0.20 <= aspect <= 4.0 and bw < 0.40 * w and bh < 0.35 * h:
+                                perimeter = cv2.arcLength(cnt, True)
+                                circ = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0
+                                hull = cv2.convexHull(cnt)
+                                hull_area = cv2.contourArea(hull)
+                                sol = area / hull_area if hull_area > 0 else 0
+                                if sol >= 0.70 and circ >= 0.06:
+                                    child_idx = hier[2]
+                                    child_count = 0
+                                    while child_idx != -1:
+                                        child_count += 1
+                                        child_idx = hierarchy[0][child_idx][0]
+                                    if 2 <= child_count <= 60:
+                                        cv2.drawContours(bubble_mask, [cnt], -1, 255, -1)
+                if np.any(bubble_mask > 0):
+                    mask_idx = (bubble_mask > 0) & (orig_gray >= 0.80)
+                    if num_chans > 1:
+                        for c in range(num_chans):
+                            result[mask_idx, c] = orig_img[mask_idx, c]
+                    else:
+                        result[mask_idx] = orig_img[mask_idx]
+        except Exception as e:
+            print(f"[MangaColorizer WARNING] Speech bubble protection: {e}")
+
+    return result
+
+
 def transfer_exemplar_palette(
     target_rgb: np.ndarray,
     exemplar_img_path: str,
@@ -2401,41 +2499,14 @@ class MangaColorizerEngine:
         ).astype(np.uint8)
 
         # 9. Clean White Margin & Speech Bubble Protection
-        # Protect page borders and gutters from color wash (near-pure white paper >= 240)
-        # Avoid washing out light blonde or peach skin tones (which typically sit at 215-235)
-        paper_fade = np.clip((gray_orig * 255.0 - 240.0) / 14.0, 0.0, 1.0)
-        for c in range(3):
-            final_rgb[:, :, c] = (
-                final_rgb[:, :, c].astype(np.float32) * (1.0 - paper_fade)
-                + orig_rgb[:, :, c].astype(np.float32) * paper_fade
-            ).astype(np.uint8)
-
-        # Enclosed speech bubble detection: protect dialogue bubbles so they stay pure crisp white
-        try:
-            paper_u = (gray_orig * 255.0 >= 205.0).astype(np.uint8) * 255
-            contours, hierarchy = cv2.findContours(paper_u, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            if hierarchy is not None and len(hierarchy[0]) > 0:
-                bubble_mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
-                for cnt, hier in zip(contours, hierarchy[0]):
-                    if hier[2] != -1:  # Contour has inner child strokes (text in dialogue bubble)
-                        area = cv2.contourArea(cnt)
-                        if 600 < area < 0.35 * h_orig * w_orig:
-                            bx, by, bw, bh = cv2.boundingRect(cnt)
-                            aspect = bw / float(max(1, bh))
-                            if 0.25 <= aspect <= 3.2 and bw < 0.7 * w_orig and bh < 0.6 * h_orig:
-                                child_idx = hier[2]
-                                child_count = 0
-                                while child_idx != -1:
-                                    child_count += 1
-                                    child_idx = hierarchy[0][child_idx][0]
-                                if child_count >= 2:
-                                    cv2.drawContours(bubble_mask, [cnt], -1, 255, -1)
-                if np.any(bubble_mask > 0):
-                    mask_idx = (bubble_mask > 0) & (gray_orig >= 0.80)
-                    for c in range(3):
-                        final_rgb[mask_idx, c] = orig_rgb[mask_idx, c]
-        except Exception as e:
-            print(f"[MangaColorizer WARNING] Speech bubble protection: {e}")
+        # Protect outer page margins and genuine dialogue speech bubbles from color bleeding
+        # without bleaching light/un-inked artwork inside manga panels.
+        final_rgb = protect_page_margins_and_speech_bubbles(
+            color_img=final_rgb,
+            orig_img=orig_rgb,
+            orig_gray=gray_orig,
+            protect_bubbles=True,
+        )
 
         # 9b. Optional Cross-Page Exemplar Palette Alignment (Phase 2)
         if exemplar_image_path and os.path.exists(exemplar_image_path):
@@ -2528,9 +2599,13 @@ class MangaColorizerEngine:
         line_mult = np.clip(orig_gray / max(0.60, line_preserve), 0.0, 1.0)[:, :, np.newaxis]
         fused = np.clip(gen_scaled.astype(np.float32) * line_mult, 0, 255).astype(np.uint8)
 
-        # Preserve speech bubbles crisp pure white
-        bubble_mask = orig_gray > 0.96
-        fused[bubble_mask] = orig_img[bubble_mask]
+        # Preserve outer margins and speech bubbles pure white
+        fused = protect_page_margins_and_speech_bubbles(
+            color_img=fused,
+            orig_img=orig_img,
+            orig_gray=orig_gray,
+            protect_bubbles=True,
+        )
 
         self._write_optimized_image(output_path, fused, quality=88)
 
@@ -2622,9 +2697,13 @@ class MangaColorizerEngine:
                                 gem_scaled.astype(np.float32) * line_mult, 0, 255
                             ).astype(np.uint8)
 
-                            # Preserve speech bubbles pure white
-                            bubble_mask = orig_gray > 0.96
-                            fused[bubble_mask] = orig_img[bubble_mask]
+                            # Preserve outer margins and speech bubbles pure white
+                            fused = protect_page_margins_and_speech_bubbles(
+                                color_img=fused,
+                                orig_img=orig_img,
+                                orig_gray=orig_gray,
+                                protect_bubbles=True,
+                            )
 
                             self._write_optimized_image(output_path, fused, quality=88)
                             ret = {
@@ -2873,15 +2952,6 @@ class MangaColorizerEngine:
         lab[:, :, 1] = np.clip(128.0 + midtone_mask * a_shift, 0, 255).astype(np.uint8)
         lab[:, :, 2] = np.clip(128.0 + midtone_mask * b_shift, 0, 255).astype(np.uint8)
 
-        # Protect pure white margins & paper (>= 242)
-        paper_mask = (gray >= 242).astype(np.float32)
-        lab[:, :, 1] = (
-            lab[:, :, 1].astype(np.float32) * (1.0 - paper_mask) + 128.0 * paper_mask
-        ).astype(np.uint8)
-        lab[:, :, 2] = (
-            lab[:, :, 2].astype(np.float32) * (1.0 - paper_mask) + 128.0 * paper_mask
-        ).astype(np.uint8)
-
         bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
         # Boost saturation in HSV
@@ -2905,6 +2975,14 @@ class MangaColorizerEngine:
                 preserve_line_art=True,
                 orig_gray=gray.astype(np.float32) / 255.0,
             )
+
+        # Protect outer page margins and speech bubbles from color bleeding
+        rgb = protect_page_margins_and_speech_bubbles(
+            color_img=rgb,
+            orig_img=cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB),
+            orig_gray=gray.astype(np.float32) / 255.0,
+            protect_bubbles=True,
+        )
 
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
