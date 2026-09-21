@@ -961,7 +961,7 @@ def protect_page_margins_and_speech_bubbles(
 
     result = color_img.copy()
 
-    # 1. Content-bounded outer margin protection
+    # 1. Content-bounded outer margin protection (optimized perimeter slices)
     has_ink_row = np.mean(orig_gray < 0.65, axis=1) > 0.003
     has_ink_col = np.mean(orig_gray < 0.65, axis=0) > 0.003
     y_indices = np.where(has_ink_row)[0]
@@ -972,23 +972,25 @@ def protect_page_margins_and_speech_bubbles(
     left_bound = max(0, x_indices[0] - 8) if len(x_indices) > 0 else int(w * 0.03)
     right_bound = min(w, x_indices[-1] + 8) if len(x_indices) > 0 else int(w * 0.97)
 
-    margin_mask = np.ones((h, w), dtype=bool)
-    margin_mask[top_bound:bot_bound, left_bound:right_bound] = False
-
-    margin_fade = np.clip((orig_gray * 255.0 - 220.0) / 25.0, 0.0, 1.0)
-    apply_margin = margin_mask & (margin_fade > 0.0)
-    num_chans = min(result.shape[2], orig_img.shape[2]) if result.ndim == 3 and orig_img.ndim == 3 else 1
-    if num_chans > 1:
-        for c in range(num_chans):
-            result[apply_margin, c] = (
-                result[apply_margin, c].astype(np.float32) * (1.0 - margin_fade[apply_margin])
-                + orig_img[apply_margin, c].astype(np.float32) * margin_fade[apply_margin]
+    margin_slices = [
+        (slice(0, top_bound), slice(None)),
+        (slice(bot_bound, h), slice(None)),
+        (slice(top_bound, bot_bound), slice(0, left_bound)),
+        (slice(top_bound, bot_bound), slice(right_bound, w)),
+    ]
+    for sl_y, sl_x in margin_slices:
+        og_sl = orig_gray[sl_y, sl_x]
+        fade = np.clip((og_sl * 255.0 - 220.0) / 25.0, 0.0, 1.0)
+        m = fade > 0.0
+        if np.any(m):
+            f3 = fade[:, :, np.newaxis]
+            blended = np.clip(
+                result[sl_y, sl_x].astype(np.float32) * (1.0 - f3)
+                + orig_img[sl_y, sl_x].astype(np.float32) * f3,
+                0,
+                255,
             ).astype(np.uint8)
-    else:
-        result[apply_margin] = (
-            result[apply_margin].astype(np.float32) * (1.0 - margin_fade[apply_margin])
-            + orig_img[apply_margin].astype(np.float32) * margin_fade[apply_margin]
-        ).astype(np.uint8)
+            result[sl_y, sl_x] = np.where(m[:, :, np.newaxis], blended, result[sl_y, sl_x])
 
     # 2. Speech bubble detection & protection
     if protect_bubbles:
@@ -1020,6 +1022,7 @@ def protect_page_margins_and_speech_bubbles(
                                         cv2.drawContours(bubble_mask, [cnt], -1, 255, -1)
                 if np.any(bubble_mask > 0):
                     mask_idx = (bubble_mask > 0) & (orig_gray >= 0.80)
+                    num_chans = min(result.shape[2], orig_img.shape[2]) if result.ndim == 3 and orig_img.ndim == 3 else 1
                     if num_chans > 1:
                         for c in range(num_chans):
                             result[mask_idx, c] = orig_img[mask_idx, c]
@@ -1032,10 +1035,10 @@ def protect_page_margins_and_speech_bubbles(
     # Genuine un-inked paper from the scan (orig_gray >= 0.96) that received faint neural tint
     # is smoothly restored to crisp paper white [255, 255, 255] (matching Hugging Face).
     if orig_gray is not None and result.ndim == 3 and result.shape[2] == 3:
-        color_hsv = cv2.cvtColor(result, cv2.COLOR_RGB2HSV).astype(np.float32)
-        sat_val = color_hsv[:, :, 1]
-        val_val = color_hsv[:, :, 2]
-        paper_bg = (orig_gray >= 0.96) & (sat_val < 32.0) & (val_val >= 225.0)
+        r, g, b = result[:, :, 0], result[:, :, 1], result[:, :, 2]
+        max_c = np.maximum(np.maximum(r, g), b)
+        min_c = np.minimum(np.minimum(r, g), b)
+        paper_bg = (orig_gray >= 0.96) & (max_c >= 225) & ((max_c - min_c) <= 28)
         result[paper_bg] = 255
 
     return result
@@ -1956,6 +1959,64 @@ def resize_pad_manga(img: np.ndarray, size: int = 768) -> tuple[np.ndarray, tupl
 # ─────────────────────────────────────────────────────────────────────
 
 
+def get_hardware_profile() -> dict:
+    """
+    Auto-detects Apple Silicon hardware (M4 Pro 24GB, M3 Pro 18GB, etc.)
+    and configures optimal inference precision, memory limits, and cache recycling.
+    """
+    profile = {
+        "device": "cpu",
+        "chip_name": "CPU",
+        "ram_gb": 16,
+        "use_fp16": False,
+        "empty_cache_interval": 20,
+        "preferred_size": 768,
+        "max_concurrency": 1,
+    }
+    if torch.backends.mps.is_available():
+        profile["device"] = "mps"
+        profile["use_fp16"] = True  # FP16 doubles throughput and cuts unified memory bandwidth in half
+        try:
+            import subprocess
+
+            chip = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
+            ).strip()
+            profile["chip_name"] = chip
+        except Exception:
+            profile["chip_name"] = "Apple Silicon"
+        try:
+            import subprocess
+
+            mem_bytes = int(
+                subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()
+            )
+            profile["ram_gb"] = round(mem_bytes / (1024**3))
+        except Exception:
+            profile["ram_gb"] = 16
+
+        # Tuned thresholds for M3 Pro (18GB) / M4 Pro (24GB) or higher
+        if profile["ram_gb"] >= 24:  # M4 Pro 24GB / Max / Ultra
+            profile["empty_cache_interval"] = 15
+            profile["max_concurrency"] = 2
+            profile["preferred_size"] = 768
+        elif profile["ram_gb"] >= 18:  # M3 Pro 18GB
+            profile["empty_cache_interval"] = 10
+            profile["max_concurrency"] = 2
+            profile["preferred_size"] = 768
+        else:
+            profile["empty_cache_interval"] = 8
+            profile["max_concurrency"] = 1
+
+    elif torch.cuda.is_available():
+        profile["device"] = "cuda"
+        profile["use_fp16"] = True
+        profile["chip_name"] = torch.cuda.get_device_name(0)
+        profile["ram_gb"] = round(torch.cuda.get_device_properties(0).total_memory / (1024**3))
+
+    return profile
+
+
 class MangaColorizerEngine:
     """
     Unified High-Performance Manga Colorization Engine.
@@ -1967,7 +2028,7 @@ class MangaColorizerEngine:
     - ✒️ Native Line Art Multiply Blending: 100% preservation of native ultra-high resolution
       line art, text, fine hatching, and screentones without chromatic distortion.
     - 🛡️ Clean White Paper & Speech Bubble Protection: eliminates color bleeding onto margins and bubbles.
-    - ⚡ Apple Silicon MPS / NVIDIA CUDA acceleration for fast sub-second inference.
+    - ⚡ Apple Silicon MPS (M3/M4 Pro FP16) / NVIDIA CUDA acceleration for sub-second inference.
     """
 
     @staticmethod
@@ -1999,15 +2060,15 @@ class MangaColorizerEngine:
             cv2.imwrite(output_path, img)
 
     def __init__(self):
-        # Determine acceleration device
-        if torch.backends.mps.is_available():
-            self.device = "mps"
-        elif torch.cuda.is_available():
-            self.device = "cuda"
-        else:
-            self.device = "cpu"
+        # Auto-detect hardware profile (M4 Pro 24GB / M3 Pro 18GB / CUDA / CPU)
+        self.hw_profile = get_hardware_profile()
+        self.device = self.hw_profile["device"]
+        self.use_fp16 = self.hw_profile["use_fp16"]
+        self._pages_processed = 0
 
-        print(f"[MangaColorizer] Selected acceleration hardware: {self.device.upper()}")
+        chip_desc = f"{self.hw_profile['chip_name']} ({self.hw_profile['ram_gb']}GB Unified Memory)"
+        prec_desc = "FP16 Accelerated" if self.use_fp16 else "FP32"
+        print(f"[MangaColorizer] Hardware: {chip_desc} on {self.device.upper()} ({prec_desc}) ⚡")
 
         self.colorizer_model: Optional[Any] = None
         self.denoiser: Optional[Any] = None
@@ -2076,8 +2137,11 @@ class MangaColorizerEngine:
                 self.colorizer_model = Colorizer().to(self.device)
                 state_dict = torch.load(gen_path, map_location=self.device)
                 self.colorizer_model.generator.load_state_dict(state_dict)
+                if self.use_fp16 and self.device in ("mps", "cuda"):
+                    self.colorizer_model = self.colorizer_model.half()
                 self.colorizer_model.eval()
-                print(f"[MangaColorizer] ResNeXt Generator initialized on {self.device.upper()} ✅")
+                prec_str = "FP16" if (self.use_fp16 and self.device in ("mps", "cuda")) else "FP32"
+                print(f"[MangaColorizer] ResNeXt Generator initialized on {self.device.upper()} ({prec_str}) ✅")
 
             if os.path.exists(net_path):
                 self.denoiser = FFDNetDenoiser(self.device, _weights_dir=str(DENOISING_DIR))
@@ -2101,7 +2165,7 @@ class MangaColorizerEngine:
         line_preserve: float = 0.85,
         skip_if_colored: bool = False,
         character_palette: Optional["CharacterPalette"] = None,
-        denoise_screentone: bool = True,
+        denoise_screentone: bool = False,
         denoise_sigma: int = 25,
         recognition_mode: str = "none",
         skip_recognition: bool = True,
@@ -2267,10 +2331,13 @@ class MangaColorizerEngine:
             try:
                 from quality_scorer import calculate_quality_score
                 is_skipped = res.get("status") == "skipped_colored"
-                if os.path.exists(output_path):
+                color_for_score = res.pop("final_rgb", None)
+                if color_for_score is None and os.path.exists(output_path):
+                    color_for_score = output_path
+                if color_for_score is not None:
                     res["quality_score"] = calculate_quality_score(
                         orig_img=image_path,
-                        color_img=output_path,
+                        color_img=color_for_score,
                         is_skipped_colored=is_skipped,
                     )
             except Exception as e:
@@ -2286,12 +2353,12 @@ class MangaColorizerEngine:
         output_path: str,
         model_provider: str = "resnext_generator",
         model_name: str = "resnext-v2-manga",
-        style: str = "shonen_vivid",
-        saturation: float = 1.4,
-        contrast: float = 1.1,
+        style: str = "natural",
+        saturation: float = 1.0,
+        contrast: float = 1.0,
         line_preserve: float = 0.85,
         character_palette: Optional["CharacterPalette"] = None,
-        denoise_screentone: bool = True,
+        denoise_screentone: bool = False,
         denoise_sigma: int = 25,
         exemplar_image_path: Optional[str] = None,
         series_key: Optional[str] = None,
@@ -2323,8 +2390,14 @@ class MangaColorizerEngine:
             )
 
         # 1. Load original high-resolution image
-        orig_pil = Image.open(image_path).convert("RGB")
-        orig_np = np.array(orig_pil).astype(np.float32) / 255.0
+        if isinstance(image_path, str) and os.path.exists(image_path):
+            orig_bgr = cv2.imread(image_path)
+            orig_rgb = cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB)
+            orig_np = orig_rgb.astype(np.float32) / 255.0
+        else:
+            orig_pil = Image.open(image_path).convert("RGB")
+            orig_np = np.array(orig_pil).astype(np.float32) / 255.0
+            orig_rgb = (orig_np * 255.0).astype(np.uint8)
         h_orig, w_orig = orig_np.shape[:2]
 
         # 1b. Screentone & halftone denoising preprocessor (FFDNet)
@@ -2334,7 +2407,7 @@ class MangaColorizerEngine:
         if denoise_screentone and self.denoiser is not None:
             try:
                 denoised_bgr = self.denoiser.get_denoised_image(
-                    (orig_np * 255.0).astype(np.uint8), sigma=denoise_sigma
+                    orig_rgb, sigma=denoise_sigma
                 )
                 denoised_rgb = cv2.cvtColor(denoised_bgr, cv2.COLOR_BGR2RGB)
                 denoised_sketch = denoised_rgb.astype(np.float32) / 255.0
@@ -2346,18 +2419,21 @@ class MangaColorizerEngine:
         if "chroma-hd" in (model_name or ""):
             inference_size = 896
         else:
-            inference_size = 768
+            inference_size = self.hw_profile.get("preferred_size", 768)
 
         img_pad, pad = resize_pad_manga(denoised_sketch, size=inference_size)
         tens_in = ToTensor()(img_pad).unsqueeze(0).to(self.device)
+        if self.use_fp16 and self.device in ("mps", "cuda"):
+            tens_in = tens_in.half()
 
         # 3. Clean hint tensor for noise-free neural inference (matching Hugging Face Spaces)
         _, _, pad_h, pad_w = tens_in.shape
-        hint = torch.zeros(1, 4, pad_h, pad_w, dtype=torch.float32, device=self.device)
+        hint_dtype = torch.float16 if (self.use_fp16 and self.device in ("mps", "cuda")) else torch.float32
+        hint = torch.zeros(1, 4, pad_h, pad_w, dtype=hint_dtype, device=self.device)
 
         # 4. Authentic Neural Inference (Automatic Manga Colorization)
         adapter_used = False
-        with torch.no_grad():
+        with torch.inference_mode():
             fake_color, _ = self.colorizer_model(torch.cat([tens_in, hint], 1))
             fake_color = fake_color.detach()
 
@@ -2366,14 +2442,15 @@ class MangaColorizerEngine:
                 adapter = self.adapter_trainer.load_adapter(series_key, device=self.device)
                 if adapter is not None:
                     try:
-                        fake_color = adapter(fake_color, tens_in[:, 0:1])
+                        adapter_tens = tens_in[:, 0:1]
+                        fake_color = adapter(fake_color, adapter_tens)
                         adapter_used = True
                         print(f"[MangaColorizer] Series LoRA Adapter applied for '{series_key}' ✅")
                     except Exception as e:
                         print(f"[MangaColorizer WARNING] Failed applying series adapter: {e}")
 
         # Unpad and convert back to RGB [0, 1]
-        result_rn = fake_color[0].detach().cpu().permute(1, 2, 0) * 0.5 + 0.5
+        result_rn = fake_color[0].detach().cpu().permute(1, 2, 0).float() * 0.5 + 0.5
         if pad[0] != 0:
             result_rn = result_rn[: -pad[0]]
         if pad[1] != 0:
@@ -2382,76 +2459,66 @@ class MangaColorizerEngine:
         rn_np = np.clip(result_rn.numpy(), 0.0, 1.0)
         rn_rgb = (rn_np * 255.0).astype(np.uint8)
 
-        # 4. Upscale color to native page resolution via Lanczos interpolation
+        # 4b. Fast low-resolution saturation boost pre-computation
+        low_hsv = cv2.cvtColor(rn_rgb, cv2.COLOR_RGB2HSV)
+        sat_boost_low = np.clip((low_hsv[:, :, 1].astype(np.float32) - 25.0) / 160.0, 0.0, 1.0)
+        sat_boost = cv2.resize(sat_boost_low, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+
+        # 4c. Upscale color to native page resolution via Lanczos interpolation
         color_upscaled_rgb = cv2.resize(rn_rgb, (w_orig, h_orig), interpolation=cv2.INTER_LANCZOS4)
-        orig_rgb = (orig_np * 255.0).astype(np.uint8)
 
         # 5. Smart Anime Vibrance & Color Enhancement (RGB <-> HSV)
         profile = STYLE_PROFILES.get(style, STYLE_PROFILES["shonen_vivid"])
         effective_sat = saturation * profile.get("sat_multiplier", 1.45)
         effective_cont = contrast * profile.get("contrast_multiplier", 1.15)
 
-        # Work in HSV space for vivid, distortion-free color enhancement
-        hsv = cv2.cvtColor(color_upscaled_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
-        h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-
-        # Apply Smart Vibrance: amplify colorful regions while preserving neutral paper/ink
-        # Protects very low saturation (< 10) from noise, heavily enhances midtones & highlights
-        sat_mask = np.clip((s - 10.0) / 25.0, 0.0, 1.0)
-        s_boost = s * (1.0 + (effective_sat - 1.0) * sat_mask)
-        s_new = np.clip(s_boost, 0.0, 255.0)
-
-        # Dynamic range contrast adjustment on Value channel
-        v_norm = v / 255.0
-        v_contrast = np.clip(0.5 + (v_norm - 0.5) * effective_cont, 0.0, 1.0) * 255.0
-
-        color_vivid_rgb = cv2.cvtColor(
-            cv2.merge([h, s_new, v_contrast]).astype(np.uint8), cv2.COLOR_HSV2RGB
-        )
+        # Fast path: bypass HSV roundtrip when natural neutral style is selected
+        if style == "natural" and abs(effective_sat - 1.0) < 0.01 and abs(effective_cont - 1.0) < 0.01:
+            color_vivid_rgb = color_upscaled_rgb
+        else:
+            hsv = cv2.cvtColor(color_upscaled_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+            h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+            sat_mask = np.clip((s - 10.0) / 25.0, 0.0, 1.0)
+            s_boost = s * (1.0 + (effective_sat - 1.0) * sat_mask)
+            s_new = np.clip(s_boost, 0.0, 255.0)
+            v_norm = v / 255.0
+            v_contrast = np.clip(0.5 + (v_norm - 0.5) * effective_cont, 0.0, 1.0) * 255.0
+            color_vivid_rgb = cv2.cvtColor(
+                cv2.merge([h, s_new, v_contrast]).astype(np.uint8), cv2.COLOR_HSV2RGB
+            )
 
         # 6. Style-Specific Color Grading in RGB space
-        color_vivid_f = color_vivid_rgb.astype(np.float32)
-        r, g, b = cv2.split(color_vivid_f)
-
-        if style == "gemini_anime":
-            # Gemini Anime Vibrant: Toriyama color palette (peach skin, violet hair, sky blue, terracotta)
-            r = np.clip(r * 1.14, 0, 255)
-            g = np.clip(g * 1.05, 0, 255)
-            b = np.clip(b * 1.18, 0, 255)
-            color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
-
-        elif style == "shonen_vivid":
-            # Warm radiant anime skin tones and vibrant primaries
-            r = np.clip(r * 1.08, 0, 255)
-            b = np.clip(b * 0.94, 0, 255)
-            color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
-
-        elif style == "anime_pastel":
-            # Soft dreamy pastel tones, gentle warmth
-            r = np.clip(r * 1.02 + 8, 0, 255)
-            g = np.clip(g * 1.02 + 8, 0, 255)
-            b = np.clip(b * 1.04 + 12, 0, 255)
-            color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
-
-        elif style == "retro_90s":
-            # Warm golden/amber cel-shaded aesthetic
-            r = np.clip(r * 1.15, 0, 255)
-            g = np.clip(g * 1.04, 0, 255)
-            b = np.clip(b * 0.82, 0, 255)
-            color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
-
-        elif style == "dark_fantasy":
-            # Deep gothic shadows, cool desaturated midtones
-            r = np.clip(r * 0.88, 0, 255)
-            g = np.clip(g * 0.90, 0, 255)
-            b = np.clip(b * 1.12, 0, 255)
-            color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
-
-        elif style == "cyberpunk":
-            # High-voltage neon cyan & hot magenta
-            r = np.clip(r * 1.22, 0, 255)
-            b = np.clip(b * 1.28, 0, 255)
-            color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
+        if style in ("gemini_anime", "shonen_vivid", "anime_pastel", "retro_90s", "dark_fantasy", "cyberpunk"):
+            color_vivid_f = color_vivid_rgb.astype(np.float32)
+            r, g, b = cv2.split(color_vivid_f)
+            if style == "gemini_anime":
+                r = np.clip(r * 1.14, 0, 255)
+                g = np.clip(g * 1.05, 0, 255)
+                b = np.clip(b * 1.18, 0, 255)
+                color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
+            elif style == "shonen_vivid":
+                r = np.clip(r * 1.08, 0, 255)
+                b = np.clip(b * 0.94, 0, 255)
+                color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
+            elif style == "anime_pastel":
+                r = np.clip(r * 1.02 + 8, 0, 255)
+                g = np.clip(g * 1.02 + 8, 0, 255)
+                b = np.clip(b * 1.04 + 12, 0, 255)
+                color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
+            elif style == "retro_90s":
+                r = np.clip(r * 1.15, 0, 255)
+                g = np.clip(g * 1.04, 0, 255)
+                b = np.clip(b * 0.82, 0, 255)
+                color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
+            elif style == "dark_fantasy":
+                r = np.clip(r * 0.88, 0, 255)
+                g = np.clip(g * 0.90, 0, 255)
+                b = np.clip(b * 1.12, 0, 255)
+                color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
+            elif style == "cyberpunk":
+                r = np.clip(r * 1.22, 0, 255)
+                b = np.clip(b * 1.28, 0, 255)
+                color_vivid_rgb = cv2.merge([r, g, b]).astype(np.uint8)
 
         # 7. Post-processing color preparation
         gray_orig = cv2.cvtColor(orig_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
@@ -2461,9 +2528,6 @@ class MangaColorizerEngine:
         # while keeping vibrant midtones uncrushed.
         ink_threshold = max(0.18, 0.35 * line_preserve)
         line_multiplier = np.clip((gray_orig - 0.04) / ink_threshold, 0.0, 1.0)
-        # Saturated color undertone floor: prevents vibrant dark hair / costume from being crushed to pure zero
-        color_hsv = cv2.cvtColor(color_vivid_rgb, cv2.COLOR_RGB2HSV)
-        sat_boost = np.clip((color_hsv[:, :, 1].astype(np.float32) - 25.0) / 160.0, 0.0, 1.0)
         ink_floor = 0.12 * sat_boost
         effective_mult = np.maximum(line_multiplier, ink_floor)
         final_rgb = np.clip(
@@ -2496,14 +2560,23 @@ class MangaColorizerEngine:
         # Save to output file
         self._write_optimized_image(output_path, final_bgr, quality=88)
 
+        # Periodic Apple Silicon unified memory recycling
+        self._pages_processed += 1
+        interval = self.hw_profile.get("empty_cache_interval", 10)
+        if self.device == "mps" and (self._pages_processed % interval == 0):
+            torch.mps.empty_cache()
+
+        chip_name = self.hw_profile.get("chip_name", "Apple Silicon")
         ret = {
             "status": "success",
-            "engine": f"ResNeXt-50/101 Generator + Vibrant Chroma ({self.device.upper()})",
+            "engine": f"ResNeXt-50/101 Generator + Vibrant Chroma ({self.device.upper()} - {chip_name})",
             "style": profile["name"],
             "output_path": output_path,
+            "final_rgb": final_rgb,
         }
         if adapter_used:
             ret["adapter_used"] = True
+        return ret
         return ret
 
     # ── Apple Silicon Neural Engine ─────────────────────────────────

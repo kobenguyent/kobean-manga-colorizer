@@ -326,19 +326,19 @@ class DirectoryImportRequest(BaseModel):
 class PreviewRequest(BaseModel):
     session_id: str
     page_index: int = 0
-    model_provider: str = "google_nano"
-    model_name: str = "nano-banana"
+    model_provider: str = "resnext_generator"
+    model_name: str = "resnext-v2-manga"
     api_key: Optional[str] = ""
-    style: str = "gemini_anime"
-    saturation: float = 1.2
-    contrast: float = 1.1
+    style: str = "natural"
+    saturation: float = 1.0
+    contrast: float = 1.0
     line_preserve: float = 0.85
     skip_if_colored: bool = False
     force_recolorize: bool = False
-    denoise_screentone: bool = True
+    denoise_screentone: bool = False
     denoise_sigma: int = 25
     active_character_names: Optional[list[str]] = None
-    recognition_mode: Optional[str] = "auto"
+    recognition_mode: Optional[str] = "none"
 
 
 # ── Character Palette models ─────────────────────────────────────────
