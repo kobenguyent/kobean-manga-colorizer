@@ -11,3 +11,5 @@ __pycache__/
 *$py.class
 /networks/generator.zip
 /networks/archive
+
+/storage

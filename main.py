@@ -44,6 +44,7 @@ from colorizer_engine import (
     CharacterEntry,
     CharacterPalette,
     MangaColorizerEngine,
+    RecognizedCharacter,
     is_colored_page,
 )
 from file_processor import MangaFileProcessor
@@ -1519,6 +1520,19 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 ]
                 exemplar_path = exemplar_paths[0] if exemplar_paths else None
 
+                # Determine recognition mode
+                rec_mode = getattr(req, "recognition_mode", "auto") or "auto"
+                if rec_mode.lower() in ("none", "off", "disabled"):
+                    rec_mode = "none"
+
+                page_recs = page_info.get("recognized_characters", [])
+                active_palette = palette
+                skip_rec = False
+                if palette and page_recs:
+                    actual_recs = [RecognizedCharacter.from_dict(r) for r in page_recs if isinstance(r, dict)]
+                    active_palette = palette.optimize_for_page(actual_recs)
+                    skip_rec = True
+
                 # Run CPU-bound colorization in a thread without blocking main asyncio loop
                 res = await asyncio.to_thread(
                     colorizer_engine.colorize_page,
@@ -1532,11 +1546,11 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     contrast=req.contrast,
                     line_preserve=req.line_preserve,
                     skip_if_colored=req.skip_if_colored,
-                    character_palette=None,
+                    character_palette=active_palette,
                     denoise_screentone=getattr(req, "denoise_screentone", False),
                     denoise_sigma=getattr(req, "denoise_sigma", 25),
-                    recognition_mode="none",
-                    skip_recognition=True,
+                    recognition_mode=rec_mode,
+                    skip_recognition=skip_rec,
                     exemplar_image_path=exemplar_path,
                     exemplar_image_paths=exemplar_paths,
                     series_key=s_key,
@@ -1576,6 +1590,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     page_info["exemplars_used"] = res["exemplars_used"]
                 if res.get("adapter_used"):
                     page_info["adapter_used"] = True
+                if res.get("recognized_characters"):
+                    page_info["recognized_characters"] = res["recognized_characters"]
 
                 # Phase 4: Automated Quality & Confidence-Gated Auto-Harvesting
                 q_score = res.get("quality_score")
@@ -1632,6 +1648,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                         "adapter_used": bool(page_info.get("adapter_used")),
                         "quality_score": page_info.get("quality_score"),
                         "auto_harvested": bool(page_info.get("auto_harvested")),
+                        "recognized_characters": page_info.get("recognized_characters", []),
                         "processed_count": sess["processed_count"],
                         "total": sess["total_pages"],
                     },
@@ -1851,6 +1868,19 @@ async def preview_single_page(req: PreviewRequest):
                 c for c in palette.characters if c.name in req.active_character_names
             ]
 
+        # Determine recognition mode
+        rec_mode = getattr(req, "recognition_mode", "auto") or "auto"
+        if rec_mode.lower() in ("none", "off", "disabled"):
+            rec_mode = "none"
+
+        page_recs = page_info.get("recognized_characters", [])
+        active_palette = palette
+        skip_rec = False
+        if palette and page_recs and not getattr(req, "force_recolorize", False):
+            actual_recs = [RecognizedCharacter.from_dict(r) for r in page_recs if isinstance(r, dict)]
+            active_palette = palette.optimize_for_page(actual_recs)
+            skip_rec = True
+
         # Resolve exemplar for preview
         s_fn = sess.get("filename") or sess.get("folder_name") or ""
         s_pid = (palette.preset_id if palette else None) or sess.get("detected_preset")
@@ -1883,11 +1913,11 @@ async def preview_single_page(req: PreviewRequest):
             contrast=req.contrast,
             line_preserve=req.line_preserve,
             skip_if_colored=req.skip_if_colored,
-            character_palette=None,
+            character_palette=active_palette,
             denoise_screentone=getattr(req, "denoise_screentone", False),
             denoise_sigma=getattr(req, "denoise_sigma", 25),
-            recognition_mode="none",
-            skip_recognition=True,
+            recognition_mode=rec_mode,
+            skip_recognition=skip_rec,
             exemplar_image_path=exemplar_path,
             exemplar_image_paths=exemplar_paths,
             series_key=s_key,
@@ -1929,6 +1959,7 @@ async def preview_single_page(req: PreviewRequest):
                 "exemplars_used": page_info.get("exemplars_used", []),
                 "adapter_used": bool(page_info.get("adapter_used")),
                 "quality_score": page_info.get("quality_score"),
+                "recognized_characters": page_info.get("recognized_characters", []),
                 "processed_count": sess["processed_count"],
                 "total": sess.get("total_pages", len(pages)),
             },

@@ -1523,21 +1523,82 @@ class MangaCharacterRecognizer:
                 )
         return results
 
-    def _extract_candidate_boxes(self, img: np.ndarray, pil_img: Optional[Image.Image] = None) -> list[tuple[int, int, int, int]]:
+    def _extract_candidate_pairs(
+        self, img: np.ndarray, pil_img: Optional[Image.Image] = None
+    ) -> list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]]:
         """
-        Extracts candidate panel and figure bounding boxes (y0, x0, y1, x1) from grayscale image.
-        Prioritizes Manga109 YOLO neural face & body detections when available, falling back to
-        morphological closing and contour analysis.
+        Extracts candidate pairs of (crop_box, figure_box) in pixel coordinates (y0, x0, y1, x1):
+        - crop_box: Precise region for CLIP visual feature classification (e.g. face or upper figure).
+        - figure_box: Full anatomical figure boundary (union of face and enclosing body) used for
+                      character palette seed hint injection and color harmonization.
         """
+        h, w = img.shape[:2]
         if pil_img is not None:
             try:
                 yolo_boxes = self._detect_manga_yolo_regions(pil_img, img)
                 if yolo_boxes:
-                    return [(y0, x0, y1, x1) for (y0, x0, y1, x1, _, _) in yolo_boxes]
+                    faces = [b for b in yolo_boxes if b[4] == "face"]
+                    bodies = [b for b in yolo_boxes if b[4] == "body"]
+
+                    pairs: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = []
+                    matched_body_indices: set[int] = set()
+
+                    # For each detected face, find the best enclosing / overlapping body
+                    for fy0, fx0, fy1, fx1, _, fconf in faces:
+                        face_h = fy1 - fy0
+                        face_w = fx1 - fx0
+                        best_body_idx = -1
+                        best_body_iou = -1.0
+
+                        for b_idx, (by0, bx0, by1, bx1, _, bconf) in enumerate(bodies):
+                            # Body contains face or intersects top-half of body
+                            if by0 <= fy0 + int(0.25 * face_h) and by1 >= fy1 - int(0.15 * face_h):
+                                if bx0 <= fx0 + int(0.35 * face_w) and bx1 >= fx1 - int(0.35 * face_w):
+                                    # Calculate intersection
+                                    iy0 = max(fy0, by0)
+                                    ix0 = max(fx0, bx0)
+                                    iy1 = min(fy1, by1)
+                                    ix1 = min(fx1, bx1)
+                                    inter = max(0, iy1 - iy0) * max(0, ix1 - ix0)
+                                    if inter > best_body_iou:
+                                        best_body_iou = inter
+                                        best_body_idx = b_idx
+
+                        if best_body_idx >= 0:
+                            matched_body_indices.add(best_body_idx)
+                            by0, bx0, by1, bx1, _, _ = bodies[best_body_idx]
+                            fig_box = (
+                                min(fy0, by0),
+                                min(fx0, bx0),
+                                max(fy1, by1),
+                                max(fx1, bx1),
+                            )
+                        else:
+                            # Close-up panel without full body detection: extend figure box downwards for costume/shoulders
+                            ext_y1 = min(h, fy1 + int(0.40 * face_h))
+                            fig_box = (fy0, fx0, ext_y1, fx1)
+
+                        crop_box = (fy0, fx0, fy1, fx1)
+                        pairs.append((crop_box, fig_box))
+
+                    # For remaining bodies that had no face detection (e.g. back turned or distant view)
+                    for b_idx, (by0, bx0, by1, bx1, _, _) in enumerate(bodies):
+                        if b_idx not in matched_body_indices:
+                            body_box = (by0, bx0, by1, bx1)
+                            pairs.append((body_box, body_box))
+
+                    if pairs:
+                        return pairs
             except Exception as e:
                 print(f"[MangaCharacterRecognizer] YOLO candidate extraction fallback: {e}")
 
-        h, w = img.shape
+        # Morphological fallback
+        morph_boxes = self._extract_morphological_boxes(img)
+        return [(b, b) for b in morph_boxes]
+
+    def _extract_morphological_boxes(self, img: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """Fallback candidate extraction using morphological closing and ink contours."""
+        h, w = img.shape[:2]
         candidate_boxes: list[tuple[int, int, int, int]] = []
         scale = 1.0
         if max(h, w) > 1200:
@@ -1572,7 +1633,6 @@ class MangaCharacterRecognizer:
                     candidate_boxes.append((orig_y0, orig_x0 + int(0.38 * bw_orig), orig_y1, orig_x1))
                 # If panel / merged contour is tall, extract horizontal tiers (panel rows)
                 if bh_orig >= int(0.38 * h):
-                    # 4 distinct panel tiers (standard manga layout)
                     t1_y0, t1_y1 = orig_y0, orig_y0 + int(0.32 * bh_orig)
                     t2_y0, t2_y1 = orig_y0 + int(0.30 * bh_orig), orig_y0 + int(0.54 * bh_orig)
                     t3_y0, t3_y1 = orig_y0 + int(0.52 * bh_orig), orig_y0 + int(0.75 * bh_orig)
@@ -1592,6 +1652,15 @@ class MangaCharacterRecognizer:
             candidate_boxes.append((int(0.05 * h), int(0.05 * w), int(0.95 * h), int(0.95 * w)))
 
         return candidate_boxes
+
+    def _extract_candidate_boxes(self, img: np.ndarray, pil_img: Optional[Image.Image] = None) -> list[tuple[int, int, int, int]]:
+        """
+        Extracts candidate panel and figure bounding boxes (y0, x0, y1, x1) from grayscale image.
+        Prioritizes Manga109 YOLO neural face & body detections when available, falling back to
+        morphological closing and contour analysis.
+        """
+        pairs = self._extract_candidate_pairs(img, pil_img=pil_img)
+        return [p[0] for p in pairs]
 
     def _recognize_with_clip(
         self,
@@ -1614,9 +1683,9 @@ class MangaCharacterRecognizer:
         if cv_img is None:
             cv_img = np.array(pil_img.convert("L"))
 
-        candidate_boxes = self._extract_candidate_boxes(cv_img, pil_img=pil_img)
-        if not candidate_boxes:
-            candidate_boxes = [(int(0.05 * h_img), int(0.05 * w_img), int(0.95 * h_img), int(0.95 * w_img))]
+        candidate_pairs = self._extract_candidate_pairs(cv_img, pil_img=pil_img)
+        if not candidate_pairs:
+            candidate_pairs = [((int(0.05 * h_img), int(0.05 * w_img), int(0.95 * h_img), int(0.95 * w_img)), (int(0.05 * h_img), int(0.05 * w_img), int(0.95 * h_img), int(0.95 * w_img)))]
 
         series = getattr(palette, "preset_title", None) or getattr(palette, "title", None) or "manga"
         preset_notes_map: dict[str, str] = {}
@@ -1631,15 +1700,14 @@ class MangaCharacterRecognizer:
         except Exception:
             pass
 
-        prompts = [
-            f"manga drawing of {c.name} from {series}"
-            + (
-                f", {c.notes}"
-                if c.notes
-                else (f", {preset_notes_map.get(c.name.lower(), '')}" if preset_notes_map.get(c.name.lower()) else "")
-            )
-            for c in palette.characters
-        ]
+        prompts = []
+        for c in palette.characters:
+            notes_str = c.notes or preset_notes_map.get(c.name.lower(), "")
+            traits_str = ", ".join(c.visual_traits) if getattr(c, "visual_traits", None) else ""
+            detail_parts = [p for p in [notes_str, traits_str] if p]
+            details = f", {', '.join(detail_parts)}" if detail_parts else ""
+            prompts.append(f"manga drawing of {c.name} from {series}{details}")
+
         neutral_prompts = [
             "manga speech bubble, dialogue text, Japanese sound effect on white background",
             "manga background scenery, room, wall, trees, speed lines without characters",
@@ -1648,18 +1716,19 @@ class MangaCharacterRecognizer:
         all_prompts = prompts + neutral_prompts
         num_chars = len(palette.characters)
 
-        # Collect candidate crops
-        valid_boxes: list[tuple[int, int, int, int]] = []
+        # Collect candidate crops and figure targets
+        valid_pairs: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = []
         crops: list[Image.Image] = []
-        for y0, x0, y1, x1 in candidate_boxes:
+        for crop_box, fig_box in candidate_pairs:
+            y0, x0, y1, x1 = crop_box
             bh = y1 - y0
             bw = x1 - x0
             if bh >= 30 and bw >= 30:
-                valid_boxes.append((y0, x0, y1, x1))
+                valid_pairs.append((crop_box, fig_box))
                 crops.append(pil_img.crop((x0, y0, x1, y1)))
 
         if not crops:
-            valid_boxes = [(0, 0, h_img, w_img)]
+            valid_pairs = [((0, 0, h_img, w_img), (0, 0, h_img, w_img))]
             crops = [pil_img]
 
         inputs = processor(
@@ -1674,37 +1743,90 @@ class MangaCharacterRecognizer:
             probs_matrix = outputs.logits_per_image.softmax(dim=1).cpu().numpy()
 
         recognized_candidates: list[RecognizedCharacter] = []
-        for (y0, x0, y1, x1), probs in zip(valid_boxes, probs_matrix):
-            top_idx = int(np.argmax(probs))
-            top_prob = float(probs[top_idx])
+        for ((cy0, cx0, cy1, cx1), (fy0, fx0, fy1, fx1)), raw_probs in zip(valid_pairs, probs_matrix):
+            # Compute hair patch luminance in top 30% of candidate crop
+            crop_patch = cv_img[cy0:cy1, cx0:cx1]
+            crop_h = crop_patch.shape[0] if crop_patch is not None and crop_patch.size > 0 else 0
+            dark_hair_ratio = 0.0
+            light_hair_ratio = 0.0
+            hair_lum = 0.5
+            if crop_h >= 10:
+                hair_patch = crop_patch[: max(4, int(0.30 * crop_h)), :].astype(np.float32) / 255.0
+                hair_lum = float(np.mean(hair_patch))
+                dark_hair_ratio = float(np.mean(hair_patch < 0.35))
+                light_hair_ratio = float(np.mean(hair_patch > 0.82))
+
+            adjusted_probs = np.copy(raw_probs)
+            for c_idx, c in enumerate(palette.characters):
+                traits = getattr(c, "visual_traits", []) or []
+                c_hair_hex = getattr(c, "hair_hex", "")
+                is_black_hair = "black_hair" in traits
+                is_light_hair = "light_hair" in traits
+                if not is_black_hair and not is_light_hair and c_hair_hex:
+                    hx = c_hair_hex.strip().lstrip("#")
+                    if len(hx) >= 6:
+                        try:
+                            cr, cg, cb = int(hx[:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+                            br = (cr + cg + cb) / 3.0
+                            if br < 55:
+                                is_black_hair = True
+                            elif br > 175:
+                                is_light_hair = True
+                        except Exception:
+                            pass
+
+                if is_black_hair:
+                    if dark_hair_ratio >= 0.35 or hair_lum < 0.40:
+                        adjusted_probs[c_idx] *= 1.35
+                    elif light_hair_ratio >= 0.70 and hair_lum > 0.75:
+                        adjusted_probs[c_idx] *= 0.50
+                elif is_light_hair:
+                    if light_hair_ratio >= 0.65 or hair_lum > 0.75:
+                        adjusted_probs[c_idx] *= 1.35
+                    elif dark_hair_ratio >= 0.45 or hair_lum < 0.35:
+                        adjusted_probs[c_idx] *= 0.50
+
+            # Re-normalize adjusted probabilities
+            adj_sum = float(np.sum(adjusted_probs))
+            if adj_sum > 0:
+                adjusted_probs /= adj_sum
+
+            top_idx = int(np.argmax(adjusted_probs))
+            top_prob = float(adjusted_probs[top_idx])
 
             # If the candidate crop was classified as neutral background/bubble, skip
             if top_idx >= num_chars:
                 continue
 
-            char_probs = probs[:num_chars]
+            char_probs = adjusted_probs[:num_chars]
             char_sum = float(np.sum(char_probs))
             rel_conf = (top_prob / char_sum) if char_sum > 0 else top_prob
 
             if top_prob >= min_confidence or (rel_conf >= 0.50 and top_prob >= 0.18):
                 matched_char = palette.characters[top_idx]
                 norm_box = (
-                    round(y0 / float(h_img), 4),
-                    round(x0 / float(w_img), 4),
-                    round(y1 / float(h_img), 4),
-                    round(x1 / float(w_img), 4),
+                    round(fy0 / float(h_img), 4),
+                    round(fx0 / float(w_img), 4),
+                    round(fy1 / float(h_img), 4),
+                    round(fx1 / float(w_img), 4),
                 )
                 effective_conf = min(0.99, round(max(top_prob, rel_conf * 0.85), 2))
+                feats = [
+                    f"clip_score:{top_prob:.2f}",
+                    f"rel_score:{rel_conf:.2f}",
+                ]
+                if dark_hair_ratio >= 0.35:
+                    feats.append("dark_hair_prior")
+                elif light_hair_ratio >= 0.65:
+                    feats.append("light_hair_prior")
+
                 recognized_candidates.append(
                     RecognizedCharacter(
                         name=matched_char.name,
                         confidence=effective_conf,
                         bounding_box=norm_box,
                         detection_method="offline_clip_ai",
-                        matched_features=[
-                            f"clip_score:{top_prob:.2f}",
-                            f"rel_score:{rel_conf:.2f}",
-                        ],
+                        matched_features=feats,
                     )
                 )
 
@@ -2293,8 +2415,8 @@ class MangaColorizerEngine:
         character_palette: Optional["CharacterPalette"] = None,
         denoise_screentone: bool = False,
         denoise_sigma: int = 25,
-        recognition_mode: str = "none",
-        skip_recognition: bool = True,
+        recognition_mode: str = "auto",
+        skip_recognition: bool = False,
         exemplar_image_path: Optional[str] = None,
         exemplar_image_paths: Optional[list[str]] = None,
         series_key: Optional[str] = None,
@@ -2317,7 +2439,7 @@ class MangaColorizerEngine:
             recognition_mode:   Character recognition mode ("auto", "offline_ai", "heuristics", "gemini").
             skip_recognition:   When True, skip in-process character recognition entirely.
                                 Use when the caller has already pre-filtered the palette
-                                via active_character_names, avoiding a redundant CLIP scan.
+                                via active_character_names or previous scan, avoiding a redundant CLIP scan.
             exemplar_image_path: Optional path to an approved colorized page from the series
                                 to provide few-shot visual consistency.
             exemplar_image_paths: Optional list of approved exemplar paths for multi-reference learning.
@@ -2340,7 +2462,7 @@ class MangaColorizerEngine:
             active_ex_path = exemplar_image_paths[0]
 
         # ── Page-specific Character Recognition & Palette Optimization ──
-        active_palette = None
+        active_palette = character_palette
         recognized_chars: list[dict] = []
         rec_mode = (recognition_mode or "none").lower()
         if rec_mode not in ("none", "off", "disabled") and not skip_recognition and character_palette is not None and character_palette.characters:
@@ -2377,7 +2499,7 @@ class MangaColorizerEngine:
                         active_palette = None
                 except Exception as e:
                     print(f"[MangaColorizer WARNING] Character recognition error: {e}")
-                    active_palette = None
+                    active_palette = character_palette
             if active_palette and active_palette.characters:
                 print(
                     f"[MangaColorizer] Active palette: "
@@ -2552,10 +2674,17 @@ class MangaColorizerEngine:
         if self.use_fp16 and self.device in ("mps", "cuda"):
             tens_in = tens_in.half()
 
-        # 3. Clean hint tensor for noise-free neural inference (matching Hugging Face Spaces)
+        # 3. Neural hint tensor for character palette seeding
         _, _, pad_h, pad_w = tens_in.shape
         hint_dtype = torch.float16 if (self.use_fp16 and self.device in ("mps", "cuda")) else torch.float32
-        hint = torch.zeros(1, 4, pad_h, pad_w, dtype=hint_dtype, device=self.device)
+        if character_palette is not None and character_palette.characters:
+            sketch_gray = img_pad[:, :, 0]
+            hint = character_palette.build_hint_tensor(pad_h, pad_w, device=self.device, sketch_gray=sketch_gray)
+            if hint.dtype != hint_dtype:
+                hint = hint.to(dtype=hint_dtype)
+            print(f"[MangaColorizer] Injected CharacterPalette neural hints for: {[c.name for c in character_palette.characters]}")
+        else:
+            hint = torch.zeros(1, 4, pad_h, pad_w, dtype=hint_dtype, device=self.device)
 
         # 4. Authentic Neural Inference (Automatic Manga Colorization)
         adapter_used = False
@@ -2660,6 +2789,14 @@ class MangaColorizerEngine:
         final_rgb = np.clip(
             color_vivid_rgb.astype(np.float32) * effective_mult[:, :, np.newaxis], 0, 255
         ).astype(np.uint8)
+
+        # 8b. Character Palette Harmonization
+        if character_palette is not None and character_palette.characters:
+            final_rgb = apply_character_palette_harmonization(
+                img_rgb=final_rgb,
+                palette=character_palette,
+                orig_gray=gray_orig,
+            )
 
         # 9. Clean White Margin & Speech Bubble Protection
         # Protect outer page margins and genuine dialogue speech bubbles from color bleeding

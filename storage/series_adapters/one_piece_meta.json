@@ -2,7 +2,7 @@
   "series_key": "one_piece",
   "steps": 40,
   "final_loss": 0.0,
-  "samples_count": 1,
-  "timestamp": 1790006273.6223528,
+  "samples_count": 2,
+  "timestamp": 1790153016.145812,
   "device": "mps"
 }

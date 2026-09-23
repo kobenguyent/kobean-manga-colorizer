@@ -2898,7 +2898,8 @@ async function startColorization() {
     line_preserve: linePreserve,
     selected_pages: pagesToColorize,
     skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
-    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
+    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
+    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
   };
 
   // UI state updates
@@ -3051,7 +3052,13 @@ function subscribeToProgressStream(sessionId = null, autoResume = false) {
         if (data.auto_harvested) {
           pageInfo.auto_harvested = true;
         }
+        if (data.recognized_characters && data.recognized_characters.length > 0) {
+          pageInfo.recognized_characters = data.recognized_characters;
+        }
         if (currentPreviewPageIndex === idx) {
+          if (pageInfo.recognized_characters && pageInfo.recognized_characters.length > 0 && typeof renderPageCharacterChips === "function") {
+            renderPageCharacterChips(pageInfo.recognized_characters);
+          }
           if (typeof updateExemplarPreviewChip === "function") {
             updateExemplarPreviewChip(pageInfo);
           }
@@ -4301,7 +4308,8 @@ async function startBatchColorization() {
         contrast: 1.1,
         line_preserve: linePreserve,
         skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
-        denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true
+        denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
+        recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
       })
     });
 
