@@ -19,10 +19,10 @@
 
 ## 🔥 Recent Highlights
 
-- Added **real web studio screenshots** in the Visual Showcase to reflect the live product interface.
-- Added a **real end-to-end run** (upload → imported page → colorizing progress → final comparator result) using `demo/original.png`.
-- Added the **generated output artifact** from that run: `demo/process-output-colorized.png`.
-- Clarified workflow behavior: the **Start Colorize** action is enabled after selecting at least one page in the gallery.
+- Refreshed demo color outputs by rerunning the app on `demo/original.png` and updating `demo/colorized.png` + `demo/process-output-colorized.png`.
+- Added **page-level and selected-page recolorize controls** to rerun colorization without re-uploading files.
+- Added **already-colored page preservation** (`skip_if_colored`) so pre-colored artwork can be retained during batch runs.
+- Clarified workflow behavior: the **Start Colorize** action is enabled only after selecting at least one page in the gallery.
 
 ---
 
@@ -43,6 +43,8 @@
 - **Universal Input Ingestion**: Drag & drop multiple **PDFs**, **EPUBs**, **ZIP archives**, or loose **PNG/JPG** images simultaneously.
 - **Real-Time SSE Progress**: Live Server-Sent Events stream progress page by page directly into an interactive gallery view.
 - **In-Browser Split-Screen Comparator**: Live draggable before/after comparison slider to inspect fine linework and color balance in real time.
+- **Selective Recolorization**: Recolorize one page or only selected pages directly from the gallery controls.
+- **Smart Colored-Page Detection**: Optionally detect already-colored pages and preserve them as original artwork in output.
 - **Page & Session Management**: Delete unwanted filler/credit pages directly from the preview gallery before export.
 
 ### 💾 ~90% Ultra-Compact Storage
