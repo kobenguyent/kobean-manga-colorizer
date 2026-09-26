@@ -1072,10 +1072,11 @@ def test_offline_clip_character_recognition():
     )
 
     assert len(recs) >= 1
-    # The exact top-1 label can vary slightly across model/runtime versions.
-    # For this fixture we expect one of the known lead candidates.
+    # demo/original.png centers the One Piece cast around Chopper/Luffy; CLIP top-1 can flip
+    # between these two across runtime/model builds.
+    allowed_top_labels = {"Tony Tony Chopper", "Monkey D. Luffy"}
     top_char = recs[0]
-    assert top_char.name in {"Tony Tony Chopper", "Monkey D. Luffy"}
+    assert top_char.name in allowed_top_labels
     assert any(rc.name == "Tony Tony Chopper" for rc in recs)
     if len(recs) > 1:
         assert top_char.confidence >= recs[1].confidence
