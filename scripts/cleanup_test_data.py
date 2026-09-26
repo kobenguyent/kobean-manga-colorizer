@@ -66,6 +66,9 @@ TEST_KEYWORDS = [
     "resnext",
     "multicolor",
     "skip_colored",
+    "bulk_manga_page",
+    "bulk_manga",
+    "bulk",
 ]
 
 TMP_TEST_PATTERNS = [
@@ -94,6 +97,8 @@ TMP_TEST_PATTERNS = [
     "/tmp/huge_*",
     "/tmp/omnibus_*",
     "/tmp/test_*",
+    "/tmp/*bulk_manga_page*",
+    "/tmp/bulk_*",
     "/tmp/*test*.png",
     "/tmp/*test*.jpg",
     "/tmp/*test*.jpeg",

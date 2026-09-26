@@ -1,13 +1,14 @@
 import io
 import json
 import re
+import shutil
 import uuid
 import pytest
 from pathlib import Path
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from main import app, SESSIONS
+from main import app, SESSIONS, STORAGE_DIR, UPLOAD_DIR
 
 client = TestClient(app)
 
@@ -28,24 +29,36 @@ def test_bulk_chunked_upload_backend():
         files.append(("files", (f"bulk_manga_page_{i+1}.png", png_bytes, "image/png")))
 
     batch_id = str(uuid.uuid4())
-    response = client.post("/api/upload", data={"batch_id": batch_id}, files=files)
-    assert response.status_code == 200, response.text
-    data = response.json()
+    created_sessions = []
+    try:
+        response = client.post("/api/upload", data={"batch_id": batch_id}, files=files)
+        assert response.status_code == 200, response.text
+        data = response.json()
 
-    assert data["status"] == "success"
-    assert data["batch_id"] == batch_id
-    assert data["total_files"] == 8
-    assert len(data["sessions"]) == 8
-    assert "session_id" in data
-    assert data["session_id"] == data["sessions"][0]["session_id"]
+        assert data["status"] == "success"
+        assert data["batch_id"] == batch_id
+        assert data["total_files"] == 8
+        assert len(data["sessions"]) == 8
+        assert "session_id" in data
+        assert data["session_id"] == data["sessions"][0]["session_id"]
 
-    # Verify session detail endpoint works for first uploaded session
-    first_id = data["session_id"]
-    sess_res = client.get(f"/api/session/{first_id}")
-    assert sess_res.status_code == 200
-    sess_data = sess_res.json()
-    assert sess_data["session_id"] == first_id
-    assert sess_data["filename"] == "bulk_manga_page_1.png"
+        created_sessions = [s["session_id"] for s in data.get("sessions", [])]
+
+        # Verify session detail endpoint works for first uploaded session
+        first_id = data["session_id"]
+        sess_res = client.get(f"/api/session/{first_id}")
+        assert sess_res.status_code == 200
+        sess_data = sess_res.json()
+        assert sess_data["session_id"] == first_id
+        assert sess_data["filename"] == "bulk_manga_page_1.png"
+    finally:
+        for sid in created_sessions:
+            SESSIONS.pop(sid, None)
+            s_dir = STORAGE_DIR / sid
+            if s_dir.exists():
+                shutil.rmtree(str(s_dir), ignore_errors=True)
+            for f in UPLOAD_DIR.glob(f"{sid}_*"):
+                f.unlink(missing_ok=True)
 
 
 def test_static_app_js_bulk_upload_contract():

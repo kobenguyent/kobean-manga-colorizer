@@ -469,6 +469,8 @@ def _resolve_base_palette(session_id: str) -> CharacterPalette:
                         costume_hex=c.costume_hex,
                         extra_hex=c.extra_hex,
                         eye_hex=getattr(c, "eye_hex", ""),
+                        visual_traits=getattr(c, "visual_traits", []) or [],
+                        notes=getattr(c, "notes", ""),
                     )
                     for c in detected.characters
                 ],
@@ -506,6 +508,8 @@ def _resolve_base_palette(session_id: str) -> CharacterPalette:
                                     costume_hex=c.costume_hex,
                                     extra_hex=c.extra_hex,
                                     eye_hex=getattr(c, "eye_hex", ""),
+                                    visual_traits=getattr(c, "visual_traits", []) or [],
+                                    notes=getattr(c, "notes", ""),
                                 )
                                 for c in detected.characters
                             ],
@@ -550,6 +554,8 @@ def _resolve_base_palette(session_id: str) -> CharacterPalette:
                         costume_hex=c.costume_hex,
                         extra_hex=c.extra_hex,
                         eye_hex=getattr(c, "eye_hex", ""),
+                        visual_traits=getattr(c, "visual_traits", []) or [],
+                        notes=getattr(c, "notes", ""),
                     )
                     for c in detected.characters
                 ],
@@ -682,6 +688,8 @@ async def upload_files(
                         costume_hex=c.costume_hex,
                         extra_hex=c.extra_hex,
                         eye_hex=getattr(c, "eye_hex", ""),
+                        visual_traits=getattr(c, "visual_traits", []) or [],
+                        notes=getattr(c, "notes", ""),
                     )
                     for c in detected.characters
                 ],
@@ -879,6 +887,8 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
                                 costume_hex=c.costume_hex,
                                 extra_hex=c.extra_hex,
                                 eye_hex=getattr(c, "eye_hex", ""),
+                                visual_traits=getattr(c, "visual_traits", []) or [],
+                                notes=getattr(c, "notes", ""),
                             )
                             for c in detected.characters
                         ],
@@ -3326,7 +3336,9 @@ async def list_sessions(batch_id: Optional[str] = None):
     for sess in SESSIONS.values():
         if batch_id and sess.get("batch_id") != batch_id:
             continue
-        sid = sess["session_id"]
+        sid = sess.get("session_id") or sess.get("id", "")
+        if not sid:
+            continue
         pages = sess.get("pages", [])
         if pages:
             actual_count = sum(1 for p in pages if p.get("status") == "colorized")
@@ -3743,6 +3755,9 @@ async def cleanup_test_data_endpoint(req: Optional[TestCleanupRequest] = None):
         "resnext",
         "multicolor",
         "skip_colored",
+        "bulk_manga_page",
+        "bulk_manga",
+        "bulk",
     ]
 
     # 1. Determine target session IDs

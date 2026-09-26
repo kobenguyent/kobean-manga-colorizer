@@ -155,7 +155,7 @@ class CharacterEntry:
             traits.append("antlers")
         if "whiskers" in n_lower or "bell" in n_lower or "doraemon" in n_lower:
             traits.append("round_head")
-        if "chibi" in n_lower or "small" in n_lower or "kid" in n_lower or "child" in n_lower:
+        if "chibi" in n_lower or "small" in n_lower or "kid" in n_lower or "child" in n_lower or "little" in n_lower:
             traits.append("chibi")
         else:
             traits.append("standard_body")
@@ -394,6 +394,7 @@ class CharacterPalette:
         w: int,
         device: str,
         sketch_gray: Optional[np.ndarray] = None,
+        pad: tuple[int, int] = (0, 0),
     ) -> torch.Tensor:
         """
         Builds a (1, 4, H, W) hint tensor for the neural model.
@@ -437,9 +438,12 @@ class CharacterPalette:
         y_coords, x_coords = np.ogrid[:h, :w]
         seeds_placed = 0
 
+        valid_h = max(10, h - pad[0])
+        valid_w = max(10, w - pad[1])
+
         # Content boundary (ignore outer 3% margin edge to prevent border bleeding)
         content_margin = np.zeros((h, w), dtype=bool)
-        content_margin[int(0.03 * h) : int(0.97 * h), int(0.03 * w) : int(0.97 * w)] = True
+        content_margin[int(0.03 * valid_h) : int(0.97 * valid_h), int(0.03 * valid_w) : int(0.97 * valid_w)] = True
 
         def _place_seeds_for_color(
             rgb: list[float],
@@ -469,7 +473,7 @@ class CharacterPalette:
                     if 10 < cx < w - 10 and 10 < cy < h - 10:
                         radius = min(max_radius, max(min_radius, int(np.sqrt(area) / seed_radius_scale)))
                         dist_sq = (y_coords - cy) ** 2 + (x_coords - cx) ** 2
-                        m = dist_sq <= (radius ** 2)
+                        m = (dist_sq <= (radius ** 2)) & mask_condition
                         hint[0, 0, m] = (rgb[0] - 0.5) / 0.5
                         hint[0, 1, m] = (rgb[1] - 0.5) / 0.5
                         hint[0, 2, m] = (rgb[2] - 0.5) / 0.5
@@ -478,121 +482,269 @@ class CharacterPalette:
                         seeds_placed += 1
             return placed
 
-        # Locate topological face candidates in sketch for accurate anatomical seeding
-        face_seeds = []
-        if sketch_gray is not None:
-            sk_bright = (sketch_gray >= 0.65) & (sketch_gray <= 0.96)
-            sk_bright[0:int(0.03*h), :] = False
-            sk_bright[int(0.97*h):, :] = False
-            sk_bright[:, 0:int(0.03*w)] = False
-            sk_bright[:, int(0.97*w):] = False
-            num_sk, _, stats_sk, centroids_sk = cv2.connectedComponentsWithStats(sk_bright.astype(np.uint8))
-            min_face_area = max(250, int(0.001 * h * w))
-            for idx in range(1, num_sk):
-                area = stats_sk[idx, cv2.CC_STAT_AREA]
-                if min_face_area <= area <= int(0.18 * h * w):
-                    bx, by = stats_sk[idx, cv2.CC_STAT_LEFT], stats_sk[idx, cv2.CC_STAT_TOP]
-                    bw, bh = stats_sk[idx, cv2.CC_STAT_WIDTH], stats_sk[idx, cv2.CC_STAT_HEIGHT]
-                    aspect = bh / max(1, bw)
-                    if 0.55 <= aspect <= 2.2:
-                        cx, cy = int(centroids_sk[idx][0]), int(centroids_sk[idx][1])
-                        y_above_0 = max(0, int(by - 0.70 * bh))
-                        if by > y_above_0:
-                            above_patch = sketch_gray[y_above_0:by, bx:bx+bw]
-                            if np.mean(above_patch) < 0.75 or np.min(above_patch) < 0.35:
-                                face_seeds.append((cx, cy, bx, by, bw, bh, area))
-            face_seeds.sort(key=lambda item: -item[6])
-
-        for ch_idx, ch in enumerate(self.characters[:4]):
+        for ch_idx, ch in enumerate(self.characters):
             costume_rgb = hex_to_rgb01(ch.costume_hex)
             skin_rgb = hex_to_rgb01(ch.skin_hex)
             hair_rgb = hex_to_rgb01(ch.hair_hex)
             eye_rgb = hex_to_rgb01(getattr(ch, "eye_hex", None))
 
             # Spatial region mask if bounding box is defined
-            region_mask = None
             if ch.bounding_box is not None:
                 by0, bx0, by1, bx1 = ch.bounding_box
-                y0_px = max(0, min(h - 1, int(by0 * h)))
-                x0_px = max(0, min(w - 1, int(bx0 * w)))
-                y1_px = max(y0_px + 10, min(h, int(by1 * h)))
-                x1_px = max(x0_px + 10, min(w, int(bx1 * w)))
+                y0_px = max(0, min(valid_h - 1, int(by0 * valid_h)))
+                x0_px = max(0, min(valid_w - 1, int(bx0 * valid_w)))
+                y1_px = max(y0_px + 10, min(valid_h, int(by1 * valid_h)))
+                x1_px = max(x0_px + 10, min(valid_w, int(bx1 * valid_w)))
+                bh = y1_px - y0_px
+                bw = x1_px - x0_px
+                # Apply inward safety margin to strictly prevent seeds from touching
+                # outer panel borders, dialogue bubbles, or exterior text columns
+                inset_x = max(2, int(0.04 * bw))
+                inset_y = max(2, int(0.03 * bh))
                 region_mask = np.zeros((h, w), dtype=bool)
-                region_mask[y0_px:y1_px, x0_px:x1_px] = True
+                region_mask[y0_px + inset_y : y1_px - inset_y, x0_px + inset_x : x1_px - inset_x] = True
+
+                traits = getattr(ch, "visual_traits", []) or []
+                is_buzz_cut = (
+                    any(t in traits for t in ("buzz_cut", "crew_cut"))
+                    or any(n in ch.name.lower() for n in ("sakuragi", "takenori"))
+                )
+                is_head_crop = (bh / float(valid_h) < 0.22) and (not is_buzz_cut) and (bh / max(bw, 1) < 1.35)
+                hair_zone = np.zeros((h, w), dtype=bool)
+                combined_hair_mask = np.zeros((h, w), dtype=bool)
+
+                # ── Sweat drop / action bubble exclusion mask ────────────────────────
+                # Detect small circular bright blobs (sweat drops, water drops, effect bubbles)
+                # that appear as bright interior + surrounding dark ring.  These should NOT
+                # be seeded with costume or hair color since they are graphical effects.
+                _bright_px = (sketch_gray > 0.90).astype(np.uint8)
+                _sweat_nc, _sweat_lbl, _sweat_stats, _sweat_cents = cv2.connectedComponentsWithStats(_bright_px)
+                _sweat_interior = np.zeros((h, w), dtype=bool)
+                for _si in range(1, _sweat_nc):
+                    _sa = _sweat_stats[_si, cv2.CC_STAT_AREA]
+                    _sw = _sweat_stats[_si, cv2.CC_STAT_WIDTH]
+                    _sh = _sweat_stats[_si, cv2.CC_STAT_HEIGHT]
+                    if not (8 <= _sa <= 400 and _sw <= 35 and _sh <= 35):
+                        continue
+                    _asp = max(_sw, _sh) / max(min(_sw, _sh), 1)
+                    if _asp > 2.5:
+                        continue
+                    _cy_s = int(_sweat_cents[_si][1])
+                    _cx_s = int(_sweat_cents[_si][0])
+                    _r_s = max(3, int(np.sqrt(_sa / np.pi)) + 2)
+                    _ry0 = max(0, _cy_s - _r_s - 5)
+                    _ry1 = min(h, _cy_s + _r_s + 5)
+                    _rx0 = max(0, _cx_s - _r_s - 5)
+                    _rx1 = min(w, _cx_s + _r_s + 5)
+                    _patch_g = sketch_gray[_ry0:_ry1, _rx0:_rx1]
+                    _blob_px = _sweat_lbl[_ry0:_ry1, _rx0:_rx1] == _si
+                    _outer_v = _patch_g[~_blob_px]
+                    if len(_outer_v) == 0:
+                        continue
+                    _inner_mean = _patch_g[_blob_px].mean() if _blob_px.any() else 1.0
+                    _outer_mean = _outer_v.mean()
+                    # Must have bright interior vs dark surrounding ring
+                    if (_inner_mean - _outer_mean) >= 0.20 and _outer_mean < 0.76:
+                        _sweat_interior |= (_sweat_lbl == _si)
+                # Expand the interior mask outward to include the dark ring outline
+                _sweat_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                sweat_excl = cv2.dilate(_sweat_interior.astype(np.uint8), _sweat_kernel, iterations=2) > 0
+
+                # 1. Hair zone:
+                # Dense, uniform zone guidance within anatomical hair region.
+                # Screentone / colored hair resides in grayscale [0.10, 0.88].
+                # Deep black line art (< 0.10) like text strokes, borders, and outlines are excluded.
+                if hair_rgb is not None:
+                    hair_rgb_arr = np.array(hair_rgb, dtype=np.float32)
+                    hair_lum = 0.299 * hair_rgb_arr[0] + 0.587 * hair_rgb_arr[1] + 0.114 * hair_rgb_arr[2]
+
+                    has_flowing = (
+                        any(t in traits for t in ("long_hair", "ponytail", "twintails", "pigtails"))
+                        or is_head_crop
+                        or "Arale" in ch.name
+                    )
+
+                    # Anatomical hair zone:
+                    if is_buzz_cut:
+                        _is_screentone = "screentone_hair" in traits
+                        if _is_screentone:
+                            # Screentone buzz cut (e.g. Sakuragi):
+                            # Segment scalp from screentone in upper head region (top 38% of bbox).
+                            # This organically captures front, side, and back views without hard-box clipping.
+                            _head_h = int(0.38 * bh)
+                            _head_g = sketch_gray[y0_px : y0_px + _head_h, x0_px:x1_px]
+                            _head_sweat = sweat_excl[y0_px : y0_px + _head_h, x0_px:x1_px]
+                            _st_cand = (_head_g >= 0.20) & (_head_g <= 0.72) & (~_head_sweat)
+                            _nc, _lbls, _stats, _cents = cv2.connectedComponentsWithStats(_st_cand.astype(np.uint8))
+                            if _nc > 1:
+                                _largest_idx = 1 + np.argmax(_stats[1:, cv2.CC_STAT_AREA])
+                                _comp_area = _stats[_largest_idx, cv2.CC_STAT_AREA]
+                                _comp_w = _stats[_largest_idx, cv2.CC_STAT_WIDTH]
+                                _comp_h = _stats[_largest_idx, cv2.CC_STAT_HEIGHT]
+                                _comp_fill = _comp_area / float(max(1, _comp_w * _comp_h))
+                                _box_fill = _comp_area / float(max(1, _head_h * bw))
+                                _min_area = max(400, int(0.18 * _head_h * bw))
+                                if _comp_area >= _min_area and _comp_fill >= 0.28 and _box_fill >= 0.22:
+                                    _scalp_m = (_lbls == _largest_idx)
+                                    _kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                                    _scalp_m = cv2.morphologyEx(_scalp_m.astype(np.uint8), cv2.MORPH_OPEN, _kernel) > 0
+                                    _cent_x = _cents[_largest_idx][0]
+                                    _cent_y = _cents[_largest_idx][1]
+                                    _scalp_m[:, : max(0, int(_cent_x - 0.26 * bw))] = False
+                                    _scalp_m[:, min(bw, int(_cent_x + 0.26 * bw)) :] = False
+                                    y_grid_s, x_grid_s = np.ogrid[:_head_h, :bw]
+                                    _skull_ell = (((y_grid_s - _cent_y) / max(1, 0.22 * bh)) ** 2 + ((x_grid_s - _cent_x) / max(1, 0.26 * bw)) ** 2) <= 1.05
+                                    _scalp_m &= _skull_ell
+                                    hair_zone[y0_px : y0_px + _head_h, x0_px:x1_px] = _scalp_m
+                        if not np.any(hair_zone) and not _is_screentone:
+                            # Fallback geometric zone for dark/non-screentone buzzcuts (Akagi) or distant figures
+                            hair_x0 = x0_px + int(0.16 * bw)
+                            hair_x1 = x1_px - int(0.06 * bw)
+                            hair_zone[y0_px : y0_px + int(0.24 * bh), hair_x0:hair_x1] = True
+                            hair_zone[y0_px + int(0.12 * bh) : y0_px + int(0.48 * bh), hair_x0 : x0_px + int(0.24 * bw)] = True
+                            hair_zone[y0_px + int(0.12 * bh) : y0_px + int(0.48 * bh), x1_px - int(0.24 * bw) : hair_x1] = True
+                    elif has_flowing or is_head_crop:
+                        # Flowing hair / head crop: crown and bangs down to 0.60*bh, sidelocks/ponytail down to 0.88*bh
+                        hair_zone[y0_px : y0_px + int(0.60 * bh), x0_px:x1_px] = True
+                        hair_zone[y0_px + int(0.15 * bh) : y0_px + int(0.88 * bh), x0_px + inset_x : x0_px + int(0.35 * bw)] = True
+                        hair_zone[y0_px + int(0.15 * bh) : y0_px + int(0.88 * bh), x1_px - int(0.35 * bw) : x1_px - inset_x] = True
+                    else:
+                        # Standard figures (short hair): crown down to 0.38*bh (0.46*bh for dark/messy hair), temples/sideburns down to 0.54*bh
+                        has_dark_hint = ("black_hair" in traits) or ("dark_hair" in traits) or (hair_lum < 0.22)
+                        mc_hint = 0.46 if has_dark_hint else 0.38
+                        hair_zone[y0_px : y0_px + int(mc_hint * bh), x0_px:x1_px] = True
+                        hair_zone[y0_px + int(0.15 * bh) : y0_px + int(0.54 * bh), x0_px + inset_x : x0_px + int(0.26 * bw)] = True
+                        hair_zone[y0_px + int(0.15 * bh) : y0_px + int(0.54 * bh), x1_px - int(0.26 * bw) : x1_px - inset_x] = True
+
+                    if hair_lum < 0.22:
+                        combined_hair_mask = (sketch_gray >= 0.08) & (sketch_gray <= 0.75) & hair_zone & region_mask
+                    else:
+                        combined_hair_mask = (sketch_gray >= 0.10) & (sketch_gray <= 0.88) & hair_zone & region_mask
+
+                    # Exclude sweat drops / action bubbles from hair seeds
+                    combined_hair_mask &= ~sweat_excl
+
+                    # Back-view suppression: for buzz-cut characters with screentone hair
+                    # (e.g. Sakuragi), if the face area has very little skin-tone-like gray
+                    # in large connected regions, this bbox is a back/silhouette view — skip
+                    # hair seeds to prevent flooding the dark body silhouette with hair color.
+                    # Use large-CC fraction (components > 100px) to avoid false positives from
+                    # scattered sweat drop halos which appear as small disconnected patches.
+                    _is_screentone_hair = "screentone_hair" in traits
+                    if is_buzz_cut and _is_screentone_hair and not is_head_crop:
+                        _face_region_g = sketch_gray[y0_px : y0_px + int(0.50 * bh), x0_px:x1_px]
+                        _skin_mask_f = ((_face_region_g >= 0.70) & (_face_region_g <= 0.96)).astype(np.uint8)
+                        _nc_f, _lb_f, _st_f, _ = cv2.connectedComponentsWithStats(_skin_mask_f)
+                        _large_skin_f = sum(_st_f[_i, cv2.CC_STAT_AREA] for _i in range(1, _nc_f) if _st_f[_i, cv2.CC_STAT_AREA] > 100)
+                        _large_skin_frac = _large_skin_f / max(_face_region_g.size, 1)
+                        if _large_skin_frac < 0.07:
+                            # Less than 7% large skin-like connected components → back/silhouette view
+                            combined_hair_mask[:] = False
+
+                    # Forehead-crop suppression: for buzz-cut characters with screentone hair,
+                    # if the top of the bbox is cut off at the forehead (e.g. extreme face close-up
+                    # where hair is cropped out by the panel border), the candidate hair zone will
+                    # not contain actual screentone scalp. Instead it will be contaminated by heavy
+                    # line ink (eyebrows, eyes, panel borders with ink_frac > 0.22) and lack
+                    # dominant screentone dot coverage (screentone_frac < 0.60).
+                    # In this case, suppress hair seeds and clear hair_zone to prevent stamping
+                    # a geometric hair box on the character's bare forehead.
+                    if is_buzz_cut and _is_screentone_hair and np.any(combined_hair_mask):
+                        _s_frac = float(np.mean((sketch_gray[combined_hair_mask] >= 0.25) & (sketch_gray[combined_hair_mask] <= 0.78)))
+                        _ink_frac = float(np.mean(sketch_gray[hair_zone] < 0.20))
+                        if _s_frac < 0.60 or _ink_frac > 0.22:
+                            combined_hair_mask[:] = False
+                            hair_zone[:] = False
+
+                    if np.any(combined_hair_mask):
+                        hint[0, 0, combined_hair_mask] = float((hair_rgb_arr[0] - 0.5) / 0.5)
+                        hint[0, 1, combined_hair_mask] = float((hair_rgb_arr[1] - 0.5) / 0.5)
+                        hint[0, 2, combined_hair_mask] = float((hair_rgb_arr[2] - 0.5) / 0.5)
+                        hint[0, 3, combined_hair_mask] = 0.85
+                        seeds_placed += 1
+
+
+                # 2. Skin zone (central face / neck, shaded midtones, strictly disjoint from hair)
+                if skin_rgb is not None:
+                    s_cond = (
+                        (sketch_gray >= 0.70)
+                        & (sketch_gray <= 0.94)
+                        & region_mask
+                        & (~combined_hair_mask)
+                        & (~hair_zone)
+                    )
+                    if is_head_crop:
+                        sy_start = y0_px + int(0.50 * bh)
+                    elif has_flowing:
+                        sy_start = y0_px + int(0.36 * bh)
+                    elif is_buzz_cut:
+                        sy_start = y0_px + int(0.23 * bh)
+                    else:
+                        sy_start = y0_px + int(0.28 * bh)
+                    sy_end = y0_px + int(0.78 * bh)
+                    s_cond[:sy_start, :] = False
+                    s_cond[sy_end:, :] = False
+                    if is_buzz_cut and not _is_screentone:
+                        s_cond[:, : x0_px + int(0.24 * bw)] = False
+                        s_cond[:, x1_px - int(0.18 * bw) :] = False
+                    _place_seeds_for_color(
+                        skin_rgb,
+                        s_cond,
+                        max_seeds=3,
+                        min_area=20,
+                        seed_radius_scale=8.0,
+                        max_radius=8,
+                        min_radius=3,
+                    )
+
+                # 3. Eye seeds (eye zone 16%-50%, small dark pupils)
+                if eye_rgb is not None:
+                    ey_start = y0_px + int(0.16 * bh)
+                    ey_end = y0_px + int(0.50 * bh)
+                    e_cond = (
+                        (sketch_gray >= 0.02)
+                        & (sketch_gray <= 0.35)
+                        & region_mask
+                    )
+                    e_cond[:ey_start, :] = False
+                    e_cond[ey_end:, :] = False
+                    _place_seeds_for_color(
+                        eye_rgb,
+                        e_cond,
+                        max_seeds=2,
+                        min_area=8,
+                        max_area_ratio=0.015,
+                        seed_radius_scale=4.0,
+                        max_radius=5,
+                        min_radius=2,
+                    )
+
+                # 4. Costume seeds (clothing zone, non-pure-white, body figures only)
+                if costume_rgb is not None and bh >= 40 and not is_head_crop:
+                    # On close-up head/bust crops (bh / valid_h < 0.28), clothing starts much lower (>= 80% bh)
+                    c_split = 0.80 if (bh / float(valid_h) < 0.28) else 0.58
+                    cy_start = y0_px + int(c_split * bh)
+                    c_cond = (
+                        (sketch_gray >= 0.05)
+                        & (sketch_gray <= 0.90)
+                        & region_mask
+                        & ~sweat_excl  # exclude sweat/action bubbles from costume seeds
+                    )
+                    c_cond[:cy_start, :] = False
+                    _place_seeds_for_color(
+                        costume_rgb,
+                        c_cond,
+                        max_seeds=3,
+                        min_area=25,
+                        seed_radius_scale=7.5,
+                        max_radius=11,
+                        min_radius=4,
+                    )
+
+
+            # Fallback for synthetic tests or frames without bounding box
             else:
                 region_mask = content_margin
-
-            # Prioritize direct anatomical seed placement if face locations exist
-            if ch.bounding_box is not None:
-                matched_faces = [
-                    f for f in face_seeds
-                    if region_mask[min(h-1, max(0, f[1])), min(w-1, max(0, f[0]))]
-                ]
-            elif face_seeds:
-                num_palette = max(1, len(self.characters[:4]))
-                matched_faces = [
-                    face_seeds[i] for i in range(len(face_seeds))
-                    if i % num_palette == ch_idx
-                ]
-            else:
-                matched_faces = []
-
-            anatomical_placed = False
-            if matched_faces:
-                for fcx, fcy, fbx, fby, fbw, fbh, farea in matched_faces[:6]:
-                    # 1. Face skin seed
-                    if skin_rgb is not None:
-                        s_r = min(10, max(4, int(np.sqrt(farea) / 8.0)))
-                        dist_sq = (y_coords - fcy) ** 2 + (x_coords - fcx) ** 2
-                        m = dist_sq <= (s_r ** 2)
-                        hint[0, 0, m] = (skin_rgb[0] - 0.5) / 0.5
-                        hint[0, 1, m] = (skin_rgb[1] - 0.5) / 0.5
-                        hint[0, 2, m] = (skin_rgb[2] - 0.5) / 0.5
-                        hint[0, 3, m] = 1.0
-
-                    # 2. Eye iris seeds
-                    if eye_rgb is not None:
-                        e_y = int(fcy - 0.10 * fbh)
-                        er = min(8, max(3, int(np.sqrt(farea) / 18.0)))
-                        for e_x in [int(fcx - 0.20 * fbw), int(fcx + 0.20 * fbw)]:
-                            if 0 <= e_y < h and 0 <= e_x < w:
-                                dist_e = (y_coords - e_y) ** 2 + (x_coords - e_x) ** 2
-                                me = dist_e <= (er ** 2)
-                                hint[0, 0, me] = (eye_rgb[0] - 0.5) / 0.5
-                                hint[0, 1, me] = (eye_rgb[1] - 0.5) / 0.5
-                                hint[0, 2, me] = (eye_rgb[2] - 0.5) / 0.5
-                                hint[0, 3, me] = 1.0
-
-                    # 3. Hair seed in hair region directly above face
-                    if hair_rgb is not None:
-                        y_h_top = max(0, int(fby - 0.65 * fbh))
-                        if fby > y_h_top:
-                            above_patch = sketch_gray[y_h_top:fby, fbx:fbx+fbw]
-                            min_pos = np.unravel_index(np.argmin(above_patch), above_patch.shape)
-                            hy = y_h_top + int(min_pos[0])
-                            hx = fbx + int(min_pos[1])
-                            hr = min(11, max(4, int(np.sqrt(farea) / 7.0)))
-                            dist_h = (y_coords - hy) ** 2 + (x_coords - hx) ** 2
-                            mh = dist_h <= (hr ** 2)
-                            hint[0, 0, mh] = (hair_rgb[0] - 0.5) / 0.5
-                            hint[0, 1, mh] = (hair_rgb[1] - 0.5) / 0.5
-                            hint[0, 2, mh] = (hair_rgb[2] - 0.5) / 0.5
-                            hint[0, 3, mh] = 1.0
-
-                    # 4. Costume seed directly below chin
-                    if costume_rgb is not None:
-                        cy_cost = min(h - 10, int(fby + fbh + 0.40 * fbh))
-                        cr = min(12, max(4, int(np.sqrt(farea) / 7.0)))
-                        dist_c = (y_coords - cy_cost) ** 2 + (x_coords - fcx) ** 2
-                        mc = dist_c <= (cr ** 2)
-                        hint[0, 0, mc] = (costume_rgb[0] - 0.5) / 0.5
-                        hint[0, 1, mc] = (costume_rgb[1] - 0.5) / 0.5
-                        hint[0, 2, mc] = (costume_rgb[2] - 0.5) / 0.5
-                        hint[0, 3, mc] = 1.0
-                    anatomical_placed = True
-
-            # Fallback for synthetic tests or abstract frames where topological face was not detected
-            if not anatomical_placed:
                 # 1. Skin seeds (warm face/body midtones)
                 if skin_rgb is not None:
                     s_mask_cond = (sketch_gray >= 0.60) & (sketch_gray <= 0.93) & region_mask
@@ -628,14 +780,7 @@ class CharacterPalette:
 
                 # 3. Eye seeds (pupil/iris features)
                 if eye_rgb is not None:
-                    if ch.bounding_box is not None:
-                        by0, bx0, by1, bx1 = ch.bounding_box
-                        y_eye_max = int((by0 + 0.55 * (by1 - by0)) * h)
-                        eye_box = np.zeros((h, w), dtype=bool)
-                        eye_box[y0_px:y_eye_max, x0_px:x1_px] = True
-                        eye_cond = (sketch_gray >= 0.02) & (sketch_gray <= 0.35) & eye_box
-                    else:
-                        eye_cond = (sketch_gray >= 0.02) & (sketch_gray <= 0.35) & region_mask
+                    eye_cond = (sketch_gray >= 0.02) & (sketch_gray <= 0.35) & region_mask
                     _place_seeds_for_color(
                         eye_rgb,
                         eye_cond,
@@ -710,8 +855,42 @@ def apply_character_palette_harmonization(
         return (current_h + weight * diff) % 180.0
 
     # Avoid modifying pure white paper margins and background borders
-    non_paper_mask = (v_chan < 248.0) | (s_chan > 20.0)
+    non_paper_mask = (orig_gray <= 0.96) & ((v_chan < 250.0) | (s_chan > 12.0))
     global_claimed = np.zeros((H, W), dtype=bool)
+
+    # ── Page-level sweat drop / action bubble detection ─────────────────
+    # Detect small circular bright blobs (sweat drops, water drops, emotion bubbles)
+    # with bright interior (gray > 0.90) surrounded by a dark ring outline.
+    _brt_px = (orig_gray > 0.90).astype(np.uint8)
+    _swh_nc, _swh_lbl, _swh_stats, _swh_cents = cv2.connectedComponentsWithStats(_brt_px)
+    page_sweat_interior = np.zeros((H, W), dtype=bool)
+    for _swh_i in range(1, _swh_nc):
+        _swh_a = _swh_stats[_swh_i, cv2.CC_STAT_AREA]
+        _swh_w = _swh_stats[_swh_i, cv2.CC_STAT_WIDTH]
+        _swh_h = _swh_stats[_swh_i, cv2.CC_STAT_HEIGHT]
+        if not (8 <= _swh_a <= 400 and _swh_w <= 35 and _swh_h <= 35):
+            continue
+        _swh_asp = max(_swh_w, _swh_h) / max(min(_swh_w, _swh_h), 1)
+        if _swh_asp > 2.5:
+            continue
+        _swh_cy = int(_swh_cents[_swh_i][1])
+        _swh_cx = int(_swh_cents[_swh_i][0])
+        _swh_r = max(3, int(np.sqrt(_swh_a / np.pi)) + 2)
+        _swh_ry0 = max(0, _swh_cy - _swh_r - 5)
+        _swh_ry1 = min(H, _swh_cy + _swh_r + 5)
+        _swh_rx0 = max(0, _swh_cx - _swh_r - 5)
+        _swh_rx1 = min(W, _swh_cx + _swh_r + 5)
+        _swh_patch = orig_gray[_swh_ry0:_swh_ry1, _swh_rx0:_swh_rx1]
+        _swh_blob = _swh_lbl[_swh_ry0:_swh_ry1, _swh_rx0:_swh_rx1] == _swh_i
+        _swh_outer = _swh_patch[~_swh_blob]
+        if len(_swh_outer) == 0:
+            continue
+        _swh_inner_m = _swh_patch[_swh_blob].mean() if _swh_blob.any() else 1.0
+        _swh_outer_m = _swh_outer.mean()
+        if (_swh_inner_m - _swh_outer_m) >= 0.20 and _swh_outer_m < 0.76:
+            page_sweat_interior |= (_swh_lbl == _swh_i)
+    _swh_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    page_sweat_excl = cv2.dilate(page_sweat_interior.astype(np.uint8), _swh_kernel, iterations=2) > 0
 
     for ch_idx, ch in enumerate(palette.characters):
         # Spatial region of the character
@@ -736,6 +915,75 @@ def apply_character_palette_harmonization(
         bh = y1 - y0
         bw = x1 - x0
         char_zone = spatial_mask & non_paper_mask & (~global_claimed)
+        traits = getattr(ch, "visual_traits", []) or []
+        is_buzz_cut_harm = (
+            any(t in traits for t in ("buzz_cut", "crew_cut"))
+            or any(n in ch.name.lower() for n in ("sakuragi", "takenori"))
+        )
+        is_head_crop_harm = (bh / float(H) < 0.22) and (not is_buzz_cut_harm) and (bh / max(bw, 1) < 1.35)
+        has_flowing_hair = (
+            any(t in traits for t in ("long_hair", "ponytail", "twintails", "pigtails"))
+            or is_head_crop_harm
+            or "Arale" in ch.name
+        )
+
+        # Hair anatomical zone:
+        hair_zone = np.zeros((H, W), dtype=bool)
+        if is_buzz_cut_harm:
+            _is_screentone_h = "screentone_hair" in traits
+            if _is_screentone_h:
+                _head_h = int(0.38 * bh)
+                _head_g = orig_gray[y0 : y0 + _head_h, x0:x1]
+                _head_sweat = page_sweat_excl[y0 : y0 + _head_h, x0:x1]
+                _st_cand = (_head_g >= 0.20) & (_head_g <= 0.72) & (~_head_sweat)
+                _nc, _lbls, _stats, _cents = cv2.connectedComponentsWithStats(_st_cand.astype(np.uint8))
+                if _nc > 1:
+                    _largest_idx = 1 + np.argmax(_stats[1:, cv2.CC_STAT_AREA])
+                    _comp_area = _stats[_largest_idx, cv2.CC_STAT_AREA]
+                    _comp_w = _stats[_largest_idx, cv2.CC_STAT_WIDTH]
+                    _comp_h = _stats[_largest_idx, cv2.CC_STAT_HEIGHT]
+                    _comp_fill = _comp_area / float(max(1, _comp_w * _comp_h))
+                    _box_fill = _comp_area / float(max(1, _head_h * bw))
+                    _min_area = max(400, int(0.18 * _head_h * bw))
+                    if _comp_area >= _min_area and _comp_fill >= 0.28 and _box_fill >= 0.22:
+                        _scalp_m = (_lbls == _largest_idx)
+                        _kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                        _scalp_m = cv2.morphologyEx(_scalp_m.astype(np.uint8), cv2.MORPH_OPEN, _kernel) > 0
+                        _cent_x = _cents[_largest_idx][0]
+                        _cent_y = _cents[_largest_idx][1]
+                        _scalp_m[:, : max(0, int(_cent_x - 0.26 * bw))] = False
+                        _scalp_m[:, min(bw, int(_cent_x + 0.26 * bw)) :] = False
+                        y_grid_s, x_grid_s = np.ogrid[:_head_h, :bw]
+                        _skull_ell = (((y_grid_s - _cent_y) / max(1, 0.22 * bh)) ** 2 + ((x_grid_s - _cent_x) / max(1, 0.26 * bw)) ** 2) <= 1.05
+                        _scalp_m &= _skull_ell
+                        hair_zone[y0 : y0 + _head_h, x0:x1] = _scalp_m
+            if not np.any(hair_zone) and not _is_screentone_h:
+                # Fallback geometric zone for dark/non-screentone buzzcuts (Akagi) or distant figures
+                hair_x0 = x0 + int(0.16 * bw)
+                hair_x1 = x1 - int(0.06 * bw)
+                hair_zone[y0 : y0 + int(0.24 * bh), hair_x0:hair_x1] = True
+                hair_zone[y0 + int(0.12 * bh) : y0 + int(0.48 * bh), hair_x0 : x0 + int(0.24 * bw)] = True
+                hair_zone[y0 + int(0.12 * bh) : y0 + int(0.48 * bh), x1 - int(0.24 * bw) : hair_x1] = True
+        elif has_flowing_hair or is_head_crop_harm:
+            # Crown & bangs down to 0.60*bh, sidelocks/ponytail down to 0.88*bh
+            hair_zone[y0 : y0 + int(0.60 * bh), x0:x1] = True
+            hair_zone[y0 + int(0.15 * bh) : y0 + int(0.88 * bh), x0 : x0 + int(0.35 * bw)] = True
+            hair_zone[y0 + int(0.15 * bh) : y0 + int(0.88 * bh), x1 - int(0.35 * bw) : x1] = True
+        else:
+            # Standard figures: crown & center hairline down to 0.38*bh (0.46*bh for dark/messy hair), temples/sideburns down to 0.54*bh
+            h_hsv = _hex_to_hsv(getattr(ch, "hair_hex", None))
+            has_dark = (
+                ("black_hair" in traits)
+                or ("dark_hair" in traits)
+                or (h_hsv is not None and (h_hsv[1] < 35.0 or h_hsv[2] < 55.0))
+            )
+            mc = 0.46 if has_dark else 0.38
+            hair_zone[y0 : y0 + int(mc * bh), x0:x1] = True
+            hair_zone[y0 + int(0.15 * bh) : y0 + int(0.54 * bh), x0 : x0 + int(0.26 * bw)] = True
+            hair_zone[y0 + int(0.15 * bh) : y0 + int(0.54 * bh), x1 - int(0.26 * bw) : x1] = True
+
+        if not ch.bounding_box:
+            hair_zone[int(0.03 * H) : int(0.45 * H), int(0.03 * W) : int(0.97 * W)] = True
 
         # ── 1. Eye / Iris Color Accents ─────────────────────────────
         eye_hsv = _hex_to_hsv(getattr(ch, "eye_hex", None))
@@ -752,7 +1000,7 @@ def apply_character_palette_harmonization(
             ex1 = min(W, x0 + int(0.92 * bw))
 
             eye_patch_gray = orig_gray[ey0:ey1, ex0:ex1]
-            iris_cand = (eye_patch_gray >= 0.10) & (eye_patch_gray <= 0.85)
+            iris_cand = (eye_patch_gray >= 0.10) & (eye_patch_gray <= 0.70)
             num_e, labels_e, stats_e, _ = cv2.connectedComponentsWithStats(iris_cand.astype(np.uint8))
             min_e = max(6, int(0.00003 * H * W))
             max_e = max(350, int(0.006 * H * W))
@@ -783,38 +1031,64 @@ def apply_character_palette_harmonization(
         skin_mask = np.zeros((H, W), dtype=bool)
         if skin_hsv is not None:
             t_skin_h, t_skin_s, t_skin_v = skin_hsv
+            # Allow face paper to be harmonized inside character region
+            # (unlike hair and costume, manga skin is drawn on unshaded paper)
+            skin_char_zone = spatial_mask & (~global_claimed)
+            if ch.bounding_box and bh >= 40:
+                bbox_h_ratio = bh / float(H)
+                costume_split = 0.82 if bbox_h_ratio < 0.28 else (0.65 if bbox_h_ratio < 0.45 else 0.58)
+                head_split_y = y0 + int(costume_split * bh)
+                y_coords_2d = np.arange(H)[:, None]
+                is_head_y = y_coords_2d < head_split_y
+                valid_skin_h = (
+                    ((h_chan <= 72.0) | (h_chan >= 166.0)) & is_head_y
+                    | ((h_chan <= 38.0) | (h_chan >= 166.0)) & (~is_head_y)
+                )
+            else:
+                valid_skin_h = (h_chan <= 38.0) | (h_chan >= 166.0)
+
             detected_skin = (
-                ((h_chan <= 26.0) | (h_chan >= 168.0))
-                & (s_chan >= 14.0)
-                & (s_chan <= 135.0)
-                & (v_chan >= 105.0)
-                & (v_chan <= 248.0)
-                & char_zone
+                valid_skin_h
+                & (s_chan >= 8.0)
+                & (s_chan <= 210.0)
+                & (v_chan >= 55.0)
+                & (v_chan <= 255.0)
+                & skin_char_zone
                 & (~eye_mask)
             )
 
-            # In manga with a head zone, protect forehead bangs from being hijacked by skin:
-            # Bangs are at the top of the head (y < y0 + 0.22*bh).
-            # True face skin is in the central face / cheeks / neck (y >= y0 + 0.22*bh) or outside head
+            # In manga with a head zone, protect bangs and hair from being hijacked by skin:
             if ch.bounding_box:
-                bangs_zone = np.zeros((H, W), dtype=bool)
-                bangs_zone[y0 : y0 + int(0.22 * bh), x0:x1] = True
-                detected_skin &= ~bangs_zone
+                bangs_hair_pixels = hair_zone & (orig_gray <= 0.93)
+                detected_skin &= ~bangs_hair_pixels
 
             if np.any(detected_skin):
                 skin_mask = detected_skin
-                h_chan[skin_mask] = _blend_hue(h_chan[skin_mask], t_skin_h, 0.60)
-                s_chan[skin_mask] = np.clip(
-                    0.55 * s_chan[skin_mask] + 0.45 * t_skin_s, 22.0, 145.0
-                )
-                v_chan[skin_mask] = np.clip(
-                    0.80 * v_chan[skin_mask] + 0.20 * t_skin_v, 110.0, 255.0
-                )
+                # Only actual circular sweat droplets (with dark rings) get highlight treatment
+                is_sweat_highlight = skin_mask & page_sweat_interior
+                skin_body = skin_mask & (~is_sweat_highlight)
+                if np.any(skin_body):
+                    h_chan[skin_body] = _blend_hue(h_chan[skin_body], t_skin_h, 0.60)
+                    s_chan[skin_body] = np.clip(
+                        0.55 * s_chan[skin_body] + 0.45 * t_skin_s, 22.0, 145.0
+                    )
+                    v_chan[skin_body] = np.clip(
+                        0.80 * v_chan[skin_body] + 0.20 * t_skin_v, 110.0, 255.0
+                    )
+                if np.any(is_sweat_highlight):
+                    s_chan[is_sweat_highlight] = np.clip(s_chan[is_sweat_highlight] * 0.2, 0.0, 18.0)
+                    v_chan[is_sweat_highlight] = np.maximum(v_chan[is_sweat_highlight], 240.0)
+
+
 
         # ── 3. Hair Color Harmonization & Vibrant Transfer ──────────
+        # Buzzcut characters have short, scalp-tight hair whose organic hairline is
+        # segmented by ResNeXt convolutions from neural hint seeds. Hard rectangular
+        # geometric bounding boxes create boxy cutoffs on buzzcuts, so buzzcut hair
+        # is preserved organically from the neural generator.
         hair_hsv = _hex_to_hsv(ch.hair_hex)
         hair_mask = np.zeros((H, W), dtype=bool)
-        if hair_hsv is not None:
+        if hair_hsv is not None and not is_buzz_cut_harm:
             t_hair_h, t_hair_s, t_hair_v = hair_hsv
             is_neutral_hair = (t_hair_s < 35.0) or (t_hair_v < 55.0)
 
@@ -835,23 +1109,30 @@ def apply_character_palette_harmonization(
             # Protect cheeks/chin (central face oval where paper is bright and uninked)
             is_cheek = np.zeros((H, W), dtype=bool)
             if ch.bounding_box:
-                ch_y0, ch_y1 = y0 + int(0.24 * bh), y0 + int(0.42 * bh)
-                ch_x0, ch_x1 = x0 + int(0.32 * bw), x0 + int(0.68 * bw)
+                if is_buzz_cut_harm:
+                    ch_y0, ch_y1 = y0 + int(0.24 * bh), y0 + int(0.68 * bh)
+                    ch_x0, ch_x1 = x0 + int(0.24 * bw), x1 - int(0.24 * bw)
+                else:
+                    ch_y0, ch_y1 = y0 + int(0.36 * bh), y0 + int(0.65 * bh)
+                    ch_x0, ch_x1 = x0 + int(0.30 * bw), x0 + int(0.70 * bw)
                 is_cheek[ch_y0:ch_y1, ch_x0:ch_x1] = orig_gray[ch_y0:ch_y1, ch_x0:ch_x1] >= 0.86
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
                 cheek_dil = cv2.dilate(is_cheek.astype(np.uint8), kernel) > 0
             else:
                 cheek_dil = np.zeros((H, W), dtype=bool)
 
-            # Hair anatomical zone: crown, bangs, and sides
-            hair_zone = np.zeros((H, W), dtype=bool)
-            hair_zone[y0 : y0 + int(0.38 * bh), x0:x1] = True
-            hair_zone[y0 + int(0.38 * bh) : y0 + int(0.65 * bh), x0 : x0 + int(0.32 * bw)] = True
-            hair_zone[y0 + int(0.38 * bh) : y0 + int(0.65 * bh), x0 + int(0.65 * bw) : x1] = True
-
             # If bounding box is absent, fallback to upper region
             if not ch.bounding_box:
                 hair_zone[int(0.03 * H) : int(0.45 * H), int(0.03 * W) : int(0.97 * W)] = True
+
+            # For vibrant hair (screentone): require ink dots (orig_gray <= 0.93), protecting pure white forehead paper
+            # Deep black line art (orig_gray < 0.12) like text letters and panel borders are preserved
+            if not is_neutral_hair:
+                hair_cand_gray_cond = (orig_gray <= 0.93) & (orig_gray >= 0.12)
+                hair_cand_color_cond = True
+            else:
+                hair_cand_gray_cond = (orig_gray <= 0.90) & (orig_gray >= 0.12)
+                hair_cand_color_cond = (s_chan >= 12.0) | (orig_gray <= 0.75)
 
             hair_candidates = (
                 hair_zone
@@ -860,20 +1141,41 @@ def apply_character_palette_harmonization(
                 & (~skin_mask)
                 & (~cheek_dil)
                 & (~cap_mask)
-                & (orig_gray <= 0.98)
-                & (orig_gray >= 0.10)
-                & ((s_chan >= 12.0) | (orig_gray <= 0.85))
+                & hair_cand_gray_cond
+                & hair_cand_color_cond
             )
 
-            if np.any(hair_candidates) and not is_neutral_hair:
-                h_chan[hair_candidates] = _blend_hue(h_chan[hair_candidates], t_hair_h, 0.95)
-                s_chan[hair_candidates] = np.clip(
-                    np.maximum(s_chan[hair_candidates], t_hair_s * 0.92), 40.0, 255.0
-                )
-                v_chan[hair_candidates] = np.clip(
-                    v_chan[hair_candidates] * (0.85 + 0.15 * (t_hair_v / 180.0)), 20.0, 255.0
-                )
-                hair_mask |= hair_candidates
+            # Back-view suppression: for buzz-cut + screentone_hair characters, skip hair
+            # harmonization if this bbox shows a back/silhouette view. Use large-CC skin-like
+            # fraction (components > 100px) to avoid false positives from scattered sweat drops.
+            if is_buzz_cut_harm and "screentone_hair" in traits and not is_head_crop_harm:
+                _face_patch = orig_gray[y0 : y0 + int(0.50 * bh), x0:x1]
+                _skin_mask_h = ((_face_patch >= 0.70) & (_face_patch <= 0.96)).astype(np.uint8)
+                _nc_h, _lb_h, _st_h, _ = cv2.connectedComponentsWithStats(_skin_mask_h)
+                _large_h = sum(_st_h[_i, cv2.CC_STAT_AREA] for _i in range(1, _nc_h) if _st_h[_i, cv2.CC_STAT_AREA] > 100)
+                _large_h_frac = _large_h / max(_face_patch.size, 1)
+                if _large_h_frac < 0.07:
+                    hair_candidates[:] = False
+
+
+            if np.any(hair_candidates):
+                if not is_neutral_hair:
+                    h_chan[hair_candidates] = _blend_hue(h_chan[hair_candidates], t_hair_h, 0.95)
+                    s_chan[hair_candidates] = np.clip(
+                        np.maximum(s_chan[hair_candidates], t_hair_s * 0.92), 40.0, 255.0
+                    )
+                    v_chan[hair_candidates] = np.clip(
+                        v_chan[hair_candidates] * (0.85 + 0.15 * (t_hair_v / 180.0)), 20.0, 255.0
+                    )
+                    hair_mask |= hair_candidates
+                else:
+                    # Authentic dark / neutral hair (Rukawa, Akagi, Senbei, Luffy):
+                    # Only dark/neutral pixels are candidates for neutral hair (protect vibrant clothing/sky)
+                    neut_cand = hair_candidates & ((s_chan <= 88.0) | (v_chan <= 90.0))
+                    if np.any(neut_cand):
+                        s_chan[neut_cand] = np.clip(s_chan[neut_cand] * 0.05, 0.0, 8.0)
+                        v_chan[neut_cand] = np.clip(v_chan[neut_cand] * 0.50, 10.0, 50.0)
+                        hair_mask |= neut_cand
 
         # ── 4. Costume & Outfit Color Harmonization ─────────────────
         costume_zone = (
@@ -882,11 +1184,31 @@ def apply_character_palette_harmonization(
             & (~skin_mask)
             & (~eye_mask)
         )
+        # In a figure with a bounding box, costume is anatomically below the head/face.
+        # This strictly prevents forehead sweat/wrinkle lines or eyebrow outlines from being recolored as a jersey.
+        has_head_features = bool(ch.hair_hex or ch.skin_hex)
+        if ch.bounding_box and bh >= 40 and has_head_features:
+            y_coords_2d = np.arange(H)[:, None]
+            bbox_h_ratio = bh / float(H)
+            if bbox_h_ratio < 0.28:
+                costume_split = 0.82
+            elif bbox_h_ratio < 0.45:
+                costume_split = 0.68
+            else:
+                costume_split = 0.46
+            body_zone = y_coords_2d >= (y0 + int(costume_split * bh))
+            costume_zone &= body_zone
+
         if np.any(eye_mask):
             scale = max(1.0, np.sqrt(H * W) / 1200.0)
             k_sz = max(3, int(round(5 * scale))) | 1
             costume_zone &= ~(cv2.dilate(eye_mask.astype(np.uint8), np.ones((k_sz, k_sz), np.uint8)) > 0)
 
+        # Exclude sweat drops / action bubbles from costume harmonization
+        costume_zone &= ~page_sweat_excl
+
+
+        costume_matched_all = np.zeros((H, W), dtype=bool)
         for hex_code in [ch.costume_hex, ch.extra_hex]:
             c_hsv = _hex_to_hsv(hex_code)
             if c_hsv is None or c_hsv[1] < 25.0:
@@ -896,21 +1218,26 @@ def apply_character_palette_harmonization(
                 costume_zone
                 & (v_chan >= 25.0)
                 & (v_chan <= 245.0)
-                & (s_chan >= 16.0)
+                & (orig_gray <= 0.94)
             )
             if not np.any(costume_candidates):
                 continue
-            c_diff = np.abs(h_chan - t_c_h)
-            c_diff = np.minimum(c_diff, 180.0 - c_diff)
-            c_match = costume_candidates & (c_diff <= 40.0)
-            if t_c_h <= 12.0 or t_c_h >= 168.0:
-                c_match |= (
-                    costume_candidates
-                    & ((h_chan <= 15.0) | (h_chan >= 165.0))
-                    & (s_chan >= 35.0)
-                )
+
+            # If costume is red/crimson, strictly guard against matching natural skin tones (h: 11-35)
+            is_red_costume = (t_c_h <= 12.0) or (t_c_h >= 168.0)
+            if is_red_costume:
+                costume_candidates &= ~((h_chan >= 11.0) & (h_chan <= 38.0))
+                is_true_red = (h_chan <= 10.0) | (h_chan >= 170.0)
+                c_match = costume_candidates & (s_chan >= 16.0) & is_true_red
+                c_diff = np.abs(h_chan - t_c_h)
+                c_diff = np.minimum(c_diff, 180.0 - c_diff)
+            else:
+                c_diff = np.abs(h_chan - t_c_h)
+                c_diff = np.minimum(c_diff, 180.0 - c_diff)
+                c_match = costume_candidates & (s_chan >= 16.0) & (c_diff <= 35.0)
+
             if np.any(c_match):
-                pull = np.clip((40.0 - c_diff[c_match]) / 40.0, 0.0, 1.0) * 0.70 + 0.20
+                pull = np.clip((35.0 - c_diff[c_match]) / 35.0, 0.0, 1.0) * 0.70 + 0.20
                 h_chan[c_match] = _blend_hue(h_chan[c_match], t_c_h, pull)
                 s_chan[c_match] = np.clip(
                     np.maximum(s_chan[c_match], t_c_s * 0.95), 35.0, 255.0
@@ -918,8 +1245,26 @@ def apply_character_palette_harmonization(
                 v_chan[c_match] = np.clip(
                     (1.0 - pull * 0.35) * v_chan[c_match] + pull * 0.35 * t_c_v, 25.0, 255.0
                 )
+                costume_matched_all |= c_match
 
-        global_claimed |= (hair_mask | eye_mask | skin_mask)
+            # Actively transfer canonical costume color to desaturated clothing
+            if hex_code == ch.costume_hex:
+                c_desat = (
+                    costume_candidates
+                    & (s_chan < 25.0)
+                    & (orig_gray <= 0.75)  # tightened: screentone shading only, not near-white sweat drops
+                    & (orig_gray >= 0.12)
+                )
+                if np.any(c_desat):
+                    h_chan[c_desat] = _blend_hue(h_chan[c_desat], t_c_h, 0.90)
+                    s_chan[c_desat] = np.clip(t_c_s * 0.85, 30.0, 220.0)
+                    v_chan[c_desat] = np.clip(
+                        0.70 * v_chan[c_desat] + 0.30 * t_c_v, 30.0, 240.0
+                    )
+                    costume_matched_all |= c_desat
+
+
+        global_claimed |= (hair_mask | eye_mask | skin_mask | costume_matched_all)
 
     h_chan = np.clip(h_chan, 0.0, 179.0)
     s_chan = np.clip(s_chan, 0.0, 255.0)
@@ -1136,6 +1481,18 @@ def transfer_exemplar_palette(
 # ─────────────────────────────────────────────────────────────────────
 
 
+class CandidatePair(tuple):
+    """
+    2-tuple of (crop_box, fig_box) with an is_yolo flag indicating neural detection.
+    Supports standard unpacking as (crop_box, fig_box) for full backward compatibility.
+    """
+
+    def __new__(cls, crop_box: tuple[int, int, int, int], fig_box: tuple[int, int, int, int], is_yolo: bool = False):
+        inst = super().__new__(cls, (crop_box, fig_box))
+        inst.is_yolo = is_yolo
+        return inst
+
+
 class MangaCharacterRecognizer:
     """
     Intelligent manga character recognition system:
@@ -1201,6 +1558,56 @@ class MangaCharacterRecognizer:
             print(f"[MangaCharacterRecognizer WARNING] Could not load Manga109 YOLO model: {e}")
             return None, None
 
+    def _detect_manga_panels(self, gray: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """
+        Extracts individual manga panel bounding boxes (y0, x0, y1, x1) in pixel coordinates.
+        Splits wide panel rows / tiers separated by vertical gutters into individual panels.
+        """
+        h, w = gray.shape[:2]
+        if gray.dtype != np.uint8:
+            if gray.max() <= 1.01:
+                gray_u8 = (np.clip(gray, 0.0, 1.0) * 255.0).astype(np.uint8)
+            else:
+                gray_u8 = np.clip(gray, 0, 255).astype(np.uint8)
+        else:
+            gray_u8 = gray
+
+        binary = (gray_u8 < 225).astype(np.uint8) * 255
+        kh, kw = max(15, h // 80), max(15, w // 80)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        raw_panels = []
+        for c in cnts:
+            x, y, pw, ph = cv2.boundingRect(c)
+            if 0.02 * h * w <= pw * ph <= 0.95 * h * w and pw >= 0.15 * w and ph >= 0.08 * h:
+                raw_panels.append((y, x, y + ph, x + pw))
+
+        final_panels = []
+        for y0, x0, y1, x1 in raw_panels:
+            pw = x1 - x0
+            if pw >= int(0.65 * w):
+                tier_patch = (gray_u8[y0:y1, x0:x1] >= 235).astype(np.float32)
+                col_means = np.mean(tier_patch, axis=0)
+                mid_start = int(0.30 * pw)
+                mid_end = int(0.70 * pw)
+                gutter_x = -1
+                best_gutter_val = -1.0
+                for x in range(mid_start, mid_end):
+                    w_window = col_means[x : x + max(8, int(0.008 * w))]
+                    if len(w_window) > 0 and np.mean(w_window) >= 0.92:
+                        if np.mean(w_window) > best_gutter_val:
+                            best_gutter_val = np.mean(w_window)
+                            gutter_x = x
+                if gutter_x > 0:
+                    final_panels.append((y0, x0, y1, x0 + gutter_x))
+                    final_panels.append((y0, x0 + gutter_x, y1, x1))
+                else:
+                    final_panels.append((y0, x0, y1, x1))
+            else:
+                final_panels.append((y0, x0, y1, x1))
+        return final_panels
+
     def _detect_manga_yolo_regions(
         self,
         pil_img: Image.Image,
@@ -1209,8 +1616,8 @@ class MangaCharacterRecognizer:
     ) -> list[tuple[int, int, int, int, str, float]]:
         """
         Uses Manga109 YOLO detector to identify precise face and body bounding boxes.
-        Applies multi-scale and horizontal panel-band slicing so small faces inside manga panels
-        are reliably detected at full fidelity.
+        Applies multi-scale, individual panel scans, and horizontal panel-band slicing so small
+        faces inside manga panels are reliably detected at full fidelity.
         Returns list of (y0, x0, y1, x1, cls_name, conf) in pixel coordinates.
         """
         yolo_model, device = self._ensure_manga_yolo()
@@ -1231,28 +1638,45 @@ class MangaCharacterRecognizer:
         except Exception as e:
             print(f"[MangaCharacterRecognizer WARNING] Full-page YOLO scan error: {e}")
 
-        # 2. If page is tall (standard manga page layout), scan horizontal panel bands
+        # 2. If page is tall (standard manga page layout) or high-res, scan sub-regions
+        scan_regions: list[tuple[int, int, int, int]] = []
+        if cv_img is not None:
+            try:
+                gray = cv_img if cv_img.ndim == 2 else cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+                panels = self._detect_manga_panels(gray)
+                for py0, px0, py1, px1 in panels:
+                    scan_regions.append((px0, py0, px1, py1))
+            except Exception:
+                pass
+
         if h >= int(1.15 * w):
-            bands = [
+            scan_regions.extend([
                 (0, 0, w, int(h * 0.38)),
                 (0, int(h * 0.28), w, int(h * 0.68)),
                 (0, int(h * 0.58), w, h),
-            ]
-            for x0, y0, x1, y1 in bands:
-                try:
-                    crop = pil_img.crop((x0, y0, x1, y1))
-                    band_res = yolo_model.predict(crop, device=device, conf=conf, imgsz=1024, verbose=False)[0]
-                    for b in band_res.boxes:
-                        cls_name = yolo_model.names[int(b.cls[0])]
-                        if cls_name in ("body", "face"):
-                            bx0, by0, bx1, by1 = b.xyxy[0].tolist()
-                            gx0 = max(0, min(w, int(x0 + bx0)))
-                            gy0 = max(0, min(h, int(y0 + by0)))
-                            gx1 = max(0, min(w, int(x0 + bx1)))
-                            gy1 = max(0, min(h, int(y0 + by1)))
-                            detected.append((gy0, gx0, gy1, gx1, cls_name, float(b.conf[0])))
-                except Exception:
-                    pass
+            ])
+        if w >= 1400 or h >= 1400:
+            cols = [(0, int(w * 0.58)), (int(w * 0.42), w)]
+            rows = [(0, int(h * 0.38)), (int(h * 0.30), int(h * 0.70)), (int(h * 0.62), h)]
+            for ry0, ry1 in rows:
+                for cx0, cx1 in cols:
+                    scan_regions.append((cx0, ry0, cx1, ry1))
+
+        for x0, y0, x1, y1 in scan_regions:
+            try:
+                crop = pil_img.crop((x0, y0, x1, y1))
+                band_res = yolo_model.predict(crop, device=device, conf=conf, imgsz=1024, verbose=False)[0]
+                for b in band_res.boxes:
+                    cls_name = yolo_model.names[int(b.cls[0])]
+                    if cls_name in ("body", "face"):
+                        bx0, by0, bx1, by1 = b.xyxy[0].tolist()
+                        gx0 = max(0, min(w, int(x0 + bx0)))
+                        gy0 = max(0, min(h, int(y0 + by0)))
+                        gx1 = max(0, min(w, int(x0 + bx1)))
+                        gy1 = max(0, min(h, int(y0 + by1)))
+                        detected.append((gy0, gx0, gy1, gx1, cls_name, float(b.conf[0])))
+            except Exception:
+                pass
 
         if not detected:
             return []
@@ -1523,6 +1947,58 @@ class MangaCharacterRecognizer:
                 )
         return results
 
+    @staticmethod
+    def _trim_white_gutters(box: tuple[int, int, int, int], gray: np.ndarray) -> tuple[int, int, int, int]:
+        """
+        Trims blank white gutters (empty paper columns) between the character figure
+        and adjacent dialogue text or panel borders, preventing palette hints or harmonization
+        from leaking into text columns.
+        """
+        y0, x0, y1, x1 = box
+        bh, bw = y1 - y0, x1 - x0
+        if bh < 40 or bw < 40:
+            return box
+
+        sub_y0 = y0 + int(0.10 * bh)
+        sub_y1 = y1 - int(0.10 * bh)
+        interior = gray[sub_y0:sub_y1, x0:x1]
+        if interior.size == 0:
+            return box
+
+        # Must contain figure ink (not a completely blank synthetic test image)
+        if np.all(interior >= 0.98):
+            return box
+
+        col_means = np.mean(interior, axis=0)
+        cx_rel = len(col_means) // 2
+
+        # Min gap scale: at least 14px or 4% of width
+        min_gap = max(14, int(0.04 * bw))
+        new_x1 = x1
+        # Scan right from center for white gutter before text
+        for x in range(cx_rel + int(0.15 * bw), len(col_means) - min_gap):
+            if np.all(col_means[x : x + min_gap] >= 0.965):
+                # Only trim if there is actually ink (text / borders) beyond this gutter
+                beyond = interior[:, x + min_gap :]
+                if beyond.size > 0 and np.any(beyond <= 0.85):
+                    new_x1 = x0 + x
+                    break
+
+        # Scan upward from center for horizontal white panel gutter to avoid crossing into upper panel
+        new_y0 = y0
+        if bh >= 60:
+            row_means = np.mean(gray[y0:y1, x0:x1], axis=1)
+            min_gap_y = max(8, int(0.015 * bh))
+            cy_mid = int(0.40 * bh)
+            for y in range(cy_mid, min_gap_y, -1):
+                if np.all(row_means[y - min_gap_y : y] >= 0.965):
+                    above = gray[y0 : y0 + y - min_gap_y, x0:x1]
+                    if above.size > 0 and np.any(above <= 0.70):
+                        new_y0 = y0 + y
+                        break
+
+        return (new_y0, x0, y1, new_x1)
+
     def _extract_candidate_pairs(
         self, img: np.ndarray, pil_img: Optional[Image.Image] = None
     ) -> list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]]:
@@ -1533,59 +2009,124 @@ class MangaCharacterRecognizer:
                       character palette seed hint injection and color harmonization.
         """
         h, w = img.shape[:2]
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0 if img.ndim == 3 else img.astype(np.float32) / 255.0
         if pil_img is not None:
             try:
+                panels = self._detect_manga_panels(gray_img)
                 yolo_boxes = self._detect_manga_yolo_regions(pil_img, img)
                 if yolo_boxes:
                     faces = [b for b in yolo_boxes if b[4] == "face"]
                     bodies = [b for b in yolo_boxes if b[4] == "body"]
 
-                    pairs: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = []
-                    matched_body_indices: set[int] = set()
-
+                    pairs: list[CandidatePair] = []
                     # For each detected face, find the best enclosing / overlapping body
-                    for fy0, fx0, fy1, fx1, _, fconf in faces:
+                    face_body_matches: dict[int, int] = {}
+                    fb_candidates = []
+                    for f_idx, f in enumerate(faces):
+                        fy0, fx0, fy1, fx1, _, fconf = f
+                        fh = fy1 - fy0
+                        fw = fx1 - fx0
+                        fc_x = (fx0 + fx1) / 2.0
+                        for b_idx, b in enumerate(bodies):
+                            by0, bx0, by1, bx1, _, bconf = b
+                            bw = bx1 - bx0
+                            bc_x = (bx0 + bx1) / 2.0
+                            if by0 <= fy0 + int(0.35 * fh) and by1 >= fy1 - int(0.15 * fh):
+                                x_inter = max(0, min(fx1, bx1) - max(fx0, bx0))
+                                if x_inter >= int(0.30 * fw):
+                                    norm_dist = abs(fc_x - bc_x) / (0.5 * bw + 1e-5)
+                                    score = (x_inter / (fw + 1e-5)) + max(0.0, 1.0 - norm_dist)
+                                    fb_candidates.append((score, f_idx, b_idx))
+
+                    fb_candidates.sort(key=lambda x: x[0], reverse=True)
+                    claimed_faces: set[int] = set()
+                    matched_body_indices: set[int] = set()
+                    for score, f_idx, b_idx in fb_candidates:
+                        if f_idx not in claimed_faces and b_idx not in matched_body_indices:
+                            claimed_faces.add(f_idx)
+                            matched_body_indices.add(b_idx)
+                            face_body_matches[f_idx] = b_idx
+
+                    for f_idx, (fy0, fx0, fy1, fx1, _, fconf) in enumerate(faces):
                         face_h = fy1 - fy0
                         face_w = fx1 - fx0
-                        best_body_idx = -1
-                        best_body_iou = -1.0
+                        p_box = (0, 0, h, w)
+                        fc_y = (fy0 + fy1) // 2
+                        fc_x = (fx0 + fx1) // 2
+                        for py0, px0, py1, px1 in panels:
+                            if py0 <= fc_y <= py1 and px0 <= fc_x <= px1:
+                                p_box = (py0, px0, py1, px1)
+                                break
 
-                        for b_idx, (by0, bx0, by1, bx1, _, bconf) in enumerate(bodies):
-                            # Body contains face or intersects top-half of body
-                            if by0 <= fy0 + int(0.25 * face_h) and by1 >= fy1 - int(0.15 * face_h):
-                                if bx0 <= fx0 + int(0.35 * face_w) and bx1 >= fx1 - int(0.35 * face_w):
-                                    # Calculate intersection
-                                    iy0 = max(fy0, by0)
-                                    ix0 = max(fx0, bx0)
-                                    iy1 = min(fy1, by1)
-                                    ix1 = min(fx1, bx1)
-                                    inter = max(0, iy1 - iy0) * max(0, ix1 - ix0)
-                                    if inter > best_body_iou:
-                                        best_body_iou = inter
-                                        best_body_idx = b_idx
-
-                        if best_body_idx >= 0:
-                            matched_body_indices.add(best_body_idx)
-                            by0, bx0, by1, bx1, _, _ = bodies[best_body_idx]
-                            fig_box = (
-                                min(fy0, by0),
-                                min(fx0, bx0),
-                                max(fy1, by1),
-                                max(fx1, bx1),
-                            )
+                        if f_idx in face_body_matches:
+                            b_idx = face_body_matches[f_idx]
+                            by0, bx0, by1, bx1, _, _ = bodies[b_idx]
+                            body_w = bx1 - bx0
+                            if body_w > 2.2 * face_w:
+                                fig_x0 = max(p_box[1], min(bx0, fx0 - int(0.40 * face_w)))
+                                fig_x1 = min(p_box[3], max(bx1, fx1 + int(0.40 * face_w)))
+                            else:
+                                fig_x0 = max(p_box[1], min(fx0 - int(0.30 * face_w), bx0))
+                                fig_x1 = min(p_box[3], max(fx1 + int(0.30 * face_w), bx1))
+                            fig_y0 = max(p_box[0], min(fy0 - int(0.60 * face_h), by0))
+                            fig_y1 = min(p_box[2], max(fy1, by1))
+                            fig_box = self._trim_white_gutters((fig_y0, fig_x0, fig_y1, fig_x1), gray_img)
                         else:
-                            # Close-up panel without full body detection: extend figure box downwards for costume/shoulders
-                            ext_y1 = min(h, fy1 + int(0.40 * face_h))
-                            fig_box = (fy0, fx0, ext_y1, fx1)
+                            # Close-up head / bust panel without full body detection:
+                            # Generously encompass hair crown, buns, spikes, sidelocks, ponytails, and neck
+                            ext_y0 = max(p_box[0], fy0 - int(0.65 * face_h))
+                            ext_y1 = min(p_box[2], fy1 + int(0.70 * face_h))
+                            ext_x0 = max(p_box[1], fx0 - int(0.40 * face_w))
+                            ext_x1 = min(p_box[3], fx1 + int(0.40 * face_w))
+                            fig_box = self._trim_white_gutters((ext_y0, ext_x0, ext_y1, ext_x1), gray_img)
 
                         crop_box = (fy0, fx0, fy1, fx1)
-                        pairs.append((crop_box, fig_box))
+                        pairs.append(CandidatePair(crop_box, fig_box, is_yolo=True))
 
                     # For remaining bodies that had no face detection (e.g. back turned or distant view)
-                    for b_idx, (by0, bx0, by1, bx1, _, _) in enumerate(bodies):
-                        if b_idx not in matched_body_indices:
-                            body_box = (by0, bx0, by1, bx1)
-                            pairs.append((body_box, body_box))
+                    for b_idx, (by0, bx0, by1, bx1, _, bconf) in enumerate(bodies):
+                        if b_idx not in matched_body_indices and bconf >= 0.45:
+                            body_box = self._trim_white_gutters((by0, bx0, by1, bx1), gray_img)
+                            pairs.append(CandidatePair(body_box, body_box, is_yolo=True))
+
+                    # Scan uncovered panel halves for floating heads only if no YOLO faces were detected
+                    if len(faces) == 0:
+                        for py0, px0, py1, px1 in panels:
+                            pw = px1 - px0
+                            ph = py1 - py0
+                            if pw >= int(0.32 * w) and ph >= int(0.12 * h):
+                                mid_x = px0 + int(0.50 * pw)
+                                for hy0, hx0, hy1, hx1 in [
+                                    (py0, px0, py1, mid_x),
+                                    (py0, mid_x, py1, px1),
+                                ]:
+                                    has_confident_face = False
+                                    for f in faces:
+                                        fy0, fx0, fy1, fx1, _, fconf = f
+                                        if fconf >= 0.32:
+                                            fc_y = (fy0 + fy1) // 2
+                                            fc_x = (fx0 + fx1) // 2
+                                            if hy0 <= fc_y <= hy1 and hx0 <= fc_x <= hx1:
+                                                has_confident_face = True
+                                                break
+                                    if not has_confident_face:
+                                        half_patch = gray_img[hy0:hy1, hx0:hx1]
+                                        if float(np.mean(half_patch < 0.88)) >= 0.04:
+                                            trimmed = self._trim_white_gutters((hy0, hx0, hy1, hx1), gray_img)
+                                            ty0, tx0, ty1, tx1 = trimmed
+                                            th = ty1 - ty0
+                                            tw = tx1 - tx0
+                                            if th >= 60 and tw >= 60:
+                                                # Upper / head region of uncovered panel half
+                                                uh_y0 = ty0 + int(0.12 * th)
+                                                uh_y1 = ty0 + int(0.68 * th)
+                                                uh_x0 = tx0 + int(0.08 * tw)
+                                                uh_x1 = tx1
+                                                trimmed_uh = self._trim_white_gutters((uh_y0, uh_x0, uh_y1, uh_x1), gray_img)
+                                                if (trimmed_uh[2] - trimmed_uh[0]) >= 40 and (trimmed_uh[3] - trimmed_uh[1]) >= 40:
+                                                    pairs.append(CandidatePair(trimmed_uh, trimmed, is_yolo=False))
+                                                else:
+                                                    pairs.append(CandidatePair(trimmed, trimmed, is_yolo=False))
 
                     if pairs:
                         return pairs
@@ -1594,7 +2135,7 @@ class MangaCharacterRecognizer:
 
         # Morphological fallback
         morph_boxes = self._extract_morphological_boxes(img)
-        return [(b, b) for b in morph_boxes]
+        return [CandidatePair(b, b, is_yolo=False) for b in morph_boxes]
 
     def _extract_morphological_boxes(self, img: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Fallback candidate extraction using morphological closing and ink contours."""
@@ -1609,8 +2150,9 @@ class MangaCharacterRecognizer:
         else:
             small = img
 
-        sh, sw = small.shape
-        ink_mask = (small < 215).astype(np.uint8) * 255
+        sh, sw = small.shape[:2]
+        small_gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
+        ink_mask = (small_gray < 215).astype(np.uint8) * 255
         kernel_size = max(5, int(min(sh, sw) / 45))
         k = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
         closed = cv2.morphologyEx(ink_mask, cv2.MORPH_CLOSE, k)
@@ -1689,6 +2231,7 @@ class MangaCharacterRecognizer:
 
         series = getattr(palette, "preset_title", None) or getattr(palette, "title", None) or "manga"
         preset_notes_map: dict[str, str] = {}
+        preset_traits_map: dict[str, list[str]] = {}
         try:
             from manga_presets import PRESET_REGISTRY
             if getattr(palette, "preset_id", None) and palette.preset_id in PRESET_REGISTRY:
@@ -1697,15 +2240,19 @@ class MangaCharacterRecognizer:
                     for c in PRESET_REGISTRY[palette.preset_id].characters
                     if getattr(c, "notes", None)
                 }
+                preset_traits_map = {
+                    c.name.lower(): getattr(c, "visual_traits", []) or []
+                    for c in PRESET_REGISTRY[palette.preset_id].characters
+                }
         except Exception:
             pass
 
         prompts = []
         for c in palette.characters:
             notes_str = c.notes or preset_notes_map.get(c.name.lower(), "")
-            traits_str = ", ".join(c.visual_traits) if getattr(c, "visual_traits", None) else ""
-            detail_parts = [p for p in [notes_str, traits_str] if p]
-            details = f", {', '.join(detail_parts)}" if detail_parts else ""
+            if not notes_str and getattr(c, "visual_traits", None):
+                notes_str = ", ".join(c.visual_traits)
+            details = f", {notes_str}" if notes_str else ""
             prompts.append(f"manga drawing of {c.name} from {series}{details}")
 
         neutral_prompts = [
@@ -1719,13 +2266,25 @@ class MangaCharacterRecognizer:
         # Collect candidate crops and figure targets
         valid_pairs: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = []
         crops: list[Image.Image] = []
-        for crop_box, fig_box in candidate_pairs:
+        for pair_item in candidate_pairs:
+            crop_box, fig_box = pair_item[0], pair_item[1]
             y0, x0, y1, x1 = crop_box
             bh = y1 - y0
             bw = x1 - x0
             if bh >= 30 and bw >= 30:
-                valid_pairs.append((crop_box, fig_box))
-                crops.append(pil_img.crop((x0, y0, x1, y1)))
+                valid_pairs.append(pair_item)
+                if getattr(pair_item, "is_yolo", False):
+                    is_body = (crop_box == fig_box)
+                    if is_body:
+                        crops.append(pil_img.crop((x0, y0, x1, y1)))
+                    else:
+                        head_y0 = max(0, y0 - int(0.40 * bh))
+                        head_y1 = min(h_img, y1 + int(0.15 * bh))
+                        head_x0 = max(0, x0 - int(0.20 * bw))
+                        head_x1 = min(w_img, x1 + int(0.20 * bw))
+                        crops.append(pil_img.crop((head_x0, head_y0, head_x1, head_y1)))
+                else:
+                    crops.append(pil_img.crop((x0, y0, x1, y1)))
 
         if not crops:
             valid_pairs = [((0, 0, h_img, w_img), (0, 0, h_img, w_img))]
@@ -1742,49 +2301,123 @@ class MangaCharacterRecognizer:
             outputs = model(**inputs)
             probs_matrix = outputs.logits_per_image.softmax(dim=1).cpu().numpy()
 
+        char_max_conf: dict[str, float] = {c.name: 0.0 for c in palette.characters}
+        for pair_item, raw_probs in zip(valid_pairs, probs_matrix):
+            top_char_idx = int(np.argmax(raw_probs[:num_chars]))
+            top_char_conf = float(raw_probs[top_char_idx])
+            char_name = palette.characters[top_char_idx].name
+            if top_char_conf > char_max_conf[char_name]:
+                char_max_conf[char_name] = top_char_conf
+
+        confirmed_anchors = {c for c, conf in char_max_conf.items() if conf >= 0.65}
+
         recognized_candidates: list[RecognizedCharacter] = []
-        for ((cy0, cx0, cy1, cx1), (fy0, fx0, fy1, fx1)), raw_probs in zip(valid_pairs, probs_matrix):
-            # Compute hair patch luminance in top 30% of candidate crop
+        for pair_item, raw_probs in zip(valid_pairs, probs_matrix):
+            (cy0, cx0, cy1, cx1), (fy0, fx0, fy1, fx1) = pair_item[0], pair_item[1]
+            is_yolo = getattr(pair_item, "is_yolo", False)
+
+            # Compute hair patch luminance in hair region (above and top-of crop)
             crop_patch = cv_img[cy0:cy1, cx0:cx1]
             crop_h = crop_patch.shape[0] if crop_patch is not None and crop_patch.size > 0 else 0
+            crop_w = crop_patch.shape[1] if crop_patch is not None and crop_patch.size > 0 else 0
             dark_hair_ratio = 0.0
             light_hair_ratio = 0.0
+            screentone_ratio = 0.0
             hair_lum = 0.5
+            has_hair_prior = False
             if crop_h >= 10:
-                hair_patch = crop_patch[: max(4, int(0.30 * crop_h)), :].astype(np.float32) / 255.0
-                hair_lum = float(np.mean(hair_patch))
-                dark_hair_ratio = float(np.mean(hair_patch < 0.35))
-                light_hair_ratio = float(np.mean(hair_patch > 0.82))
+                if is_yolo:
+                    is_body = (pair_item[0] == pair_item[1])
+                    if is_body:
+                        hy0 = cy0 + int(0.02 * crop_h)
+                        hy1 = cy0 + int(0.28 * crop_h)
+                        hx0 = cx0 + int(0.10 * crop_w)
+                        hx1 = cx1 - int(0.10 * crop_w)
+                    else:
+                        hy0 = max(0, cy0 - int(0.35 * crop_h))
+                        hy1 = min(cv_img.shape[0], cy0 + int(0.06 * crop_h))
+                        hx0 = max(0, cx0 - int(0.05 * crop_w))
+                        hx1 = min(cv_img.shape[1], cx1 + int(0.05 * crop_w))
+                else:
+                    hy0 = cy0 + int(0.05 * crop_h)
+                    hy1 = cy0 + int(0.35 * crop_h)
+                    hx0 = cx0 + int(0.15 * crop_w)
+                    hx1 = cx1 - int(0.15 * crop_w)
+                hair_patch = cv_img[hy0:hy1, hx0:hx1].astype(np.float32) / 255.0
+                if hair_patch.size >= 16 and np.mean(hair_patch < 0.88) >= 0.12:
+                    has_hair_prior = True
+                    hair_lum = float(np.mean(hair_patch))
+                    dark_hair_ratio = float(np.mean(hair_patch < 0.28))
+                    light_hair_ratio = float(np.mean(hair_patch > 0.85))
+                    screentone_ratio = float(np.mean((hair_patch >= 0.18) & (hair_patch <= 0.78)))
+
+            # Hairstyle structure prior: forehead bangs vs bare forehead (crew cut / buzz cut)
+            forehead_ink_ratio = 0.0
+            forehead_paper_ratio = 1.0
+            if crop_h >= 20 and crop_w >= 20:
+                fh_h = max(6, int(0.35 * crop_h))
+                forehead_patch = cv_img[cy0 : cy0 + fh_h, cx0:cx1].astype(np.float32) / 255.0
+                if forehead_patch.size >= 16:
+                    forehead_ink_ratio = float(np.mean(forehead_patch < 0.30))
+                    forehead_paper_ratio = float(np.mean(forehead_patch > 0.88))
 
             adjusted_probs = np.copy(raw_probs)
-            for c_idx, c in enumerate(palette.characters):
-                traits = getattr(c, "visual_traits", []) or []
-                c_hair_hex = getattr(c, "hair_hex", "")
-                is_black_hair = "black_hair" in traits
-                is_light_hair = "light_hair" in traits
-                if not is_black_hair and not is_light_hair and c_hair_hex:
-                    hx = c_hair_hex.strip().lstrip("#")
-                    if len(hx) >= 6:
-                        try:
-                            cr, cg, cb = int(hx[:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
-                            br = (cr + cg + cb) / 3.0
-                            if br < 55:
-                                is_black_hair = True
-                            elif br > 175:
-                                is_light_hair = True
-                        except Exception:
-                            pass
+            if has_hair_prior or (forehead_ink_ratio >= 0.32 or (forehead_ink_ratio < 0.22 and forehead_paper_ratio >= 0.50)):
+                for c_idx, c in enumerate(palette.characters):
+                    traits = getattr(c, "visual_traits", []) or preset_traits_map.get(c.name.lower(), [])
+                    c_hair_hex = getattr(c, "hair_hex", "")
+                    is_black_hair = ("black_hair" in traits) or ("dark_hair" in traits)
+                    is_screentone_hair = "screentone_hair" in traits
+                    is_light_hair = "light_hair" in traits
+                    if not is_black_hair and not is_light_hair and not is_screentone_hair and c_hair_hex:
+                        hx = c_hair_hex.strip().lstrip("#")
+                        if len(hx) >= 6:
+                            try:
+                                cr, cg, cb = int(hx[:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+                                br = (cr + cg + cb) / 3.0
+                                if br < 70:
+                                    is_black_hair = True
+                                elif br > 175:
+                                    is_light_hair = True
+                                else:
+                                    is_screentone_hair = True
+                            except Exception:
+                                pass
 
-                if is_black_hair:
-                    if dark_hair_ratio >= 0.35 or hair_lum < 0.40:
-                        adjusted_probs[c_idx] *= 1.35
-                    elif light_hair_ratio >= 0.70 and hair_lum > 0.75:
-                        adjusted_probs[c_idx] *= 0.50
-                elif is_light_hair:
-                    if light_hair_ratio >= 0.65 or hair_lum > 0.75:
-                        adjusted_probs[c_idx] *= 1.35
-                    elif dark_hair_ratio >= 0.45 or hair_lum < 0.35:
-                        adjusted_probs[c_idx] *= 0.50
+                    if has_hair_prior:
+                        if is_black_hair:
+                            if dark_hair_ratio >= 0.35 or hair_lum < 0.35:
+                                adjusted_probs[c_idx] *= 1.35
+                            elif screentone_ratio >= 0.20 or (hair_lum >= 0.50 and dark_hair_ratio < 0.20):
+                                adjusted_probs[c_idx] *= 0.20
+                            elif light_hair_ratio >= 0.70 and hair_lum > 0.75:
+                                adjusted_probs[c_idx] *= 0.20
+                        elif is_screentone_hair:
+                            if dark_hair_ratio >= 0.35 or hair_lum < 0.35:
+                                adjusted_probs[c_idx] *= 0.15
+                            elif screentone_ratio >= 0.18 or (hair_lum >= 0.48 and dark_hair_ratio < 0.22):
+                                adjusted_probs[c_idx] *= 2.0
+                                if c.name in confirmed_anchors:
+                                    adjusted_probs[c_idx] *= 1.5
+                        elif is_light_hair:
+                            if light_hair_ratio >= 0.65 or hair_lum > 0.75:
+                                adjusted_probs[c_idx] *= 1.80
+                            elif dark_hair_ratio >= 0.35 or hair_lum < 0.35:
+                                adjusted_probs[c_idx] *= 0.20
+
+                    # Forehead bangs vs bare forehead (crew cut / buzz cut)
+                    has_bangs = ("bangs" in traits) or ("fringe" in traits)
+                    is_cut = any(t in traits for t in ("crew_cut", "buzz_cut", "bald", "flat_top"))
+                    if forehead_ink_ratio >= 0.32:
+                        if has_bangs:
+                            adjusted_probs[c_idx] *= 2.5
+                        elif is_cut:
+                            adjusted_probs[c_idx] *= 0.15
+                    elif forehead_ink_ratio < 0.22 and forehead_paper_ratio >= 0.50:
+                        if is_cut:
+                            adjusted_probs[c_idx] *= 1.8
+                        elif has_bangs:
+                            adjusted_probs[c_idx] *= 0.30
 
             # Re-normalize adjusted probabilities
             adj_sum = float(np.sum(adjusted_probs))
@@ -1794,7 +2427,7 @@ class MangaCharacterRecognizer:
             top_idx = int(np.argmax(adjusted_probs))
             top_prob = float(adjusted_probs[top_idx])
 
-            # If the candidate crop was classified as neutral background/bubble, skip
+            # If the candidate was classified as neutral background/speech bubble/scenery, skip
             if top_idx >= num_chars:
                 continue
 
@@ -1802,7 +2435,7 @@ class MangaCharacterRecognizer:
             char_sum = float(np.sum(char_probs))
             rel_conf = (top_prob / char_sum) if char_sum > 0 else top_prob
 
-            if top_prob >= min_confidence or (rel_conf >= 0.50 and top_prob >= 0.18):
+            if top_prob >= min_confidence or (is_yolo and top_prob >= 0.25) or (rel_conf >= 0.45 and top_prob >= 0.18):
                 matched_char = palette.characters[top_idx]
                 norm_box = (
                     round(fy0 / float(h_img), 4),
@@ -1811,14 +2444,23 @@ class MangaCharacterRecognizer:
                     round(fx1 / float(w_img), 4),
                 )
                 effective_conf = min(0.99, round(max(top_prob, rel_conf * 0.85), 2))
+                if effective_conf < min_confidence:
+                    effective_conf = min_confidence
                 feats = [
                     f"clip_score:{top_prob:.2f}",
                     f"rel_score:{rel_conf:.2f}",
                 ]
-                if dark_hair_ratio >= 0.35:
-                    feats.append("dark_hair_prior")
-                elif light_hair_ratio >= 0.65:
-                    feats.append("light_hair_prior")
+                if is_yolo:
+                    feats.append("yolo_anchor")
+                if has_hair_prior:
+                    if dark_hair_ratio >= 0.35:
+                        feats.append("dark_hair_prior")
+                    elif light_hair_ratio >= 0.65:
+                        feats.append("light_hair_prior")
+                if forehead_ink_ratio >= 0.32:
+                    feats.append("bangs_prior")
+                elif forehead_ink_ratio < 0.22 and forehead_paper_ratio >= 0.50:
+                    feats.append("bare_forehead_prior")
 
                 recognized_candidates.append(
                     RecognizedCharacter(
@@ -1831,8 +2473,8 @@ class MangaCharacterRecognizer:
                 )
 
         # Non-Maximum Suppression:
-        # If candidate crop A overlaps heavily with candidate B, suppress the lower-confidence candidate
-        # so overlapping merged boxes don't contaminate colors.
+        # Suppress duplicate detections with high 2D spatial overlap.
+        # Avoid suppressing distinct characters sharing horizontal panel rows!
         sorted_candidates = sorted(recognized_candidates, key=lambda x: x.confidence, reverse=True)
         filtered_candidates: list[RecognizedCharacter] = []
         for cand in sorted_candidates:
@@ -1849,51 +2491,53 @@ class MangaCharacterRecognizer:
                     area_kb = h_kb * w_kb
                     inter = y_overlap * x_overlap
                     iou = inter / (area_b + area_kb - inter + 1e-6)
-                    v_overlap = y_overlap / min(h_b, h_kb)
-                    if (cand.name == keep.name and iou > 0.35) or (iou > 0.60) or (v_overlap > 0.75 and cand.confidence < 0.55):
+                    ioa = inter / min(area_b, area_kb)
+                    # Suppress duplicate detection of the SAME character:
+                    # - If spatial overlap exists (IoU > 0.08 or IoA > 0.30)
+                    # For different characters, suppress if heavy overlap (IoU > 0.55 or IoA > 0.70)
+                    if cand.name == keep.name:
+                        if iou > 0.08 or ioa > 0.30:
+                            suppressed = True
+                            break
+                    elif (iou > 0.55) or (ioa > 0.70 and cand.confidence < keep.confidence):
                         suppressed = True
                         break
             if not suppressed:
                 filtered_candidates.append(cand)
 
-        # Deduplicate per character: keep highest confidence
-        best_per_char: dict[str, RecognizedCharacter] = {}
-        for rc in filtered_candidates:
-            if rc.name not in best_per_char or rc.confidence > best_per_char[rc.name].confidence:
-                best_per_char[rc.name] = rc
-
         # Multi-character spatial deconfliction:
-        # If character A's bounding box spans a wide two-shot panel, and character B is localized
-        # within one half of that panel (e.g. left side), adjust character A's box to the other half.
-        for name_a, rc_a in best_per_char.items():
-            box_a = list(rc_a.bounding_box)
-            w_a = box_a[3] - box_a[1]
-            if w_a >= 0.50:
-                for name_b, rc_b in best_per_char.items():
-                    if name_a == name_b:
-                        continue
-                    box_b = rc_b.bounding_box
-                    w_b = box_b[3] - box_b[1]
-                    if (
-                        box_b[0] >= box_a[0] - 0.10
-                        and box_b[2] <= box_a[2] + 0.10
-                        and box_b[1] <= box_a[1] + 0.15
-                        and box_b[3] <= box_a[1] + 0.65 * w_a
-                    ):
-                        new_x0 = round(max(box_a[1] + 0.35 * w_a, box_b[3] - 0.08), 4)
-                        box_a[1] = new_x0
-                        rc_a.bounding_box = tuple(box_a)
-                    elif (
-                        box_b[0] >= box_a[0] - 0.10
-                        and box_b[2] <= box_a[2] + 0.10
-                        and box_b[3] >= box_a[3] - 0.15
-                        and box_b[1] >= box_a[1] + 0.35 * w_a
-                    ):
-                        new_x1 = round(min(box_a[3] - 0.35 * w_a, box_b[1] + 0.08), 4)
-                        box_a[3] = new_x1
-                        rc_a.bounding_box = tuple(box_a)
+        # If two different characters share a two-shot panel row with horizontal overlap,
+        # cleanly separate their boundaries at the midpoint between their centers.
+        for i_a in range(len(filtered_candidates)):
+            for i_b in range(i_a + 1, len(filtered_candidates)):
+                rc_a = filtered_candidates[i_a]
+                rc_b = filtered_candidates[i_b]
+                if rc_a.name == rc_b.name:
+                    continue
+                box_a = list(rc_a.bounding_box)
+                box_b = list(rc_b.bounding_box)
+                y_overlap = max(0.0, min(box_a[2], box_b[2]) - max(box_a[0], box_b[0]))
+                min_h = min(box_a[2] - box_a[0], box_b[2] - box_b[0])
+                if min_h > 0 and (y_overlap / min_h) >= 0.50:
+                    x_overlap = max(0.0, min(box_a[3], box_b[3]) - max(box_a[1], box_b[1]))
+                    if x_overlap > 0.03:
+                        cx_a = (box_a[1] + box_a[3]) / 2.0
+                        cx_b = (box_b[1] + box_b[3]) / 2.0
+                        split_x = round((cx_a + cx_b) / 2.0, 4)
+                        if cx_a < cx_b:
+                            if box_a[1] < split_x < box_b[3]:
+                                box_a[3] = split_x
+                                box_b[1] = split_x
+                                rc_a.bounding_box = tuple(box_a)
+                                rc_b.bounding_box = tuple(box_b)
+                        else:
+                            if box_b[1] < split_x < box_a[3]:
+                                box_b[3] = split_x
+                                box_a[1] = split_x
+                                rc_a.bounding_box = tuple(box_a)
+                                rc_b.bounding_box = tuple(box_b)
 
-        return sorted(best_per_char.values(), key=lambda x: x.confidence, reverse=True)
+        return sorted(filtered_candidates, key=lambda x: x.confidence, reverse=True)
 
     def _recognize_heuristics(
         self,
@@ -2461,12 +3105,31 @@ class MangaColorizerEngine:
         if not active_ex_path and exemplar_image_paths:
             active_ex_path = exemplar_image_paths[0]
 
-        # ── Page-specific Character Recognition & Palette Optimization ──
+        # Convert MangaPreset to CharacterPalette if needed
+        if character_palette is not None and not hasattr(character_palette, "build_hint_tensor"):
+            character_palette = CharacterPalette(
+                characters=[
+                    CharacterEntry(
+                        name=c.name,
+                        hair_hex=c.hair_hex,
+                        skin_hex=c.skin_hex,
+                        costume_hex=c.costume_hex,
+                        extra_hex=c.extra_hex,
+                        eye_hex=getattr(c, "eye_hex", ""),
+                        visual_traits=getattr(c, "visual_traits", []) or [],
+                        notes=getattr(c, "notes", ""),
+                    )
+                    for c in character_palette.characters
+                ],
+                preset_id=getattr(character_palette, "id", None),
+                preset_title=getattr(character_palette, "title", None),
+            )
+
         active_palette = character_palette
         recognized_chars: list[dict] = []
         rec_mode = (recognition_mode or "none").lower()
         if rec_mode not in ("none", "off", "disabled") and not skip_recognition and character_palette is not None and character_palette.characters:
-            if any(c.bounding_box is not None for c in character_palette.characters):
+            if any(getattr(c, "bounding_box", None) is not None for c in character_palette.characters):
                 active_palette = character_palette
                 recognized_chars = [
                     {
@@ -2475,7 +3138,7 @@ class MangaColorizerEngine:
                         "bounding_box": list(c.bounding_box),
                     }
                     for c in character_palette.characters
-                    if c.bounding_box
+                    if getattr(c, "bounding_box", None)
                 ]
             else:
                 try:
@@ -2679,7 +3342,9 @@ class MangaColorizerEngine:
         hint_dtype = torch.float16 if (self.use_fp16 and self.device in ("mps", "cuda")) else torch.float32
         if character_palette is not None and character_palette.characters:
             sketch_gray = img_pad[:, :, 0]
-            hint = character_palette.build_hint_tensor(pad_h, pad_w, device=self.device, sketch_gray=sketch_gray)
+            hint = character_palette.build_hint_tensor(
+                pad_h, pad_w, device=self.device, sketch_gray=sketch_gray, pad=pad
+            )
             if hint.dtype != hint_dtype:
                 hint = hint.to(dtype=hint_dtype)
             print(f"[MangaColorizer] Injected CharacterPalette neural hints for: {[c.name for c in character_palette.characters]}")
@@ -2779,11 +3444,11 @@ class MangaColorizerEngine:
         # 7. Post-processing color preparation
         gray_orig = cv2.cvtColor(orig_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
 
-        # 8. Native Line Art Multiply Blending (100% crisp ink, no midtone crushing)
-        # Line art multiply blending: preserve 100% ink sharpness on pure black/dark ink lines,
-        # while keeping vibrant midtones uncrushed.
-        ink_threshold = max(0.18, 0.35 * line_preserve)
-        line_multiplier = np.clip((gray_orig - 0.04) / ink_threshold, 0.0, 1.0)
+        # 8. Native Line Art Multiply Blending (100% crisp ink, no screentone crushing)
+        # Preserve 100% ink sharpness on pure black pen outlines (< 0.10)
+        # while keeping halftone screentone dots and soft gradients smooth and uncrushed (no sandy texture)
+        ink_threshold = max(0.08, 0.14 * line_preserve)
+        line_multiplier = np.clip(gray_orig / ink_threshold, 0.0, 1.0)
         ink_floor = 0.12 * sat_boost
         effective_mult = np.maximum(line_multiplier, ink_floor)
         final_rgb = np.clip(
