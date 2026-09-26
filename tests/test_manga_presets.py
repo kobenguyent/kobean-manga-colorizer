@@ -1079,6 +1079,8 @@ def test_offline_clip_character_recognition():
     if len(recs) > 1:
         assert top_char.confidence >= recs[1].confidence
     assert top_char.detection_method == "offline_clip_ai"
+    assert any(f.startswith("clip_score:") for f in top_char.matched_features)
+    assert any(f.startswith("rel_score:") for f in top_char.matched_features)
     assert top_char.confidence >= 0.40
     assert top_char.bounding_box is not None
     assert len(top_char.bounding_box) == 4
@@ -1493,4 +1495,3 @@ def test_preview_preserves_recognized_characters(tmp_path):
         shutil.rmtree(sess_dir, ignore_errors=True)
         SESSIONS.pop(session_id, None)
         SESSION_PALETTES.pop(session_id, None)
-
