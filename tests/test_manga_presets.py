@@ -1073,9 +1073,9 @@ def test_offline_clip_character_recognition():
 
     assert len(recs) >= 1
     # The exact top-1 label can vary slightly across model/runtime versions.
-    # Verify CLIP still returns a valid top-ranked One Piece character.
+    # For this fixture we expect one of the known lead candidates.
     top_char = recs[0]
-    assert top_char.name in {c.name for c in palette.characters}
+    assert top_char.name in {"Tony Tony Chopper", "Monkey D. Luffy"}
     if len(recs) > 1:
         assert top_char.confidence >= recs[1].confidence
     assert top_char.detection_method == "offline_clip_ai"
@@ -1493,5 +1493,4 @@ def test_preview_preserves_recognized_characters(tmp_path):
         shutil.rmtree(sess_dir, ignore_errors=True)
         SESSIONS.pop(session_id, None)
         SESSION_PALETTES.pop(session_id, None)
-
 
