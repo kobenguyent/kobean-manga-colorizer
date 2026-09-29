@@ -224,27 +224,30 @@ class SeriesAdapterTrainer:
 
     def load_adapter(self, series_key: str, device: str = "cpu") -> Optional[SeriesResidualAdapter]:
         """Loads and caches a SeriesResidualAdapter on the specified device."""
-        if series_key in self.cached_models:
-            model = self.cached_models[series_key]
-            model.to(device)
-            model.eval()
-            return model
+        from colorizer_engine import gpu_inference_scope
 
-        adapter_path = self.get_adapter_path(series_key)
-        if not adapter_path.exists():
-            return None
+        with gpu_inference_scope(device):
+            if series_key in self.cached_models:
+                model = self.cached_models[series_key]
+                model.to(device)
+                model.eval()
+                return model
 
-        try:
-            model = SeriesResidualAdapter()
-            state_dict = torch.load(str(adapter_path), map_location=device)
-            model.load_state_dict(state_dict)
-            model.to(device)
-            model.eval()
-            self.cached_models[series_key] = model
-            return model
-        except Exception as e:
-            print(f"[SeriesAdapter Error] Failed to load adapter for {series_key}: {e}")
-            return None
+            adapter_path = self.get_adapter_path(series_key)
+            if not adapter_path.exists():
+                return None
+
+            try:
+                model = SeriesResidualAdapter()
+                state_dict = torch.load(str(adapter_path), map_location=device)
+                model.load_state_dict(state_dict)
+                model.to(device)
+                model.eval()
+                self.cached_models[series_key] = model
+                return model
+            except Exception as e:
+                print(f"[SeriesAdapter Error] Failed to load adapter for {series_key}: {e}")
+                return None
 
     def train_series_sync(
         self,
@@ -320,7 +323,10 @@ class SeriesAdapterTrainer:
                         torch.from_numpy(blurred).permute(2, 0, 1).float() / 127.5 - 1.0
                     ).unsqueeze(0)
 
-                data_samples.append((base_t.to(device), sketch_t.to(device), target_t.to(device)))
+                from colorizer_engine import gpu_inference_scope
+
+                with gpu_inference_scope(device):
+                    data_samples.append((base_t.to(device), sketch_t.to(device), target_t.to(device)))
             except Exception as err:
                 print(f"[SeriesAdapter Training Warning] Skipping sample {p}: {err}")
 
@@ -329,9 +335,10 @@ class SeriesAdapterTrainer:
             raise ValueError("Failed to load any valid training samples.")
 
         # Initialize or load existing adapter model
-        model = self.load_adapter(series_key, device=device)
-        if model is None:
-            model = SeriesResidualAdapter().to(device)
+        with gpu_inference_scope(device):
+            model = self.load_adapter(series_key, device=device)
+            if model is None:
+                model = SeriesResidualAdapter().to(device)
 
         model.train()
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -347,29 +354,32 @@ class SeriesAdapterTrainer:
             sample_idx = (step - 1) % num_samples
             base_t, sketch_t, target_t = data_samples[sample_idx]
 
-            optimizer.zero_grad()
+            from colorizer_engine import gpu_inference_scope
 
-            pred_adapted = model(base_t, sketch_t)
+            with gpu_inference_scope(device):
+                optimizer.zero_grad()
 
-            # Losses:
-            # 1. Pixel L1 loss
-            l1_loss = F.l1_loss(pred_adapted, target_t)
+                pred_adapted = model(base_t, sketch_t)
 
-            # 2. Color channel mean / hue harmony loss
-            mean_pred = torch.mean(pred_adapted, dim=(2, 3))
-            mean_tgt = torch.mean(target_t, dim=(2, 3))
-            color_loss = F.mse_loss(mean_pred, mean_tgt)
+                # Losses:
+                # 1. Pixel L1 loss
+                l1_loss = F.l1_loss(pred_adapted, target_t)
 
-            # 3. Speech bubble / high-white paper protection loss
-            white_mask = (target_t > 0.90).float()
-            bubble_loss = (
-                torch.sum(torch.abs(pred_adapted - target_t) * white_mask)
-                / (torch.sum(white_mask) + 1e-6)
-            )
+                # 2. Color channel mean / hue harmony loss
+                mean_pred = torch.mean(pred_adapted, dim=(2, 3))
+                mean_tgt = torch.mean(target_t, dim=(2, 3))
+                color_loss = F.mse_loss(mean_pred, mean_tgt)
 
-            total_loss = l1_loss + 0.4 * color_loss + 0.3 * bubble_loss
-            total_loss.backward()
-            optimizer.step()
+                # 3. Speech bubble / high-white paper protection loss
+                white_mask = (target_t > 0.90).float()
+                bubble_loss = (
+                    torch.sum(torch.abs(pred_adapted - target_t) * white_mask)
+                    / (torch.sum(white_mask) + 1e-6)
+                )
+
+                total_loss = l1_loss + 0.4 * color_loss + 0.3 * bubble_loss
+                total_loss.backward()
+                optimizer.step()
 
             final_loss = float(total_loss.item())
 

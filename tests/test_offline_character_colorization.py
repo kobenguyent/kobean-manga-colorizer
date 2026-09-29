@@ -321,3 +321,46 @@ async def test_colorization_worker_with_offline_recognition():
         SESSIONS.pop(session_id, None)
         SESSION_PALETTES.pop(session_id, None)
 
+
+def test_concurrent_mps_inference_thread_safety(tmp_path):
+    """
+    Verifies that concurrent multithreaded execution of colorize_page on Apple Silicon MPS
+    is properly serialized via gpu_inference_scope without Metal command encoder crashes.
+    """
+    import threading
+
+    engine = MangaColorizerEngine()
+    test_img = Path("demo/original.png")
+    if not test_img.exists():
+        test_img = tmp_path / "test.png"
+        Image.new("L", (200, 200), color=230).save(test_img)
+
+    results = []
+    errors = []
+
+    def _worker(thread_idx: int):
+        try:
+            out_p = tmp_path / f"out_{thread_idx}.jpg"
+            res = engine.colorize_page(
+                image_path=str(test_img),
+                output_path=str(out_p),
+                model_provider="resnext_generator",
+                model_name="resnext-v2-manga",
+                recognition_mode="auto",
+            )
+            results.append(res)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert len(errors) == 0, f"Concurrent inference produced errors: {errors}"
+    assert len(results) == 3, f"Expected 3 completed results, got {len(results)}"
+    for r in results:
+        assert r["status"] == "success"
+
+

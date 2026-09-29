@@ -6518,6 +6518,8 @@ async function recolorizeSelected() {
     selected_pages:   pagesToRecolorize,
     force_recolorize: true,
     skip_if_colored:  false,
+    denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
+    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
   };
 
   // UI feedback

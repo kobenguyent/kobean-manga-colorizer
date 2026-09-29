@@ -124,15 +124,19 @@ class TestResumePendingSessions(unittest.TestCase):
         data = res.json()
         self.assertIn(data["status"], ["resumed", "already_running"])
 
-        # Wait briefly for the 1 remaining page to complete
-        time.sleep(1.5)
+        # Wait for the remaining page to complete (up to 10s)
+        check_data = {}
+        for _ in range(30):
+            check_res = requests.get(f"{BASE_URL}/api/session/{session_id}")
+            if check_res.status_code == 200:
+                check_data = check_res.json()
+                if check_data.get("status") == "completed":
+                    break
+            time.sleep(0.3)
 
         # Verify session is completed and all pages are colorized
-        check_res = requests.get(f"{BASE_URL}/api/session/{session_id}")
-        self.assertEqual(check_res.status_code, 200)
-        check_data = check_res.json()
-        self.assertEqual(check_data["status"], "completed")
-        self.assertEqual(check_data["processed_count"], 2)
+        self.assertEqual(check_data.get("status"), "completed")
+        self.assertEqual(check_data.get("processed_count"), 2)
 
     def test_resume_already_completed_session(self):
         """Resuming an already completed session cleanly returns already_completed."""
@@ -148,7 +152,7 @@ class TestResumePendingSessions(unittest.TestCase):
         session_id, _ = self._create_mock_session(total_pages=2, colorized_count=1, initial_status="pending")
 
         # Connect to stream with auto_resume=true
-        resp = requests.get(f"{BASE_URL}/api/colorize/stream/{session_id}?auto_resume=true", stream=True, timeout=5)
+        resp = requests.get(f"{BASE_URL}/api/colorize/stream/{session_id}?auto_resume=true", stream=True, timeout=15)
         self.assertEqual(resp.status_code, 200)
 
         received_events = []

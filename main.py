@@ -264,7 +264,9 @@ class ColorizeRequest(BaseModel):
     force_recolorize: bool = False  # when True, re-run even if page already has a colorized file
     denoise_screentone: bool = False
     denoise_sigma: int = 25
-    recognition_mode: Optional[str] = "none"
+    recognition_mode: Optional[str] = "auto"
+    active_character_names: Optional[list[str]] = None
+    page_character_overrides: Optional[dict[int, list[str]]] = None
 
 
 class BatchColorizeRequest(BaseModel):
@@ -279,7 +281,8 @@ class BatchColorizeRequest(BaseModel):
     skip_if_colored: bool = False
     denoise_screentone: bool = False
     denoise_sigma: int = 25
-    recognition_mode: Optional[str] = "none"
+    recognition_mode: Optional[str] = "auto"
+    preset_id: Optional[str] = None
 
 
 class BatchExportRequest(BaseModel):
@@ -339,7 +342,7 @@ class PreviewRequest(BaseModel):
     denoise_screentone: bool = False
     denoise_sigma: int = 25
     active_character_names: Optional[list[str]] = None
-    recognition_mode: Optional[str] = "none"
+    recognition_mode: Optional[str] = "auto"
 
 
 # ── Character Palette models ─────────────────────────────────────────
@@ -378,6 +381,7 @@ class PaletteDeleteRequest(BaseModel):
 class PaletteApplyPresetRequest(BaseModel):
     session_id: str
     preset_id: str
+    apply_to_batch: Optional[bool] = True
 
 
 class PaletteOnlineSearchRequest(BaseModel):
@@ -566,7 +570,29 @@ def _resolve_base_palette(session_id: str) -> CharacterPalette:
             save_session_palette(session_id, pal)
             sess["detected_preset"] = detected.id
             sess["preset_title"] = detected.title
-            return pal
+    # Fallback 2: inherit palette from sibling session in the same batch_id
+    if sess and sess.get("batch_id"):
+        batch_id = sess["batch_id"]
+        for other_sid, other_sess in list(SESSIONS.items()):
+            if other_sid != session_id and other_sess.get("batch_id") == batch_id:
+                other_pal = SESSION_PALETTES.get(other_sid)
+                if not other_pal:
+                    other_pal_path = STORAGE_DIR / other_sid / "palette.json"
+                    if other_pal_path.exists():
+                        try:
+                            with open(other_pal_path, "r", encoding="utf-8") as f:
+                                other_pal = CharacterPalette.from_dict(json.load(f))
+                        except Exception:
+                            pass
+                if other_pal and other_pal.characters:
+                    cloned = copy.deepcopy(other_pal)
+                    SESSION_PALETTES[session_id] = cloned
+                    save_session_palette(session_id, cloned)
+                    sess["detected_preset"] = other_sess.get("detected_preset") or other_pal.preset_id
+                    sess["preset_title"] = other_sess.get("preset_title") or other_pal.preset_title
+                    if not sess.get("recommended_style") and other_sess.get("recommended_style"):
+                        sess["recommended_style"] = other_sess["recommended_style"]
+                    return cloned
 
     new_pal = CharacterPalette()
     SESSION_PALETTES[session_id] = new_pal
@@ -740,7 +766,7 @@ async def upload_files(
 
 
 def normalize_directory_path(raw_path: str) -> Path:
-    """
+    r"""
     Normalizes a user-supplied directory path from various browser/OS formats:
     - Strips surrounding quotes ("..." or '...')
     - Strips file:// or file: URL schemes
@@ -1535,10 +1561,25 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                 if rec_mode.lower() in ("none", "off", "disabled"):
                     rec_mode = "none"
 
+                # Check for active character names declared on request or page
+                page_active_names = None
+                if getattr(req, "page_character_overrides", None) and idx in req.page_character_overrides:
+                    page_active_names = req.page_character_overrides[idx]
+                elif getattr(req, "active_character_names", None):
+                    page_active_names = req.active_character_names
+                elif page_info.get("active_character_names"):
+                    page_active_names = page_info["active_character_names"]
+
+                if palette and page_active_names:
+                    palette = copy.deepcopy(palette)
+                    palette.characters = [
+                        c for c in palette.characters if c.name in page_active_names
+                    ]
+
                 page_recs = page_info.get("recognized_characters", [])
                 active_palette = palette
                 skip_rec = False
-                if palette and page_recs:
+                if palette and page_recs and not getattr(req, "force_recolorize", False):
                     actual_recs = [RecognizedCharacter.from_dict(r) for r in page_recs if isinstance(r, dict)]
                     active_palette = palette.optimize_for_page(actual_recs)
                     skip_rec = True
@@ -1602,6 +1643,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     page_info["adapter_used"] = True
                 if res.get("recognized_characters"):
                     page_info["recognized_characters"] = res["recognized_characters"]
+                elif page_recs:
+                    page_info["recognized_characters"] = page_recs
 
                 # Phase 4: Automated Quality & Confidence-Gated Auto-Harvesting
                 q_score = res.get("quality_score")
@@ -2035,6 +2078,8 @@ async def apply_preset_to_session(req: PaletteApplyPresetRequest):
                 costume_hex=c.costume_hex,
                 extra_hex=c.extra_hex,
                 eye_hex=getattr(c, "eye_hex", ""),
+                visual_traits=getattr(c, "visual_traits", []) or [],
+                notes=getattr(c, "notes", ""),
             )
             for c in preset.characters
         ],
@@ -2045,10 +2090,26 @@ async def apply_preset_to_session(req: PaletteApplyPresetRequest):
     save_session_palette(req.session_id, palette)
 
     sess["detected_preset"] = preset.id
+    sess["preset_id"] = preset.id
     sess["preset_title"] = preset.title
     if preset.recommended_style:
         sess["recommended_style"] = preset.recommended_style
     save_session_meta(req.session_id)
+
+    # Propagate preset to all sibling sessions in same batch_id if applicable
+    if getattr(req, "apply_to_batch", True) and sess.get("batch_id"):
+        batch_id = sess["batch_id"]
+        for other_sid, other_sess in list(SESSIONS.items()):
+            if other_sid != req.session_id and other_sess.get("batch_id") == batch_id:
+                sibling_pal = copy.deepcopy(palette)
+                SESSION_PALETTES[other_sid] = sibling_pal
+                save_session_palette(other_sid, sibling_pal)
+                other_sess["detected_preset"] = preset.id
+                other_sess["preset_id"] = preset.id
+                other_sess["preset_title"] = preset.title
+                if preset.recommended_style:
+                    other_sess["recommended_style"] = preset.recommended_style
+                save_session_meta(other_sid)
 
     return JSONResponse({
         "status": "ok",
@@ -3414,6 +3475,48 @@ async def start_batch_colorization(req: BatchColorizeRequest):
         "session_ids": valid_sessions,
     }
 
+    # Propagate preset to all sessions in the batch if missing
+    batch_preset_id = getattr(req, "preset_id", None)
+    if not batch_preset_id:
+        for sid in valid_sessions:
+            spal = SESSION_PALETTES.get(sid) or _resolve_base_palette(sid)
+            if spal and spal.characters and spal.preset_id:
+                batch_preset_id = spal.preset_id
+                break
+
+    if batch_preset_id:
+        preset_ref = get_preset_by_id(batch_preset_id)
+        if preset_ref:
+            for sid in valid_sessions:
+                spal = SESSION_PALETTES.get(sid)
+                if not spal or not spal.characters:
+                    new_pal = CharacterPalette(
+                        characters=[
+                            CharacterEntry(
+                                name=c.name,
+                                hair_hex=c.hair_hex,
+                                skin_hex=c.skin_hex,
+                                costume_hex=c.costume_hex,
+                                extra_hex=c.extra_hex,
+                                eye_hex=getattr(c, "eye_hex", ""),
+                                visual_traits=getattr(c, "visual_traits", []) or [],
+                                notes=getattr(c, "notes", ""),
+                            )
+                            for c in preset_ref.characters
+                        ],
+                        preset_id=preset_ref.id,
+                        preset_title=preset_ref.title,
+                    )
+                    SESSION_PALETTES[sid] = new_pal
+                    save_session_palette(sid, new_pal)
+                    s_obj = SESSIONS.get(sid)
+                    if s_obj:
+                        s_obj["detected_preset"] = preset_ref.id
+                        s_obj["preset_title"] = preset_ref.title
+                        if preset_ref.recommended_style and not s_obj.get("recommended_style"):
+                            s_obj["recommended_style"] = preset_ref.recommended_style
+                        save_session_meta(sid)
+
     async def _run_batch():
         global CURRENT_BATCH
         try:
@@ -3465,6 +3568,9 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     contrast=req.contrast,
                     line_preserve=req.line_preserve,
                     skip_if_colored=req.skip_if_colored,
+                    denoise_screentone=req.denoise_screentone,
+                    denoise_sigma=req.denoise_sigma,
+                    recognition_mode=req.recognition_mode or "auto",
                 )
                 task = asyncio.current_task()
                 if task:

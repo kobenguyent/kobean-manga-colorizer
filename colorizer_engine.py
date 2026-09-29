@@ -1,12 +1,19 @@
 import base64
+import contextlib
 import copy
 import io
 import os
 import re
 import shutil
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
+
+# Set environment variables for robust MPS operation on Apple Silicon
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+os.environ.setdefault("YOLO_AUTOINSTALL", "0")
 
 import cv2
 import numpy as np
@@ -14,6 +21,28 @@ import requests
 import torch
 from PIL import Image
 from torchvision.transforms import ToTensor
+
+# ─────────────────────────────────────────────────────────────────────
+#  Thread-Safe GPU / MPS Serialization Lock
+# ─────────────────────────────────────────────────────────────────────
+# PyTorch's MPS backend on Apple Silicon is not thread-safe for concurrent
+# command encoding across multiple threads. Concurrent calls trigger:
+#   -[AGXG16XFamilyCommandBuffer tryCoalescingPreviousComputeCommandEncoderWithConfig:nextEncoderClass:]:1094:
+#   failed assertion 'A command encoder is already encoding to this command buffer'
+# GPU_INFERENCE_LOCK serializes all Metal / GPU execution and synchronizes the MPS stream.
+GPU_INFERENCE_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def gpu_inference_scope(device: Optional[str] = None):
+    """
+    Context manager to serialize access to the GPU (especially Apple Silicon MPS).
+    Ensures only one thread encodes or executes commands on the Metal command buffer at a time,
+    preventing concurrent encoder collisions without causing command buffer commit conflicts.
+    """
+    with GPU_INFERENCE_LOCK:
+        yield
+
 
 # Import neural network modules from Manga Comic Colorization v2 architecture
 try:
@@ -1871,23 +1900,27 @@ class MangaCharacterRecognizer:
         if cls._clip_model is not None and cls._clip_processor is not None:
             return cls._clip_model, cls._clip_processor, cls._clip_device
 
-        try:
-            from transformers import CLIPModel, CLIPProcessor
+        with GPU_INFERENCE_LOCK:
+            if cls._clip_model is not None and cls._clip_processor is not None:
+                return cls._clip_model, cls._clip_processor, cls._clip_device
 
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
-            model_name = "openai/clip-vit-base-patch32"
-            processor = CLIPProcessor.from_pretrained(model_name)
-            model = CLIPModel.from_pretrained(model_name).to(device)
-            model.eval()
+            try:
+                from transformers import CLIPModel, CLIPProcessor
 
-            cls._clip_model = model
-            cls._clip_processor = processor
-            cls._clip_device = device
-            print(f"[MangaCharacterRecognizer] Loaded offline CLIP model on {device}")
-            return cls._clip_model, cls._clip_processor, cls._clip_device
-        except Exception as e:
-            print(f"[MangaCharacterRecognizer WARNING] Could not load offline CLIP model: {e}")
-            return None, None, None
+                device = "mps" if torch.backends.mps.is_available() else "cpu"
+                model_name = "openai/clip-vit-base-patch32"
+                processor = CLIPProcessor.from_pretrained(model_name)
+                model = CLIPModel.from_pretrained(model_name).to(device)
+                model.eval()
+
+                cls._clip_model = model
+                cls._clip_processor = processor
+                cls._clip_device = device
+                print(f"[MangaCharacterRecognizer] Loaded offline CLIP model on {device}")
+                return cls._clip_model, cls._clip_processor, cls._clip_device
+            except Exception as e:
+                print(f"[MangaCharacterRecognizer WARNING] Could not load offline CLIP model: {e}")
+                return None, None, None
 
     @classmethod
     def _ensure_manga_yolo(cls):
@@ -1895,20 +1928,24 @@ class MangaCharacterRecognizer:
         if cls._yolo_model is not None:
             return cls._yolo_model, cls._yolo_device
 
-        try:
-            from ultralytics import YOLO
-            from huggingface_hub import hf_hub_download
+        with GPU_INFERENCE_LOCK:
+            if cls._yolo_model is not None:
+                return cls._yolo_model, cls._yolo_device
 
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
-            model_path = hf_hub_download(repo_id="deepghs/manga109_yolo", filename="v2023.12.07_s/model.pt")
-            model = YOLO(model_path)
-            cls._yolo_model = model
-            cls._yolo_device = device
-            print(f"[MangaCharacterRecognizer] Loaded offline Manga109 YOLO detector on {device}")
-            return cls._yolo_model, cls._yolo_device
-        except Exception as e:
-            print(f"[MangaCharacterRecognizer WARNING] Could not load Manga109 YOLO model: {e}")
-            return None, None
+            try:
+                from ultralytics import YOLO
+                from huggingface_hub import hf_hub_download
+
+                device = "mps" if torch.backends.mps.is_available() else "cpu"
+                model_path = hf_hub_download(repo_id="deepghs/manga109_yolo", filename="v2023.12.07_s/model.pt")
+                model = YOLO(model_path)
+                cls._yolo_model = model
+                cls._yolo_device = device
+                print(f"[MangaCharacterRecognizer] Loaded offline Manga109 YOLO detector on {device}")
+                return cls._yolo_model, cls._yolo_device
+            except Exception as e:
+                print(f"[MangaCharacterRecognizer WARNING] Could not load Manga109 YOLO model: {e}")
+                return None, None
 
     def _detect_manga_panels(self, gray: np.ndarray) -> list[tuple[int, int, int, int]]:
         """
@@ -2099,100 +2136,101 @@ class MangaCharacterRecognizer:
         if not palette or not palette.characters:
             return []
 
-        mode = (recognition_mode or "auto").lower()
+        with gpu_inference_scope(getattr(self, "device", "mps")):
+            mode = (recognition_mode or "auto").lower()
 
-        results: list[RecognizedCharacter] = []
+            results: list[RecognizedCharacter] = []
 
-        # 1. Explicit Google Gemini cloud vision mode
-        if mode in ("gemini", "cloud", "gemini_multimodal"):
-            gemini_key = (
-                api_key
-                or os.environ.get("GOOGLE_API_KEY", "")
-                or os.environ.get("GEMINI_API_KEY", "")
-            )
-            if gemini_key:
-                try:
-                    res = self._recognize_with_gemini(
-                        image_path=image_path,
-                        palette=palette,
-                        api_key=gemini_key,
-                        model_name=model_name,
-                    )
-                    if res:
-                        results = res
-                except Exception as e:
-                    print(f"[MangaCharacterRecognizer] Gemini recognition error: {e}")
-            if not results:
-                clip_res = self._recognize_with_clip(image_path, palette, min_confidence)
-                if clip_res:
-                    results = clip_res
-                else:
-                    results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
-
-        # 2. Explicit Fast Visual Heuristics mode
-        elif mode in ("heuristics", "fast", "visual_heuristic"):
-            results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
-
-        # 3. Explicit Offline Pre-trained Neural AI (Manga109 YOLO + CLIP) mode
-        elif mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai", "manga_yolo", "offline_manga_ai", "yolo_clip"):
-            try:
-                res = self._recognize_with_clip(
-                    image_path=image_path,
-                    palette=palette,
-                    min_confidence=min_confidence,
+            # 1. Explicit Google Gemini cloud vision mode
+            if mode in ("gemini", "cloud", "gemini_multimodal"):
+                gemini_key = (
+                    api_key
+                    or os.environ.get("GOOGLE_API_KEY", "")
+                    or os.environ.get("GEMINI_API_KEY", "")
                 )
-                if res:
-                    results = res
-            except Exception as e:
-                print(f"[MangaCharacterRecognizer WARNING] Offline CLIP error: {e}")
-            if not results:
+                if gemini_key:
+                    try:
+                        res = self._recognize_with_gemini(
+                            image_path=image_path,
+                            palette=palette,
+                            api_key=gemini_key,
+                            model_name=model_name,
+                        )
+                        if res:
+                            results = res
+                    except Exception as e:
+                        print(f"[MangaCharacterRecognizer] Gemini recognition error: {e}")
+                if not results:
+                    clip_res = self._recognize_with_clip(image_path, palette, min_confidence)
+                    if clip_res:
+                        results = clip_res
+                    else:
+                        results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
+
+            # 2. Explicit Fast Visual Heuristics mode
+            elif mode in ("heuristics", "fast", "visual_heuristic"):
                 results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
 
-        # 4. Auto mode (Best Available: Gemini -> Offline CLIP -> Fast Heuristics)
-        else:
-            gemini_key = (
-                api_key
-                or os.environ.get("GOOGLE_API_KEY", "")
-                or os.environ.get("GEMINI_API_KEY", "")
-            )
-            if gemini_key:
+            # 3. Explicit Offline Pre-trained Neural AI (Manga109 YOLO + CLIP) mode
+            elif mode in ("offline_ai", "clip", "offline_clip_ai", "local_ai", "manga_yolo", "offline_manga_ai", "yolo_clip"):
                 try:
-                    gemini_results = self._recognize_with_gemini(
-                        image_path=image_path,
-                        palette=palette,
-                        api_key=gemini_key,
-                        model_name=model_name,
-                    )
-                    if gemini_results:
-                        results = gemini_results
-                except Exception as e:
-                    print(f"[MangaCharacterRecognizer] Gemini recognition fallback: {e}")
-
-            if not results:
-                try:
-                    clip_results = self._recognize_with_clip(
+                    res = self._recognize_with_clip(
                         image_path=image_path,
                         palette=palette,
                         min_confidence=min_confidence,
                     )
-                    if clip_results:
-                        results = clip_results
+                    if res:
+                        results = res
                 except Exception as e:
-                    print(f"[MangaCharacterRecognizer] Offline CLIP fallback: {e}")
+                    print(f"[MangaCharacterRecognizer WARNING] Offline CLIP error: {e}")
+                if not results:
+                    results = self._recognize_heuristics(image_path, palette, page_text, min_confidence)
 
-            if not results:
-                results = self._recognize_heuristics(
-                    image_path=image_path,
-                    palette=palette,
-                    page_text=page_text,
-                    min_confidence=min_confidence,
+            # 4. Auto mode (Best Available: Gemini -> Offline CLIP -> Fast Heuristics)
+            else:
+                gemini_key = (
+                    api_key
+                    or os.environ.get("GOOGLE_API_KEY", "")
+                    or os.environ.get("GEMINI_API_KEY", "")
                 )
+                if gemini_key:
+                    try:
+                        gemini_results = self._recognize_with_gemini(
+                            image_path=image_path,
+                            palette=palette,
+                            api_key=gemini_key,
+                            model_name=model_name,
+                        )
+                        if gemini_results:
+                            results = gemini_results
+                    except Exception as e:
+                        print(f"[MangaCharacterRecognizer] Gemini recognition fallback: {e}")
 
-        # Ensure all recognized names are strictly canonicalized against palette
-        for r in results:
-            r.name = self._canonicalize_name(r.name, palette)
+                if not results:
+                    try:
+                        clip_results = self._recognize_with_clip(
+                            image_path=image_path,
+                            palette=palette,
+                            min_confidence=min_confidence,
+                        )
+                        if clip_results:
+                            results = clip_results
+                    except Exception as e:
+                        print(f"[MangaCharacterRecognizer] Offline CLIP fallback: {e}")
 
-        return results
+                if not results:
+                    results = self._recognize_heuristics(
+                        image_path=image_path,
+                        palette=palette,
+                        page_text=page_text,
+                        min_confidence=min_confidence,
+                    )
+
+            # Ensure all recognized names are strictly canonicalized against palette
+            for r in results:
+                r.name = self._canonicalize_name(r.name, palette)
+
+            return results
 
     def _recognize_with_gemini(
         self,
@@ -3419,6 +3457,67 @@ class MangaColorizerEngine:
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
+        Serializes all execution through gpu_inference_scope to guarantee Apple Silicon Metal
+        command buffer safety across concurrent threads.
+        """
+        if skip_if_colored and is_colored_page(image_path):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            shutil.copy2(image_path, output_path)
+            print(f"[MangaColorizer] Skipped (already colored): {Path(image_path).name}")
+            return {
+                "status": "skipped_colored",
+                "engine": "color_detection",
+                "style": style,
+                "output_path": output_path,
+            }
+
+        with gpu_inference_scope(self.device):
+            return self._colorize_page_impl(
+                image_path=image_path,
+                output_path=output_path,
+                model_provider=model_provider,
+                model_name=model_name,
+                api_key=api_key,
+                style=style,
+                saturation=saturation,
+                contrast=contrast,
+                line_preserve=line_preserve,
+                skip_if_colored=skip_if_colored,
+                character_palette=character_palette,
+                denoise_screentone=denoise_screentone,
+                denoise_sigma=denoise_sigma,
+                recognition_mode=recognition_mode,
+                skip_recognition=skip_recognition,
+                exemplar_image_path=exemplar_image_path,
+                exemplar_image_paths=exemplar_image_paths,
+                series_key=series_key,
+                use_series_adapter=use_series_adapter,
+            )
+
+    def _colorize_page_impl(
+        self,
+        image_path: str,
+        output_path: str,
+        model_provider: str = "resnext_generator",
+        model_name: str = "resnext-v2-manga",
+        api_key: str = "",
+        style: str = "natural",
+        saturation: float = 0.7,
+        contrast: float = 1.0,
+        line_preserve: float = 0.66,
+        skip_if_colored: bool = False,
+        character_palette: Optional["CharacterPalette"] = None,
+        denoise_screentone: bool = False,
+        denoise_sigma: int = 25,
+        recognition_mode: str = "auto",
+        skip_recognition: bool = False,
+        exemplar_image_path: Optional[str] = None,
+        exemplar_image_paths: Optional[list[str]] = None,
+        series_key: Optional[str] = None,
+        use_series_adapter: bool = True,
+    ) -> dict:
+        """
+        Public colorization API called by background workers and preview endpoints.
 
         Args:
             skip_if_colored:    When True, pages that already contain color are
@@ -3705,7 +3804,8 @@ class MangaColorizerEngine:
         # 4. Authentic Neural Inference (Automatic Manga Colorization)
         adapter_used = False
         with torch.inference_mode():
-            fake_color, _ = self.colorizer_model(torch.cat([tens_in, hint], 1))
+            model_inp = torch.cat([tens_in, hint], 1).contiguous()
+            fake_color, _ = self.colorizer_model(model_inp)
             fake_color = fake_color.detach()
 
             # 4b. Apply Series LoRA / Residual Adapter if trained for this series (Phase 3)
@@ -3714,8 +3814,8 @@ class MangaColorizerEngine:
                 if adapter is not None:
                     try:
                         adapter = adapter.to(device=self.device, dtype=fake_color.dtype)
-                        adapter_tens = tens_in[:, 0:1].to(dtype=fake_color.dtype)
-                        fake_color = adapter(fake_color, adapter_tens)
+                        adapter_tens = tens_in[:, 0:1].to(dtype=fake_color.dtype).contiguous()
+                        fake_color = adapter(fake_color.contiguous(), adapter_tens)
                         adapter_used = True
                         print(f"[MangaColorizer] Series LoRA Adapter applied for '{series_key}' ✅")
                     except Exception as e:
@@ -3852,8 +3952,9 @@ class MangaColorizerEngine:
         # Periodic Apple Silicon unified memory recycling
         self._pages_processed += 1
         interval = self.hw_profile.get("empty_cache_interval", 10)
-        if self.device == "mps" and (self._pages_processed % interval == 0):
-            torch.mps.empty_cache()
+        if self._pages_processed % interval == 0:
+            import gc
+            gc.collect()
 
         chip_name = self.hw_profile.get("chip_name", "Apple Silicon")
         ret = {
@@ -3865,7 +3966,6 @@ class MangaColorizerEngine:
         }
         if adapter_used:
             ret["adapter_used"] = True
-        return ret
         return ret
 
     # ── Apple Silicon Neural Engine ─────────────────────────────────
