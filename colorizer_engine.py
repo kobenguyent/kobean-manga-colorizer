@@ -656,12 +656,24 @@ class CharacterPalette:
                             combined_hair_mask[:] = False
                             hair_zone[:] = False
 
-                    if np.any(combined_hair_mask):
-                        hint[0, 0, combined_hair_mask] = float((hair_rgb_arr[0] - 0.5) / 0.5)
-                        hint[0, 1, combined_hair_mask] = float((hair_rgb_arr[1] - 0.5) / 0.5)
-                        hint[0, 2, combined_hair_mask] = float((hair_rgb_arr[2] - 0.5) / 0.5)
-                        hint[0, 3, combined_hair_mask] = 0.85
-                        seeds_placed += 1
+                    if is_buzz_cut and _is_screentone_hair:
+                        if np.any(combined_hair_mask):
+                            hint[0, 0, combined_hair_mask] = float((hair_rgb_arr[0] - 0.5) / 0.5)
+                            hint[0, 1, combined_hair_mask] = float((hair_rgb_arr[1] - 0.5) / 0.5)
+                            hint[0, 2, combined_hair_mask] = float((hair_rgb_arr[2] - 0.5) / 0.5)
+                            hint[0, 3, combined_hair_mask] = 0.85
+                            seeds_placed += 1
+                    else:
+                        if np.any(combined_hair_mask):
+                            _place_seeds_for_color(
+                                hair_rgb,
+                                combined_hair_mask,
+                                max_seeds=4,
+                                min_area=25,
+                                seed_radius_scale=7.0,
+                                max_radius=12,
+                                min_radius=4,
+                            )
 
 
                 # 2. Skin zone (central face / neck, shaded midtones, strictly disjoint from hair)
@@ -902,6 +914,11 @@ def apply_character_palette_harmonization(
             y1 = max(y0 + 10, min(H, int(by1 * H)))
             x1 = max(x0 + 10, min(W, int(bx1 * W)))
             spatial_mask[y0:y1, x0:x1] = True
+            bh = y1 - y0
+            bw = x1 - x0
+            dist_in = cv2.distanceTransform(spatial_mask.astype(np.uint8), cv2.DIST_L2, 5)
+            feather_dist = min(20.0, max(6.0, 0.08 * min(bh, bw)))
+            harm_weight = np.clip(dist_in / feather_dist, 0.0, 1.0)
         else:
             # On full manga pages (>= 500x500), do not blanket-harmonize the entire page
             # without a localized bounding box, as this causes scenery/roofs/mailboxes to be colored.
@@ -911,9 +928,10 @@ def apply_character_palette_harmonization(
             y0, x0 = int(0.03 * H), int(0.03 * W)
             y1, x1 = int(0.97 * H), int(0.97 * W)
             spatial_mask[y0:y1, x0:x1] = True
+            bh = y1 - y0
+            bw = x1 - x0
+            harm_weight = np.ones((H, W), dtype=np.float32)
 
-        bh = y1 - y0
-        bw = x1 - x0
         char_zone = spatial_mask & non_paper_mask & (~global_claimed)
         traits = getattr(ch, "visual_traits", []) or []
         is_buzz_cut_harm = (
@@ -1040,12 +1058,9 @@ def apply_character_palette_harmonization(
                 head_split_y = y0 + int(costume_split * bh)
                 y_coords_2d = np.arange(H)[:, None]
                 is_head_y = y_coords_2d < head_split_y
-                valid_skin_h = (
-                    ((h_chan <= 72.0) | (h_chan >= 166.0)) & is_head_y
-                    | ((h_chan <= 38.0) | (h_chan >= 166.0)) & (~is_head_y)
-                )
+                valid_skin_h = (h_chan <= 38.0) | ((h_chan >= 168.0) & (s_chan <= 130.0))
             else:
-                valid_skin_h = (h_chan <= 38.0) | (h_chan >= 166.0)
+                valid_skin_h = (h_chan <= 38.0) | ((h_chan >= 168.0) & (s_chan <= 130.0))
 
             detected_skin = (
                 valid_skin_h
@@ -1057,10 +1072,35 @@ def apply_character_palette_harmonization(
                 & (~eye_mask)
             )
 
-            # In manga with a head zone, protect bangs and hair from being hijacked by skin:
             if ch.bounding_box:
-                bangs_hair_pixels = hair_zone & (orig_gray <= 0.93)
+                h_hsv_temp = _hex_to_hsv(getattr(ch, "hair_hex", None))
+                is_neut_h = (h_hsv_temp is None) or (h_hsv_temp[1] < 35.0) or (h_hsv_temp[2] < 55.0)
+                max_hair_gray = 0.52 if is_neut_h else 0.93
+                bangs_hair_pixels = hair_zone & (orig_gray <= max_hair_gray)
                 detected_skin &= ~bangs_hair_pixels
+
+                # Floating border suppression: exclude connected components that touch the
+                # floating perimeter of the bounding box (gym floors, walls, other characters)
+                by0_s, bx0_s, by1_s, bx1_s = y0, x0, y1, x1
+                patch_s = detected_skin[by0_s:by1_s, bx0_s:bx1_s].astype(np.uint8)
+                num_cs, labels_cs, stats_cs, _ = cv2.connectedComponentsWithStats(patch_s)
+                ph_s, pw_s = patch_s.shape
+                clean_s = np.zeros((ph_s, pw_s), dtype=bool)
+                for i_cs in range(1, num_cs):
+                    l_cs = stats_cs[i_cs, cv2.CC_STAT_LEFT]
+                    t_cs = stats_cs[i_cs, cv2.CC_STAT_TOP]
+                    w_cs = stats_cs[i_cs, cv2.CC_STAT_WIDTH]
+                    h_cs = stats_cs[i_cs, cv2.CC_STAT_HEIGHT]
+                    touches = (
+                        ((l_cs <= 1) and (bx0_s > 5))
+                        or ((t_cs <= 1) and (by0_s > 5))
+                        or ((l_cs + w_cs >= pw_s - 1) and (bx1_s < W - 5))
+                        or ((t_cs + h_cs >= ph_s - 1) and (by1_s < H - 5))
+                    )
+                    if not touches:
+                        clean_s |= (labels_cs == i_cs)
+                detected_skin[:] = False
+                detected_skin[by0_s:by1_s, bx0_s:bx1_s] = clean_s
 
             if np.any(detected_skin):
                 skin_mask = detected_skin
@@ -1068,13 +1108,12 @@ def apply_character_palette_harmonization(
                 is_sweat_highlight = skin_mask & page_sweat_interior
                 skin_body = skin_mask & (~is_sweat_highlight)
                 if np.any(skin_body):
-                    h_chan[skin_body] = _blend_hue(h_chan[skin_body], t_skin_h, 0.60)
-                    s_chan[skin_body] = np.clip(
-                        0.55 * s_chan[skin_body] + 0.45 * t_skin_s, 22.0, 145.0
-                    )
-                    v_chan[skin_body] = np.clip(
-                        0.80 * v_chan[skin_body] + 0.20 * t_skin_v, 110.0, 255.0
-                    )
+                    w_skin = 0.60 * harm_weight[skin_body]
+                    h_chan[skin_body] = _blend_hue(h_chan[skin_body], t_skin_h, w_skin)
+                    tgt_s = np.clip(0.55 * s_chan[skin_body] + 0.45 * t_skin_s, 22.0, 145.0)
+                    s_chan[skin_body] = (1.0 - harm_weight[skin_body]) * s_chan[skin_body] + harm_weight[skin_body] * tgt_s
+                    tgt_v = np.clip(0.80 * v_chan[skin_body] + 0.20 * t_skin_v, 110.0, 255.0)
+                    v_chan[skin_body] = (1.0 - harm_weight[skin_body]) * v_chan[skin_body] + harm_weight[skin_body] * tgt_v
                 if np.any(is_sweat_highlight):
                     s_chan[is_sweat_highlight] = np.clip(s_chan[is_sweat_highlight] * 0.2, 0.0, 18.0)
                     v_chan[is_sweat_highlight] = np.maximum(v_chan[is_sweat_highlight], 240.0)
@@ -1131,8 +1170,8 @@ def apply_character_palette_harmonization(
                 hair_cand_gray_cond = (orig_gray <= 0.93) & (orig_gray >= 0.12)
                 hair_cand_color_cond = True
             else:
-                hair_cand_gray_cond = (orig_gray <= 0.90) & (orig_gray >= 0.12)
-                hair_cand_color_cond = (s_chan >= 12.0) | (orig_gray <= 0.75)
+                hair_cand_gray_cond = (orig_gray <= 0.58) & (orig_gray >= 0.08)
+                hair_cand_color_cond = (s_chan >= 12.0) | (orig_gray <= 0.52)
 
             hair_candidates = (
                 hair_zone
@@ -1160,21 +1199,48 @@ def apply_character_palette_harmonization(
 
             if np.any(hair_candidates):
                 if not is_neutral_hair:
-                    h_chan[hair_candidates] = _blend_hue(h_chan[hair_candidates], t_hair_h, 0.95)
-                    s_chan[hair_candidates] = np.clip(
+                    w_hair = 0.95 * harm_weight[hair_candidates]
+                    h_chan[hair_candidates] = _blend_hue(h_chan[hair_candidates], t_hair_h, w_hair)
+                    tgt_s = np.clip(
                         np.maximum(s_chan[hair_candidates], t_hair_s * 0.92), 40.0, 255.0
                     )
-                    v_chan[hair_candidates] = np.clip(
+                    s_chan[hair_candidates] = (1.0 - harm_weight[hair_candidates]) * s_chan[hair_candidates] + harm_weight[hair_candidates] * tgt_s
+                    tgt_v = np.clip(
                         v_chan[hair_candidates] * (0.85 + 0.15 * (t_hair_v / 180.0)), 20.0, 255.0
                     )
+                    v_chan[hair_candidates] = (1.0 - harm_weight[hair_candidates]) * v_chan[hair_candidates] + harm_weight[hair_candidates] * tgt_v
                     hair_mask |= hair_candidates
                 else:
                     # Authentic dark / neutral hair (Rukawa, Akagi, Senbei, Luffy):
                     # Only dark/neutral pixels are candidates for neutral hair (protect vibrant clothing/sky)
                     neut_cand = hair_candidates & ((s_chan <= 88.0) | (v_chan <= 90.0))
+                    if np.any(neut_cand) and ch.bounding_box:
+                        by0_h, bx0_h, by1_h, bx1_h = y0, x0, y1, x1
+                        patch_h = neut_cand[by0_h:by1_h, bx0_h:bx1_h].astype(np.uint8)
+                        num_ch, labels_ch, stats_ch, _ = cv2.connectedComponentsWithStats(patch_h)
+                        ph_h, pw_h = patch_h.shape
+                        clean_h = np.zeros((ph_h, pw_h), dtype=bool)
+                        for i_ch in range(1, num_ch):
+                            l_ch = stats_ch[i_ch, cv2.CC_STAT_LEFT]
+                            t_ch = stats_ch[i_ch, cv2.CC_STAT_TOP]
+                            w_ch = stats_ch[i_ch, cv2.CC_STAT_WIDTH]
+                            h_ch = stats_ch[i_ch, cv2.CC_STAT_HEIGHT]
+                            touches = (
+                                ((l_ch <= 1) and (bx0_h > 5))
+                                or ((t_ch <= 1) and (by0_h > 5))
+                                or ((l_ch + w_ch >= pw_h - 1) and (bx1_h < W - 5))
+                                or ((t_ch + h_ch >= ph_h - 1) and (by1_h < H - 5))
+                            )
+                            if not touches:
+                                clean_h |= (labels_ch == i_ch)
+                        neut_cand[:] = False
+                        neut_cand[by0_h:by1_h, bx0_h:bx1_h] = clean_h
+
                     if np.any(neut_cand):
-                        s_chan[neut_cand] = np.clip(s_chan[neut_cand] * 0.05, 0.0, 8.0)
-                        v_chan[neut_cand] = np.clip(v_chan[neut_cand] * 0.50, 10.0, 50.0)
+                        tgt_s = np.clip(s_chan[neut_cand] * 0.05, 0.0, 8.0)
+                        s_chan[neut_cand] = (1.0 - harm_weight[neut_cand]) * s_chan[neut_cand] + harm_weight[neut_cand] * tgt_s
+                        tgt_v = np.clip(v_chan[neut_cand] * 0.50, 10.0, 50.0)
+                        v_chan[neut_cand] = (1.0 - harm_weight[neut_cand]) * v_chan[neut_cand] + harm_weight[neut_cand] * tgt_v
                         hair_mask |= neut_cand
 
         # ── 4. Costume & Outfit Color Harmonization ─────────────────
@@ -1237,14 +1303,16 @@ def apply_character_palette_harmonization(
                 c_match = costume_candidates & (s_chan >= 16.0) & (c_diff <= 35.0)
 
             if np.any(c_match):
-                pull = np.clip((35.0 - c_diff[c_match]) / 35.0, 0.0, 1.0) * 0.70 + 0.20
+                pull = (np.clip((35.0 - c_diff[c_match]) / 35.0, 0.0, 1.0) * 0.70 + 0.20) * harm_weight[c_match]
                 h_chan[c_match] = _blend_hue(h_chan[c_match], t_c_h, pull)
-                s_chan[c_match] = np.clip(
+                tgt_s = np.clip(
                     np.maximum(s_chan[c_match], t_c_s * 0.95), 35.0, 255.0
                 )
-                v_chan[c_match] = np.clip(
+                s_chan[c_match] = (1.0 - harm_weight[c_match]) * s_chan[c_match] + harm_weight[c_match] * tgt_s
+                tgt_v = np.clip(
                     (1.0 - pull * 0.35) * v_chan[c_match] + pull * 0.35 * t_c_v, 25.0, 255.0
                 )
+                v_chan[c_match] = (1.0 - harm_weight[c_match]) * v_chan[c_match] + harm_weight[c_match] * tgt_v
                 costume_matched_all |= c_match
 
             # Actively transfer canonical costume color to desaturated clothing
@@ -1255,12 +1323,37 @@ def apply_character_palette_harmonization(
                     & (orig_gray <= 0.75)  # tightened: screentone shading only, not near-white sweat drops
                     & (orig_gray >= 0.12)
                 )
+                if np.any(c_desat) and ch.bounding_box:
+                    by0_d, bx0_d, by1_d, bx1_d = y0, x0, y1, x1
+                    patch_d = c_desat[by0_d:by1_d, bx0_d:bx1_d].astype(np.uint8)
+                    num_cd, labels_cd, stats_cd, _ = cv2.connectedComponentsWithStats(patch_d)
+                    ph_d, pw_d = patch_d.shape
+                    clean_d = np.zeros((ph_d, pw_d), dtype=bool)
+                    for i_cd in range(1, num_cd):
+                        l_cd = stats_cd[i_cd, cv2.CC_STAT_LEFT]
+                        t_cd = stats_cd[i_cd, cv2.CC_STAT_TOP]
+                        w_cd = stats_cd[i_cd, cv2.CC_STAT_WIDTH]
+                        h_cd = stats_cd[i_cd, cv2.CC_STAT_HEIGHT]
+                        touches = (
+                            ((l_cd <= 1) and (bx0_d > 5))
+                            or ((t_cd <= 1) and (by0_d > 5))
+                            or ((l_cd + w_cd >= pw_d - 1) and (bx1_d < W - 5))
+                            or ((t_cd + h_cd >= ph_d - 1) and (by1_d < H - 5))
+                        )
+                        if not touches:
+                            clean_d |= (labels_cd == i_cd)
+                    c_desat[:] = False
+                    c_desat[by0_d:by1_d, bx0_d:bx1_d] = clean_d
+
                 if np.any(c_desat):
-                    h_chan[c_desat] = _blend_hue(h_chan[c_desat], t_c_h, 0.90)
-                    s_chan[c_desat] = np.clip(t_c_s * 0.85, 30.0, 220.0)
-                    v_chan[c_desat] = np.clip(
+                    w_desat = 0.90 * harm_weight[c_desat]
+                    h_chan[c_desat] = _blend_hue(h_chan[c_desat], t_c_h, w_desat)
+                    tgt_s = np.clip(t_c_s * 0.85, 30.0, 220.0)
+                    s_chan[c_desat] = (1.0 - harm_weight[c_desat]) * s_chan[c_desat] + harm_weight[c_desat] * tgt_s
+                    tgt_v = np.clip(
                         0.70 * v_chan[c_desat] + 0.30 * t_c_v, 30.0, 240.0
                     )
+                    v_chan[c_desat] = (1.0 - harm_weight[c_desat]) * v_chan[c_desat] + harm_weight[c_desat] * tgt_v
                     costume_matched_all |= c_desat
 
 
@@ -1273,6 +1366,265 @@ def apply_character_palette_harmonization(
         cv2.merge([h_chan.astype(np.uint8), s_chan.astype(np.uint8), v_chan.astype(np.uint8)]),
         cv2.COLOR_HSV2RGB,
     )
+
+
+def harmonize_basketball_regions(
+    img_rgb: np.ndarray,
+    orig_gray: np.ndarray,
+    recognizer=None,
+    palette=None,
+    series_key: Optional[str] = None,
+    yolo_boxes=None,
+) -> np.ndarray:
+    """
+    Detects basketball props in manga panels (which neural ResNeXt generator renders as
+    unnatural purple/plum/violet or greenish screentone spheres) and harmonizes them to authentic
+    warm burnt orange leather (#D4561C) with crisp black seams and specular highlights.
+
+    Key design choices that prevent false positives on court floor / shadows / SFX:
+    - Candidates are ONLY unnatural hue pixels (H in [35, 175]) — not all shaded pixels.
+      This ensures orange SFX bursts (H ≈ 11, natural) are never treated as ball candidates.
+    - Ball region is extracted as the connected component of unnatural pixels at the candidate
+      center, filled solid, then masked to a circular envelope.  No blind geometric stamp.
+    - Recoloring is applied only to the filled component, not a full Hough circle over floor.
+    """
+    H, W = orig_gray.shape[:2]
+
+    # 1. Determine series / prop context
+    is_basketball_context = False
+    if series_key and any(k in series_key.lower() for k in ("slam_dunk", "basketball", "kuroko")):
+        is_basketball_context = True
+    if palette:
+        title = (getattr(palette, "preset_title", "") or "").lower()
+        pid = (getattr(palette, "preset_id", "") or "").lower()
+        if any(k in pid for k in ("slam_dunk", "slamdunk", "basketball")) or any(k in title for k in ("slam dunk", "slamdunk", "basketball")):
+            is_basketball_context = True
+        for c in getattr(palette, "characters", []):
+            c_name = getattr(c, "name", "").lower()
+            if any(k in c_name for k in ("sakuragi", "rukawa", "akagi", "mitsui", "miyagi", "sendoh", "kuroko", "kawata")):
+                is_basketball_context = True
+                break
+
+    # 2. Character Exclusion Mask to safeguard character bodies, clothing, and faces
+    char_mask = np.zeros((H, W), dtype=bool)
+    if palette and getattr(palette, "characters", None):
+        for c in palette.characters:
+            if getattr(c, "bounding_box", None):
+                by0, bx0, by1, bx1 = c.bounding_box
+                if isinstance(by0, float) and by0 <= 1.01:
+                    iy0, ix0 = max(0, int(by0 * H)), max(0, int(bx0 * W))
+                    iy1, ix1 = min(H, int(by1 * H)), min(W, int(bx1 * W))
+                else:
+                    iy0, ix0, iy1, ix1 = int(by0), int(bx0), int(by1), int(bx1)
+                char_mask[iy0:iy1, ix0:ix1] = True
+
+    # If yolo_boxes not provided, query YOLO detector from recognizer if available
+    if yolo_boxes is None and recognizer is not None and hasattr(recognizer, "_ensure_manga_yolo"):
+        try:
+            yolo_m, ydev = recognizer._ensure_manga_yolo()
+            if yolo_m is not None:
+                orig_gray_u8 = (np.clip(orig_gray, 0.0, 1.0) * 255.0).astype(np.uint8)
+                y_res = yolo_m.predict(orig_gray_u8, device=ydev, conf=0.25, verbose=False)
+                yolo_boxes = []
+                for yr in y_res:
+                    for box in yr.boxes:
+                        cls_name = yolo_m.names[int(box.cls[0])]
+                        if cls_name in ("body", "face"):
+                            xyxy = box.xyxy[0].cpu().numpy()
+                            yolo_boxes.append([xyxy[1], xyxy[0], xyxy[3], xyxy[2]])
+        except Exception:
+            pass
+
+    if yolo_boxes:
+        for b in yolo_boxes:
+            by0, bx0, by1, bx1 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+            char_mask[by0:by1, bx0:bx1] = True
+
+    # 3. Detect candidate ball pixels:
+    # ONLY unnatural hue (yellow/green/cyan/blue/purple/magenta: H in [35, 175]) produced by
+    # the neural model on basketballs.  Orange (#D4561C, H≈11) SFX, warm floor, and
+    # character skin are all H < 35, so they are correctly excluded from candidates.
+    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+    h_chan, s_chan, v_chan = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+    border_margin = 15
+    border_mask = np.zeros((H, W), dtype=bool)
+    border_mask[:border_margin, :] = True
+    border_mask[-border_margin:, :] = True
+    border_mask[:, :border_margin] = True
+    border_mask[:, -border_margin:] = True
+
+    unnatural_pix = (
+        (h_chan >= 30.0)
+        & (h_chan <= 175.0)
+        & (s_chan >= 12.0)
+        & (orig_gray >= 0.04)
+        & (orig_gray <= 0.94)
+        & (~char_mask)
+        & (~border_mask)
+    )
+    # Always use only unnatural pixels as candidates — never shaded_pix.
+    # This is the critical guard: any naturally warm/orange SFX (H < 30) is not a candidate.
+    cand_pix = unnatural_pix
+
+    if not np.any(cand_pix):
+        return img_rgb
+
+    # 4. Morphological closing to bridge halftone screentone dots and ball seams
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+    closed_cand = cv2.morphologyEx(cand_pix.astype(np.uint8), cv2.MORPH_CLOSE, kernel_close)
+
+    # 5. Distance transform to locate spherical / circular ball centers
+    dist_map = cv2.distanceTransform(closed_cand, cv2.DIST_L2, 5)
+    max_d = float(np.max(dist_map))
+    if max_d < 28.0:
+        return img_rgb
+
+    # Extract peak centers and recolor each ball
+    temp_dist = np.copy(dist_map)
+    pil_img = None
+    orig_gray_uint8 = (np.clip(orig_gray, 0.0, 1.0) * 255.0).astype(np.uint8)
+    ball_mask = np.zeros((H, W), dtype=bool)
+    found_any = False
+    y_grid, x_grid = np.ogrid[:H, :W]
+
+    prompts = [
+        "a basketball",
+        "a basketball hoop or rim net",
+        "a manga character face head body or arm",
+        "manga background scenery court floor",
+    ]
+
+    while True:
+        min_v, max_v, min_l, max_l = cv2.minMaxLoc(temp_dist)
+        if max_v < 28.0:
+            break
+        cx, cy = max_l
+        r = float(max_v)
+
+        crop_r = max(50, min(240, int(1.15 * r)))
+        y0, y1 = max(0, cy - crop_r), min(H, cy + crop_r)
+        x0, x1 = max(0, cx - crop_r), min(W, cx + crop_r)
+
+        # Verify candidate: CLIP zero-shot classification if recognizer available
+        is_ball = False
+        if recognizer is not None:
+            if pil_img is None:
+                pil_img = Image.fromarray(orig_gray_uint8).convert("RGB")
+            crop = pil_img.crop((x0, y0, x1, y1))
+            try:
+                model, processor, device = recognizer._ensure_clip()
+                if model is not None and processor is not None:
+                    inputs = processor(text=prompts, images=[crop], return_tensors="pt", padding=True).to(device)
+                    with torch.no_grad():
+                        probs = model(**inputs).logits_per_image.softmax(dim=1).cpu().numpy()[0]
+                    ball_score = float(probs[0])
+                    top_idx = int(np.argmax(probs))
+                    # Accept ball if: top prediction is basketball with decent score,
+                    # OR if CLIP is confused between ball/hoop (both are round objects in manga)
+                    # but we are in a confirmed basketball manga context and r is large enough
+                    if top_idx == 0 and ball_score >= 0.45:
+                        is_ball = True
+                    elif is_basketball_context and top_idx <= 1 and r >= 45.0 and ball_score >= 0.18:
+                        # ball or hoop — both are round; in basketball manga accept if large
+                        is_ball = True
+                else:
+                    is_ball = is_basketball_context and (r >= 45.0)
+            except Exception:
+                is_ball = is_basketball_context and (r >= 45.0)
+        else:
+            is_ball = is_basketball_context and (r >= 45.0)
+
+        # Extra density guard: reject candidates where unnatural pixels fill < 30% of the
+        # expected circular area.  A real basketball has dense screentone/color inside;
+        # scattered court coloring or background texture does not.
+        if is_ball:
+            circ_area_mask = ((x_grid - cx) ** 2 + (y_grid - cy) ** 2) <= (r ** 2)
+            circ_total = int(np.sum(circ_area_mask))
+            circ_unnatural = int(np.sum(unnatural_pix & circ_area_mask))
+            density = circ_unnatural / max(circ_total, 1)
+            if density < 0.20:
+                is_ball = False  # reject sparse background coloring
+
+
+        if is_ball:
+            found_any = True
+            # Extract the connected component of closed_cand at the candidate center.
+            # This precisely follows the organic screentone boundary of the basketball
+            # WITHOUT stamping a geometric shape onto adjacent floor/SFX areas.
+            patch_close = closed_cand[y0:y1, x0:x1]
+            rel_cx = min(max(0, cx - x0), patch_close.shape[1] - 1)
+            rel_cy = min(max(0, cy - y0), patch_close.shape[0] - 1)
+            num_cc, lbls_cc, stats_cc, _ = cv2.connectedComponentsWithStats(patch_close)
+            target_lbl = int(lbls_cc[rel_cy, rel_cx])
+            if target_lbl == 0:
+                # Candidate center sits in a morphological hole; find the largest
+                # neighboring component within ±20px
+                search_r = min(20, int(0.15 * r))
+                sub_y0 = max(0, rel_cy - search_r)
+                sub_y1 = min(patch_close.shape[0], rel_cy + search_r)
+                sub_x0 = max(0, rel_cx - search_r)
+                sub_x1 = min(patch_close.shape[1], rel_cx + search_r)
+                sub_lbl = lbls_cc[sub_y0:sub_y1, sub_x0:sub_x1]
+                vals = sub_lbl[sub_lbl > 0]
+                if len(vals) > 0:
+                    target_lbl = int(np.bincount(vals).argmax())
+
+            if target_lbl > 0:
+                comp_patch = (lbls_cc == target_lbl).astype(np.uint8)
+                # Fill interior holes (specular white highlights inside the ball)
+                cnts, _ = cv2.findContours(comp_patch, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                filled_patch = np.zeros_like(comp_patch)
+                cv2.drawContours(filled_patch, cnts, -1, 1, -1)
+                # Circular envelope: do not extend beyond 1.25 × r from candidate center
+                y_p_grid, x_p_grid = np.ogrid[:y1 - y0, :x1 - x0]
+                circ_envelope = ((x_p_grid - rel_cx) ** 2 + (y_p_grid - rel_cy) ** 2) <= ((1.25 * r) ** 2)
+                # Panel boundary: if ball is in the left third of page, don't bleed right
+                if cx <= int(0.32 * W):
+                    circ_envelope &= (x_p_grid + x0 <= int(0.32 * W))
+                ball_mask[y0:y1, x0:x1] |= (
+                    (filled_patch > 0) & circ_envelope & (~char_mask[y0:y1, x0:x1])
+                )
+
+            cv2.circle(temp_dist, (cx, cy), max(80, int(1.25 * r)), 0, -1)
+        else:
+            cv2.circle(temp_dist, (cx, cy), max(20, int(0.40 * r)), 0, -1)
+
+    if not found_any or not np.any(ball_mask):
+        return img_rgb
+
+    # 6. Apply authentic warm burnt orange leather (#D4561C, H≈11)
+    # Recolor only ball pixels that:
+    #   a) were unnatural (purple/cyan/etc.) in the original neural output — OR —
+    #   b) are shaded screentone inside the ball boundary (gray <= 0.78)
+    # This ensures pure white highlights and bright court floor are never tinted orange.
+    t_ball_h = 11.0  # warm burnt orange leather (22° Hue in 360° = 11 in OpenCV 0–180)
+    ball_ink = (
+        ball_mask
+        & (orig_gray >= 0.04)
+        & (orig_gray <= 0.94)
+        & (~char_mask)
+        & (unnatural_pix | (orig_gray <= 0.80))   # only recolor unnatural OR dark screentone
+    )
+    is_seam = orig_gray <= 0.16
+    is_highlight = ball_ink & (orig_gray >= 0.88)
+    ball_body = ball_ink & (~is_seam)
+
+    h_chan[ball_body] = t_ball_h
+    # Rich warm leather saturation, slightly deeper in shaded regions
+    s_chan[ball_body] = np.clip(180.0 + 40.0 * (1.0 - orig_gray[ball_body]), 160.0, 240.0)
+    # Authentic leather brightness: follow original shading so the ball reads 3-D
+    leather_v = 120.0 + 105.0 * np.clip(orig_gray[ball_body], 0.0, 1.0)
+    v_chan[ball_body] = np.clip(leather_v, 115.0, 235.0)
+
+    # Specular highlight: de-saturate and brighten white dots
+    s_chan[is_highlight] = np.clip(s_chan[is_highlight] * 0.20, 0.0, 30.0)
+    v_chan[is_highlight] = np.maximum(v_chan[is_highlight], 240.0)
+
+    # Recombine HSV
+    hsv_out = cv2.merge([h_chan, s_chan, v_chan]).astype(np.uint8)
+    return cv2.cvtColor(hsv_out, cv2.COLOR_HSV2RGB)
+
 
 
 def protect_page_margins_and_speech_bubbles(
@@ -2015,8 +2367,8 @@ class MangaCharacterRecognizer:
                 panels = self._detect_manga_panels(gray_img)
                 yolo_boxes = self._detect_manga_yolo_regions(pil_img, img)
                 if yolo_boxes:
-                    faces = [b for b in yolo_boxes if b[4] == "face"]
-                    bodies = [b for b in yolo_boxes if b[4] == "body"]
+                    faces = [b for b in yolo_boxes if b[4] == "face" and (len(b) <= 5 or b[5] >= 0.28)]
+                    bodies = [b for b in yolo_boxes if b[4] == "body" and (len(b) <= 5 or b[5] >= 0.32)]
 
                     pairs: list[CandidatePair] = []
                     # For each detected face, find the best enclosing / overlapping body
@@ -2031,7 +2383,10 @@ class MangaCharacterRecognizer:
                             by0, bx0, by1, bx1, _, bconf = b
                             bw = bx1 - bx0
                             bc_x = (bx0 + bx1) / 2.0
-                            if by0 <= fy0 + int(0.35 * fh) and by1 >= fy1 - int(0.15 * fh):
+                            # Anatomical checks: body width shouldn't be an absurd multiple of face width (> 6.0x)
+                            if bw / max(1, fw) > 6.0:
+                                continue
+                            if by0 <= fy1 + int(0.60 * fh) and by1 >= fy1 - int(0.15 * fh):
                                 x_inter = max(0, min(fx1, bx1) - max(fx0, bx0))
                                 if x_inter >= int(0.30 * fw):
                                     norm_dist = abs(fc_x - bc_x) / (0.5 * bw + 1e-5)
@@ -2062,12 +2417,8 @@ class MangaCharacterRecognizer:
                             b_idx = face_body_matches[f_idx]
                             by0, bx0, by1, bx1, _, _ = bodies[b_idx]
                             body_w = bx1 - bx0
-                            if body_w > 2.2 * face_w:
-                                fig_x0 = max(p_box[1], min(bx0, fx0 - int(0.40 * face_w)))
-                                fig_x1 = min(p_box[3], max(bx1, fx1 + int(0.40 * face_w)))
-                            else:
-                                fig_x0 = max(p_box[1], min(fx0 - int(0.30 * face_w), bx0))
-                                fig_x1 = min(p_box[3], max(fx1 + int(0.30 * face_w), bx1))
+                            fig_x0 = max(p_box[1], bx0, fx0 - int(2.5 * face_w))
+                            fig_x1 = min(p_box[3], bx1, fx1 + int(2.5 * face_w))
                             fig_y0 = max(p_box[0], min(fy0 - int(0.60 * face_h), by0))
                             fig_y1 = min(p_box[2], max(fy1, by1))
                             fig_box = self._trim_white_gutters((fig_y0, fig_x0, fig_y1, fig_x1), gray_img)
@@ -2435,7 +2786,7 @@ class MangaCharacterRecognizer:
             char_sum = float(np.sum(char_probs))
             rel_conf = (top_prob / char_sum) if char_sum > 0 else top_prob
 
-            if top_prob >= min_confidence or (is_yolo and top_prob >= 0.25) or (rel_conf >= 0.45 and top_prob >= 0.18):
+            if (top_prob >= min_confidence and rel_conf >= 0.40) or (is_yolo and top_prob >= 0.38 and rel_conf >= 0.48):
                 matched_char = palette.characters[top_idx]
                 norm_box = (
                     round(fy0 / float(h_img), 4),
@@ -3152,7 +3503,7 @@ class MangaColorizerEngine:
                     recognized_chars = [r.to_dict() for r in recs]
                     actual_detected = [
                         r for r in recs
-                        if r.detection_method != "fallback_principal" and r.bounding_box is not None
+                        if r.detection_method != "fallback_principal" and r.bounding_box is not None and r.confidence >= 0.40
                     ]
                     if actual_detected:
                         active_palette = character_palette.optimize_for_page(actual_detected)
@@ -3462,6 +3813,15 @@ class MangaColorizerEngine:
                 palette=character_palette,
                 orig_gray=gray_orig,
             )
+
+        # 8c. Prop & Sports Equipment Harmonization (e.g. basketballs in Slam Dunk)
+        final_rgb = harmonize_basketball_regions(
+            img_rgb=final_rgb,
+            orig_gray=gray_orig,
+            recognizer=getattr(self, "recognizer", None),
+            palette=character_palette,
+            series_key=series_key,
+        )
 
         # 9. Clean White Margin & Speech Bubble Protection
         # Protect outer page margins and genuine dialogue speech bubbles from color bleeding
@@ -3939,6 +4299,13 @@ class MangaColorizerEngine:
             rgb = apply_character_palette_harmonization(
                 rgb, character_palette, orig_gray=gray.astype(np.float32) / 255.0
             )
+
+        rgb = harmonize_basketball_regions(
+            img_rgb=rgb,
+            orig_gray=gray.astype(np.float32) / 255.0,
+            recognizer=getattr(self, "recognizer", None),
+            palette=character_palette,
+        )
 
         # Cross-page exemplar palette transfer (Phase 2)
         if exemplar_image_path and os.path.exists(exemplar_image_path):

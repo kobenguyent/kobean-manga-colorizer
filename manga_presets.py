@@ -410,12 +410,22 @@ BUILTIN_PRESETS: list[MangaPreset] = [
                 extra_hex="#FFFFFF",
                 notes="Black spiky up-do, athletic tan, Ryonan blue #7 jersey",
             ),
+            PresetCharacter(
+                name="Mikio Kawata",
+                hair_hex="#1B1B1B",
+                skin_hex="#ECC099",
+                costume_hex="#FAFAFA",
+                extra_hex="#111111",
+                visual_traits=["black_hair", "buzz_cut"],
+                notes="Massive gentle giant center with round face and shaved buzz cut, Sannoh white jersey #15",
+            ),
         ],
         prompt_guidance=(
             "Colorize in authentic Slam Dunk anime style: "
             "Shohoku basketball team wears iconic fiery red jerseys (#C62828) with white numbers and black side trim; "
             "Hanamichi Sakuragi has vibrant crimson-red hair (#E30016) and athletic tan skin; "
             "Kaede Rukawa has sleek black hair and pale skin; "
+            "Basketballs are authentic leather burnt orange (#D4561C) with crisp black rubber seams; "
             "Basketball court has warm polished wood parquet floors and bright stadium arena lighting; "
             "Preserve speech bubbles pure white with crisp dark text."
         ),
