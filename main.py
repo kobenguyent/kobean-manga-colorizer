@@ -293,7 +293,7 @@ class BatchExportRequest(BaseModel):
 class CombinedExportRequest(BaseModel):
     session_ids: Optional[list[str]] = None
     format: str = "epub"  # "epub", "mobi", "pdf"
-    title: Optional[str] = "Colorized Manga Collection"
+    title: Optional[str] = None
     sync: Optional[bool] = False
     chunk_by: Optional[str] = "none"  # "none", "volumes", "size_mb"
     chunk_size: Optional[int] = 3  # e.g. 3 volumes or 400 MB
@@ -3033,10 +3033,40 @@ async def export_combined_volume(req: CombinedExportRequest):
 
     fmt = (req.format or "epub").lower().strip()
     export_original = bool(req.export_original)
-    default_title = "Manga Collection" if export_original else "Colorized Manga Collection"
-    title = (req.title or default_title).strip() or default_title
-    if title == "Colorized Manga Collection" and export_original:
-        title = "Manga Collection"
+
+    # Derive clean title from uploaded files / sessions
+    derived_title = ""
+    for s in sessions_data:
+        fn = s.get("filename") or ""
+        pid = s.get("detected_preset") or s.get("preset_id")
+        if fn:
+            _, s_title = derive_series_key(fn, pid)
+            if s_title and s_title.lower() not in ("manga series", "manga collection", "untitled"):
+                derived_title = s_title
+                break
+    if not derived_title and sessions_data:
+        first_fn = sessions_data[0].get("filename") or ""
+        if first_fn:
+            stem = Path(first_fn).stem
+            stem = re.sub(r"\[.*?\]|\(.*?\)", "", stem)
+            stem = re.sub(r"(?i)\b(vol|volume|v|ch|chapter|c)[\.\s_-]*\d+\b", "", stem)
+            stem = stem.replace("_", " ").replace("-", " ").strip()
+            if stem:
+                derived_title = " ".join(w.capitalize() for w in stem.split())
+
+    raw_req_title = (req.title or "").strip()
+    if export_original:
+        if raw_req_title and raw_req_title not in ("Colorized Manga Collection", "Manga Collection"):
+            title = raw_req_title
+        else:
+            title = "Manga Collection"
+    else:
+        if raw_req_title and raw_req_title != "Colorized Manga Collection":
+            title = raw_req_title
+        elif derived_title:
+            title = derived_title
+        else:
+            title = "Colorized Manga Collection"
 
     # Sanitize title for filename
     clean_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", title).strip().replace(" ", "_")

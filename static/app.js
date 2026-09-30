@@ -22,6 +22,7 @@ let currentHistoryFilter = "all";
 let currentHistorySearch = "";
 let selectedHistorySessions = new Set();
 let selectedQueueSessions = new Set();
+let userCustomizedCombinedTitle = false;
 
 
 // Sub-model options per provider
@@ -1164,22 +1165,109 @@ function setupEventListeners() {
     });
   }
 
-  // Combined Export Original Versions toggle
+// ─────────────────────────────────────────────────────────────────────
+//  Dynamic Combined E-Reader Title Derivation from Uploaded Files
+// ─────────────────────────────────────────────────────────────────────
+
+function deriveTitleFromFilename(filename) {
+  if (!filename) return "";
+  let t = filename;
+  // 1. Remove file extension
+  t = t.replace(/\.[a-zA-Z0-9]+$/, "");
+  // 2. Remove bracketed scanlation / release info e.g. [MangaStream], (Digital), [1080p], [1991]
+  t = t.replace(/\[.*?\]|\(.*?\)/g, "");
+  // 3. Remove volume / chapter markers e.g. Vol 01, Ch 25, v01, c12, Volume 1, Chapter 5
+  t = t.replace(/\b(vol|volume|v|ch|chapter|c|episode|ep)[\.\s_-]*\d+\b/gi, "");
+  // 4. Remove standalone numbers at the end e.g. " 01", "_02"
+  t = t.replace(/[\s_-]+\d+\s*$/, "");
+  // 5. Clean up underscores, dashes, commas, and excess spaces
+  t = t.replace(/[_,]/g, " ").replace(/-/g, " ").replace(/\s+/g, " ").trim();
+  if (!t) {
+    t = filename.replace(/\.[a-zA-Z0-9]+$/, "").trim();
+  }
+  // Title-case capitalization
+  return t
+    .split(" ")
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ")
+    .trim();
+}
+
+function getUploadedFilesTitle(sessions) {
+  let list = sessions;
+  if (!list || list.length === 0) {
+    if (activeSessions && activeSessions.length > 0) {
+      list = activeSessions;
+    } else if (currentSession) {
+      list = [currentSession];
+    }
+  }
+  if (!list || list.length === 0) return "";
+
+  // 1. Check preset_title or detected_preset in list
+  for (const s of list) {
+    if (s.preset_title && s.preset_title.trim()) {
+      return s.preset_title.trim();
+    }
+    if (s.title && s.title.trim() && s.title !== "Colorized Manga Collection" && s.title !== "Manga Collection") {
+      return s.title.trim();
+    }
+  }
+
+  // 2. Derive from primary or first session's filename
+  const primary = currentSession || list[0];
+  const fn = primary.filename || "";
+  if (fn) {
+    const derived = deriveTitleFromFilename(fn);
+    if (derived) return derived;
+  }
+  return "";
+}
+
+function updateCombinedTitleInput(force = false) {
+  const combinedTitleInput = document.getElementById("combined-title-input");
+  if (!combinedTitleInput) return;
+
+  if (userCustomizedCombinedTitle && !force) return;
+
+  const currentVal = combinedTitleInput.value.trim();
+  const isDefaultOrEmpty =
+    !currentVal ||
+    currentVal === "Colorized Manga Collection" ||
+    currentVal === "Manga Collection";
+
+  if (isDefaultOrEmpty || force) {
+    const derived = getUploadedFilesTitle();
+    if (derived) {
+      combinedTitleInput.value = derived;
+    }
+  }
+}
+
+  // Combined Export Original Versions toggle & Title Synchronization
   const combinedOriginal = document.getElementById("combined-original-check");
   const combinedTitleInput = document.getElementById("combined-title-input");
+  if (combinedTitleInput) {
+    combinedTitleInput.addEventListener("input", () => {
+      userCustomizedCombinedTitle = Boolean(combinedTitleInput.value.trim());
+    });
+  }
+
   if (combinedOriginal && combinedTitleInput) {
     combinedOriginal.addEventListener("change", () => {
+      const derived = getUploadedFilesTitle();
       if (combinedOriginal.checked) {
-        if (combinedTitleInput.value === "Colorized Manga Collection") {
-          combinedTitleInput.value = "Manga Collection";
+        if (!combinedTitleInput.value.trim() || combinedTitleInput.value === "Colorized Manga Collection") {
+          combinedTitleInput.value = derived ? derived : "Manga Collection";
         }
         if (combinedPreset && combinedPreset.value === "colorsoft") {
           combinedPreset.value = "original";
           combinedPreset.dispatchEvent(new Event("change", { bubbles: true }));
         }
       } else {
-        if (combinedTitleInput.value === "Manga Collection") {
-          combinedTitleInput.value = "Colorized Manga Collection";
+        if (!combinedTitleInput.value.trim() || combinedTitleInput.value === "Manga Collection") {
+          combinedTitleInput.value = derived ? derived : "Colorized Manga Collection";
         }
       }
     });
@@ -1387,6 +1475,7 @@ async function handleFileSelection(fileOrFiles) {
 
       renderDashboard();
       renderDocumentQueue();
+      updateCombinedTitleInput(true);
       showToast(`Added ${validFiles.length} document(s) with ${data.total_pages || 0} pages!`, "success");
     } else {
       showToast(data.detail || "Upload failed.", "error");
@@ -1527,6 +1616,7 @@ async function handleBulkChunkedUpload(files) {
     if (loadingContent) loadingContent.classList.add("hidden");
   }
   renderDocumentQueue();
+  updateCombinedTitleInput(true);
 
   const addBtn = document.getElementById("btn-add-files");
   if (addBtn) {
@@ -2450,6 +2540,7 @@ function renderDocumentQueue() {
   }
 
   updateQueueSelectionUI();
+  updateCombinedTitleInput();
 }
 
 
@@ -2650,6 +2741,7 @@ function renderDashboard() {
   const paletteCard = document.getElementById("palette-card");
   if (paletteCard) paletteCard.style.display = "";
   paletteLoadFromServer();
+  updateCombinedTitleInput();
 }
 
 function updateColorizedCount() {
@@ -4462,8 +4554,9 @@ async function exportCombined(format = "epub") {
   const sessionIds = sessionList.map(s => s.session_id).filter(Boolean);
   const isOriginal = Boolean(document.getElementById("combined-original-check")?.checked);
   let title = document.getElementById("combined-title-input")?.value?.trim();
-  if (!title) {
-    title = isOriginal ? "Manga Collection" : "Colorized Manga Collection";
+  if (!title || title === "Colorized Manga Collection" || title === "Manga Collection") {
+    const derived = getUploadedFilesTitle(sessionList);
+    title = derived || (isOriginal ? "Manga Collection" : "Colorized Manga Collection");
   }
 
   const chunkVal = document.getElementById("combined-chunk-select")?.value || "size_250";

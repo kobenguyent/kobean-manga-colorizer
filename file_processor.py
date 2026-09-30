@@ -23,6 +23,48 @@ def natural_sort_key(s: str):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)]
 
 
+def derive_combined_title(
+    sessions_data: list,
+    export_original: bool = False,
+    raw_title: Optional[str] = None,
+) -> str:
+    """Derives a clean collection / book title from uploaded files / sessions if not explicitly set."""
+    derived_title = ""
+    for s in sessions_data:
+        fn = s.get("filename") or ""
+        if fn:
+            try:
+                from series_memory import derive_series_key
+
+                _, s_title = derive_series_key(fn, s.get("detected_preset"))
+                if s_title and s_title.lower() not in ("manga series", "manga collection", "untitled"):
+                    derived_title = s_title
+                    break
+            except Exception:
+                pass
+    if not derived_title and sessions_data:
+        first_fn = sessions_data[0].get("filename") or ""
+        if first_fn:
+            stem = Path(first_fn).stem
+            stem = re.sub(r"\[.*?\]|\(.*?\)", "", stem)
+            stem = re.sub(r"(?i)\b(vol|volume|v|ch|chapter|c)[\.\s_-]*\d+\b", "", stem)
+            stem = stem.replace("_", " ").replace("-", " ").strip()
+            if stem:
+                derived_title = " ".join(w.capitalize() for w in stem.split())
+
+    raw = (raw_title or "").strip()
+    if export_original:
+        if raw and raw not in ("Colorized Manga Collection", "Manga Collection"):
+            return raw
+        return "Manga Collection"
+
+    if raw and raw != "Colorized Manga Collection":
+        return raw
+    if derived_title:
+        return derived_title
+    return "Colorized Manga Collection"
+
+
 class MangaFileProcessor:
     def __init__(self, storage_dir: str):
         self.storage_dir = Path(storage_dir)
@@ -905,8 +947,6 @@ class MangaFileProcessor:
                     with open(file_path, "rb") as src, zout.open(zinfo, "w") as dest:
                         shutil.copyfileobj(src, dest, length=1024 * 1024)
 
-        return output_filepath
-
     # ── Combined single-file export (all volumes → one EPUB / PDF) ───
 
     def build_combined_epub(
@@ -936,6 +976,7 @@ class MangaFileProcessor:
         """
         import uuid as _uuid
 
+        title = derive_combined_title(sessions_data, export_original=export_original, raw_title=title)
         temp_epub = output_filepath + ".tmp"
         if os.path.exists(temp_epub):
             os.remove(temp_epub)
@@ -1154,6 +1195,7 @@ class MangaFileProcessor:
 
         Supports real-time progress callbacks and cancellation checks.
         """
+        title = derive_combined_title(sessions_data, export_original=export_original, raw_title=title)
         pdf_doc = fitz.open()
         total_pages = sum(len(s.get("pages", [])) for s in sessions_data)
         processed_pages = 0
@@ -1252,6 +1294,7 @@ class MangaFileProcessor:
         Supports real-time progress callbacks and cancellation checks.
         """
 
+        title = derive_combined_title(sessions_data, export_original=export_original, raw_title=title)
         if cancel_check and cancel_check():
             raise InterruptedError("Combined MOBI export cancelled")
 
@@ -1372,9 +1415,9 @@ class MangaFileProcessor:
         containing the individual omnibus files (e.g. Part_01_Vol_01-03.mobi).
         """
 
-        clean_title = (title or ("Manga Collection" if export_original else "Colorized Manga Collection")).strip()
-        if clean_title == "Colorized Manga Collection" and export_original:
-            clean_title = "Manga Collection"
+        clean_title = derive_combined_title(
+            sessions_data, export_original=export_original, raw_title=title
+        )
         safe_title = re.sub(r"[^a-zA-Z0-9_\- ]", "", clean_title).strip().replace(" ", "_")
         if not safe_title:
             safe_title = "manga_collection"
