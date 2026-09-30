@@ -323,6 +323,12 @@ class SeriesAdapterTrainer:
                         torch.from_numpy(blurred).permute(2, 0, 1).float() / 127.5 - 1.0
                     ).unsqueeze(0)
 
+                # Ensure tensors are detached from inference mode so they can be tracked by autograd
+                with torch.inference_mode(False):
+                    base_t = base_t.detach().clone()
+                    sketch_t = sketch_t.detach().clone()
+                    target_t = target_t.detach().clone()
+
                 from colorizer_engine import gpu_inference_scope
 
                 with gpu_inference_scope(device):
@@ -346,61 +352,62 @@ class SeriesAdapterTrainer:
         final_loss = 0.0
         num_samples = len(data_samples)
 
-        for step in range(1, total_steps + 1):
-            if self.active_trainers[series_key].get("cancel_requested"):
-                del self.active_trainers[series_key]
-                return {"status": "cancelled", "series_key": series_key, "step": step, "cancelled": True}
+        with torch.inference_mode(False), torch.enable_grad():
+            for step in range(1, total_steps + 1):
+                if self.active_trainers[series_key].get("cancel_requested"):
+                    del self.active_trainers[series_key]
+                    return {"status": "cancelled", "series_key": series_key, "step": step, "cancelled": True}
 
-            sample_idx = (step - 1) % num_samples
-            base_t, sketch_t, target_t = data_samples[sample_idx]
+                sample_idx = (step - 1) % num_samples
+                base_t, sketch_t, target_t = data_samples[sample_idx]
 
-            from colorizer_engine import gpu_inference_scope
+                from colorizer_engine import gpu_inference_scope
 
-            with gpu_inference_scope(device):
-                optimizer.zero_grad()
+                with gpu_inference_scope(device):
+                    optimizer.zero_grad()
 
-                pred_adapted = model(base_t, sketch_t)
+                    pred_adapted = model(base_t, sketch_t)
 
-                # Losses:
-                # 1. Pixel L1 loss
-                l1_loss = F.l1_loss(pred_adapted, target_t)
+                    # Losses:
+                    # 1. Pixel L1 loss
+                    l1_loss = F.l1_loss(pred_adapted, target_t)
 
-                # 2. Color channel mean / hue harmony loss
-                mean_pred = torch.mean(pred_adapted, dim=(2, 3))
-                mean_tgt = torch.mean(target_t, dim=(2, 3))
-                color_loss = F.mse_loss(mean_pred, mean_tgt)
+                    # 2. Color channel mean / hue harmony loss
+                    mean_pred = torch.mean(pred_adapted, dim=(2, 3))
+                    mean_tgt = torch.mean(target_t, dim=(2, 3))
+                    color_loss = F.mse_loss(mean_pred, mean_tgt)
 
-                # 3. Speech bubble / high-white paper protection loss
-                white_mask = (target_t > 0.90).float()
-                bubble_loss = (
-                    torch.sum(torch.abs(pred_adapted - target_t) * white_mask)
-                    / (torch.sum(white_mask) + 1e-6)
-                )
+                    # 3. Speech bubble / high-white paper protection loss
+                    white_mask = (target_t > 0.90).float()
+                    bubble_loss = (
+                        torch.sum(torch.abs(pred_adapted - target_t) * white_mask)
+                        / (torch.sum(white_mask) + 1e-6)
+                    )
 
-                total_loss = l1_loss + 0.4 * color_loss + 0.3 * bubble_loss
-                total_loss.backward()
-                optimizer.step()
+                    total_loss = l1_loss + 0.4 * color_loss + 0.3 * bubble_loss
+                    total_loss.backward()
+                    optimizer.step()
 
-            final_loss = float(total_loss.item())
+                final_loss = float(total_loss.item())
 
-            # Progress update
-            pct = round((step / total_steps) * 100.0, 1)
-            self.active_trainers[series_key]["step"] = step
-            self.active_trainers[series_key]["progress"] = pct
-            self.active_trainers[series_key]["loss"] = final_loss
+                # Progress update
+                pct = round((step / total_steps) * 100.0, 1)
+                self.active_trainers[series_key]["step"] = step
+                self.active_trainers[series_key]["progress"] = pct
+                self.active_trainers[series_key]["loss"] = final_loss
 
-            if on_progress and (step % 10 == 0 or step == total_steps):
-                try:
-                    on_progress({
-                        "series_key": series_key,
-                        "step": step,
-                        "total_steps": total_steps,
-                        "progress": pct,
-                        "loss": round(final_loss, 4),
-                        "status": "completed" if step == total_steps else "training",
-                    })
-                except Exception:
-                    pass
+                if on_progress and (step % 10 == 0 or step == total_steps):
+                    try:
+                        on_progress({
+                            "series_key": series_key,
+                            "step": step,
+                            "total_steps": total_steps,
+                            "progress": pct,
+                            "loss": round(final_loss, 4),
+                            "status": "completed" if step == total_steps else "training",
+                        })
+                    except Exception:
+                        pass
 
         # Save checkpoint
         model.eval()

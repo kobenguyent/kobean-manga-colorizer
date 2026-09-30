@@ -10,10 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
 
-# Set environment variables for robust MPS operation on Apple Silicon
+# Set environment variables for robust MPS operation and OpenCV stability
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 os.environ.setdefault("YOLO_AUTOINSTALL", "0")
+os.environ.setdefault("OPENCV_NUM_THREADS", "1")
 
 import cv2
 import numpy as np
@@ -21,6 +22,11 @@ import requests
 import torch
 from PIL import Image
 from torchvision.transforms import ToTensor
+
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
 
 # ─────────────────────────────────────────────────────────────────────
 #  Thread-Safe GPU / MPS Serialization Lock
@@ -3822,22 +3828,26 @@ class MangaColorizerEngine:
                         print(f"[MangaColorizer WARNING] Failed applying series adapter: {e}")
 
         # Unpad and convert back to RGB [0, 1]
-        result_rn = fake_color[0].detach().cpu().permute(1, 2, 0).float() * 0.5 + 0.5
+        result_rn = fake_color[0].detach().cpu().permute(1, 2, 0).contiguous().float() * 0.5 + 0.5
         if pad[0] != 0:
             result_rn = result_rn[: -pad[0]]
         if pad[1] != 0:
             result_rn = result_rn[:, : -pad[1]]
 
-        rn_np = np.clip(result_rn.numpy(), 0.0, 1.0)
-        rn_rgb = (rn_np * 255.0).astype(np.uint8)
+        rn_np = np.clip(result_rn.contiguous().numpy(), 0.0, 1.0)
+        rn_rgb = np.ascontiguousarray((rn_np * 255.0).astype(np.uint8))
 
         # 4b. Fast low-resolution saturation boost pre-computation
         low_hsv = cv2.cvtColor(rn_rgb, cv2.COLOR_RGB2HSV)
         sat_boost_low = np.clip((low_hsv[:, :, 1].astype(np.float32) - 25.0) / 160.0, 0.0, 1.0)
-        sat_boost = cv2.resize(sat_boost_low, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+        sat_boost = cv2.resize(
+            np.ascontiguousarray(sat_boost_low), (w_orig, h_orig), interpolation=cv2.INTER_LINEAR
+        )
 
         # 4c. Upscale color to native page resolution via Lanczos interpolation
-        color_upscaled_rgb = cv2.resize(rn_rgb, (w_orig, h_orig), interpolation=cv2.INTER_LANCZOS4)
+        color_upscaled_rgb = cv2.resize(
+            rn_rgb, (w_orig, h_orig), interpolation=cv2.INTER_LANCZOS4
+        )
 
         # 5. Smart Anime Vibrance & Color Enhancement (RGB <-> HSV)
         profile = STYLE_PROFILES.get(style, STYLE_PROFILES["shonen_vivid"])
