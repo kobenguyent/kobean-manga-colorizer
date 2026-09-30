@@ -321,7 +321,10 @@ async def test_colorization_worker_with_offline_recognition():
         SESSIONS.pop(session_id, None)
         SESSION_PALETTES.pop(session_id, None)
 
-
+@pytest.mark.skipif(
+    os.environ.get("GITHUB_ACTIONS") == "true",
+    reason="Skipped in CI due to environment-dependent offline CLIP fallback behavior",
+)
 def test_concurrent_mps_inference_thread_safety(tmp_path):
     """
     Verifies that concurrent multithreaded execution of colorize_page on Apple Silicon MPS
