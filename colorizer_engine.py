@@ -3460,6 +3460,10 @@ class MangaColorizerEngine:
         exemplar_image_paths: Optional[list[str]] = None,
         series_key: Optional[str] = None,
         use_series_adapter: bool = True,
+        translate_page: bool = False,
+        translation_engine: str = "auto",
+        target_language: str = "en",
+        existing_translations: Optional[list[dict[str, Any]]] = None,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -3469,6 +3473,14 @@ class MangaColorizerEngine:
         if skip_if_colored and is_colored_page(image_path):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             shutil.copy2(image_path, output_path)
+            try:
+                out_p = Path(output_path)
+                if out_p.parent.name == "colorized":
+                    raw_dir = out_p.parent.parent / "colorized_raw"
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(image_path, str(raw_dir / out_p.name))
+            except Exception:
+                pass
             print(f"[MangaColorizer] Skipped (already colored): {Path(image_path).name}")
             return {
                 "status": "skipped_colored",
@@ -3498,6 +3510,10 @@ class MangaColorizerEngine:
                 exemplar_image_paths=exemplar_image_paths,
                 series_key=series_key,
                 use_series_adapter=use_series_adapter,
+                translate_page=translate_page,
+                translation_engine=translation_engine,
+                target_language=target_language,
+                existing_translations=existing_translations,
             )
 
     def _colorize_page_impl(
@@ -3521,6 +3537,10 @@ class MangaColorizerEngine:
         exemplar_image_paths: Optional[list[str]] = None,
         series_key: Optional[str] = None,
         use_series_adapter: bool = True,
+        translate_page: bool = False,
+        translation_engine: str = "auto",
+        target_language: str = "en",
+        existing_translations: Optional[list[dict[str, Any]]] = None,
     ) -> dict:
         """
         Public colorization API called by background workers and preview endpoints.
@@ -3548,6 +3568,14 @@ class MangaColorizerEngine:
         if skip_if_colored and is_colored_page(image_path):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             shutil.copy2(image_path, output_path)
+            try:
+                out_p = Path(output_path)
+                if out_p.parent.name == "colorized":
+                    raw_dir = out_p.parent.parent / "colorized_raw"
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(image_path, str(raw_dir / out_p.name))
+            except Exception:
+                pass
             print(f"[MangaColorizer] Skipped (already colored): {Path(image_path).name}")
             return {
                 "status": "skipped_colored",
@@ -3709,6 +3737,46 @@ class MangaColorizerEngine:
                     )
             except Exception as e:
                 print(f"[MangaColorizer WARNING] Quality scoring error: {e}")
+
+            # Phase 4.5: Ensure pristine color image is preserved in colorized_raw before translation
+            raw_path = None
+            try:
+                out_p = Path(output_path)
+                if out_p.parent.name == "colorized" and os.path.exists(output_path):
+                    raw_dir = out_p.parent.parent / "colorized_raw"
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    raw_path = raw_dir / out_p.name
+                    shutil.copy2(output_path, str(raw_path))
+            except Exception as e:
+                print(f"[MangaColorizer WARNING] Failed to cache pristine raw color: {e}")
+
+            # Phase 5: Manga Dialogue Translation & Typesetting
+            if translate_page and os.path.exists(output_path):
+                try:
+                    from manga_translator import MANGA_TRANSLATOR
+
+                    trans_src = str(raw_path) if (raw_path is not None and raw_path.exists()) else output_path
+                    trans_pil, trans_meta = MANGA_TRANSLATOR.translate_page(
+                        image_input=trans_src,
+                        target_lang=target_language,
+                        engine=translation_engine,
+                        api_key=api_key,
+                        existing_translations=existing_translations,
+                    )
+                    if trans_meta:
+                        trans_pil.save(output_path, format="JPEG", quality=92)
+                        res["translations"] = trans_meta
+                        res["translated"] = True
+                        print(
+                            f"[MangaColorizer] Page translated to {target_language.upper()} "
+                            f"({len(trans_meta)} bubbles typeset) ✅"
+                        )
+                    else:
+                        res["translations"] = []
+                        res["translated"] = False
+                        print("[MangaColorizer] No dialogue or speech bubbles found on page to translate.")
+                except Exception as e:
+                    print(f"[MangaColorizer WARNING] Translation error: {e}")
 
         return res
 

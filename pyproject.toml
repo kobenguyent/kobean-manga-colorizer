@@ -24,6 +24,9 @@ dependencies = [
     "torchvision>=0.17.0",
     "transformers>=4.38.0",
     "uvicorn[standard]>=0.28.0",
+    "deep-translator>=1.11.4",
+    "manga-ocr>=0.1.16",
+    "ultralytics>=8.1.0",
 ]
 
 [project.optional-dependencies]
@@ -64,5 +67,5 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["colorizer_engine", "file_processor", "networks", "denoising"]
+known-first-party = ["colorizer_engine", "file_processor", "networks", "denoising", "manga_translator"]
 combine-as-imports = true

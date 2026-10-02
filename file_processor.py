@@ -65,7 +65,45 @@ def derive_combined_title(
     return "Colorized Manga Collection"
 
 
+def derive_volume_name(image_names: list, fallback_folder: Optional[str] = None) -> str:
+    """
+    Derives a clean volume title from a list of image filenames or containing folder.
+    e.g. ['Mazinsaga01-001.jpg', ... 'Mazinsaga01-229.jpg'] -> 'Mazinsaga01'
+    e.g. ['001.jpg', '002.jpg'] with fallback_folder='Mazin Saga v01' -> 'Mazin Saga v01'
+    """
+    if fallback_folder and fallback_folder.strip() and fallback_folder.strip() not in ("/", "\\", ".", ""):
+        clean_fb = fallback_folder.strip()
+        if not clean_fb.isdigit() and len(clean_fb) > 1:
+            return clean_fb
+
+    if not image_names:
+        return fallback_folder or "Manga Volume"
+
+    stems = [Path(f).stem for f in image_names]
+    prefix = os.path.commonprefix(stems)
+    prefix = re.sub(r"[\s_\-\.0-9]+$", "", prefix).strip()
+    if len(prefix) >= 3:
+        return prefix
+
+    if fallback_folder and fallback_folder.strip() and fallback_folder.strip() not in ("/", "\\", "."):
+        return fallback_folder.strip()
+
+    first_stem = re.sub(r"[\s_\-\.0-9]+$", "", stems[0]).strip()
+    if len(first_stem) >= 3:
+        return first_stem
+
+    return "Manga Volume"
+
+
 class MangaFileProcessor:
+    @staticmethod
+    def natural_sort_key(s: str):
+        return natural_sort_key(s)
+
+    @staticmethod
+    def derive_volume_name(image_names: list, fallback_folder: Optional[str] = None) -> str:
+        return derive_volume_name(image_names, fallback_folder)
+
     def __init__(self, storage_dir: str):
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +121,12 @@ class MangaFileProcessor:
         colorized_dir.mkdir(parents=True, exist_ok=True)
 
         IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff")
-        ext = Path(file_path).suffix.lower()
+        p_path = Path(file_path)
+        if p_path.is_dir():
+            images = [p for p in p_path.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS and not p.name.startswith(".")]
+            return self.process_image_files(images, session_id)
+
+        ext = p_path.suffix.lower()
 
         if ext == ".pdf":
             return self._extract_pdf_pages(file_path, orig_dir)
@@ -95,6 +138,74 @@ class MangaFileProcessor:
             return self._extract_epub_images(file_path, orig_dir)  # reuse zip extraction
         else:
             raise ValueError(f"Unsupported file format: {ext}")
+
+    def process_image_files(
+        self,
+        image_paths: list,
+        session_id: str,
+        cbz_path: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Processes a list of image files into a multi-page volume session.
+        Preserves natural ordering, EXIF orientation, and physical pixel dimensions.
+        Optionally packages all pages into a .cbz archive at cbz_path.
+        """
+        session_dir = self.storage_dir / session_id
+        orig_dir = session_dir / "original"
+        colorized_dir = session_dir / "colorized"
+
+        orig_dir.mkdir(parents=True, exist_ok=True)
+        colorized_dir.mkdir(parents=True, exist_ok=True)
+
+        sorted_paths = sorted(image_paths, key=lambda p: natural_sort_key(Path(p).name))
+        pages_meta = []
+
+        zf = None
+        if cbz_path:
+            Path(cbz_path).parent.mkdir(parents=True, exist_ok=True)
+            zf = zipfile.ZipFile(cbz_path, "w", compression=zipfile.ZIP_STORED)
+
+        try:
+            for idx, img_p in enumerate(sorted_paths):
+                p = Path(img_p)
+                ext = p.suffix.lower() or ".jpg"
+                dest_filename = f"page_{idx + 1:04d}{ext}"
+                out_path = orig_dir / dest_filename
+
+                shutil.copy2(str(p), str(out_path))
+
+                # Handle EXIF orientation and detect dimensions
+                try:
+                    with Image.open(out_path) as im:
+                        im_trans = ImageOps.exif_transpose(im)
+                        if im_trans is not None and im_trans != im:
+                            im_trans.save(out_path)
+                            w, h = im_trans.size
+                        else:
+                            w, h = im.size
+                except Exception as e:
+                    print(f"Warning: could not inspect image {out_path}: {e}")
+                    w, h = 800, 1200
+
+                if zf:
+                    zf.write(str(out_path), arcname=dest_filename)
+
+                pages_meta.append(
+                    {
+                        "page_index": idx,
+                        "display_name": f"Page {idx + 1} ({p.name})",
+                        "filename": dest_filename,
+                        "original_path": str(out_path),
+                        "width": w,
+                        "height": h,
+                        "type": "folder_image",
+                    }
+                )
+        finally:
+            if zf:
+                zf.close()
+
+        return pages_meta
 
     def _extract_single_image(self, file_path: str, output_dir: Path):
         """Processes a single image file (.png, .jpg, .webp, etc.) preserving exact aspect ratio and orientation."""

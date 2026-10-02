@@ -47,7 +47,7 @@ from colorizer_engine import (
     RecognizedCharacter,
     is_colored_page,
 )
-from file_processor import MangaFileProcessor
+from file_processor import MangaFileProcessor, derive_volume_name, natural_sort_key
 from manga_presets import (
     detect_manga_preset,
     get_all_presets,
@@ -267,6 +267,9 @@ class ColorizeRequest(BaseModel):
     recognition_mode: Optional[str] = "auto"
     active_character_names: Optional[list[str]] = None
     page_character_overrides: Optional[dict[int, list[str]]] = None
+    translate_page: bool = False
+    translation_engine: str = "auto"
+    target_language: str = "en"
 
 
 class BatchColorizeRequest(BaseModel):
@@ -283,6 +286,9 @@ class BatchColorizeRequest(BaseModel):
     denoise_sigma: int = 25
     recognition_mode: Optional[str] = "auto"
     preset_id: Optional[str] = None
+    translate_page: bool = False
+    translation_engine: str = "auto"
+    target_language: str = "en"
 
 
 class BatchExportRequest(BaseModel):
@@ -325,6 +331,7 @@ class DirectoryImportRequest(BaseModel):
     batch_id: Optional[str] = None
     max_files: Optional[int] = 5000
     run_async: Optional[bool] = True
+    combine_images: Optional[bool] = True
 
 
 class PreviewRequest(BaseModel):
@@ -343,6 +350,9 @@ class PreviewRequest(BaseModel):
     denoise_sigma: int = 25
     active_character_names: Optional[list[str]] = None
     recognition_mode: Optional[str] = "auto"
+    translate_page: Optional[bool] = None
+    translation_engine: str = "auto"
+    target_language: str = "en"
 
 
 # ── Character Palette models ─────────────────────────────────────────
@@ -626,6 +636,8 @@ async def upload_files(
     file: Optional[UploadFile] = File(None),
     files: Optional[list[UploadFile]] = File(None),
     batch_id: Optional[str] = Form(None),
+    volume_name: Optional[str] = Form(None),
+    combine_images: Optional[bool] = Form(None),
 ):
     upload_list = []
     if files:
@@ -636,99 +648,271 @@ async def upload_files(
     if not upload_list:
         raise HTTPException(status_code=400, detail="No files uploaded.")
 
-    ALLOWED_EXTENSIONS = [
-        ".pdf",
-        ".epub",
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".webp",
-        ".bmp",
-        ".gif",
-        ".tiff",
-        ".zip",
-        ".cbz",
-    ]
+    CONTAINER_EXTENSIONS = {".pdf", ".epub", ".zip", ".cbz"}
+    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"}
+    ALLOWED_EXTENSIONS = CONTAINER_EXTENSIONS | IMAGE_EXTENSIONS
     effective_batch_id = batch_id or str(uuid.uuid4())
     created_sessions = []
 
-    for uploaded_file in upload_list:
-        ext = Path(uploaded_file.filename).suffix.lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            continue
+    valid_uploads = [
+        u for u in upload_list
+        if Path(u.filename).suffix.lower() in ALLOWED_EXTENSIONS
+    ]
+    if not valid_uploads:
+        raise HTTPException(status_code=400, detail="No supported ebook or image files uploaded.")
 
-        session_id = str(uuid.uuid4())
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        upload_path = UPLOAD_DIR / f"{session_id}_{uploaded_file.filename}"
+    has_dir_prefixes = any("/" in (u.filename or "") or "\\" in (u.filename or "") for u in valid_uploads)
+    should_combine = bool(combine_images or volume_name or (has_dir_prefixes and any(Path(u.filename).suffix.lower() in IMAGE_EXTENSIONS for u in valid_uploads)))
 
-        with open(upload_path, "wb") as buffer:
-            while chunk := await uploaded_file.read(1024 * 1024):
-                buffer.write(chunk)
+    if should_combine:
+        container_uploads = [u for u in valid_uploads if Path(u.filename).suffix.lower() in CONTAINER_EXTENSIONS]
+        image_uploads = [u for u in valid_uploads if Path(u.filename).suffix.lower() in IMAGE_EXTENSIONS]
 
-        try:
-            pages_meta = file_processor.process_input_file(str(upload_path), session_id)
-        except Exception as e:
-            if upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-            print(f"[Upload Parse Error] {uploaded_file.filename}: {e}")
-            continue
+        if image_uploads:
+            image_groups = {}
+            if volume_name and volume_name.strip():
+                image_groups[volume_name.strip()] = image_uploads
+            else:
+                for u in image_uploads:
+                    fn = (u.filename or "").replace("\\", "/")
+                    if "/" in fn:
+                        vol = fn.split("/")[0]
+                    else:
+                        vol = ""
+                    image_groups.setdefault(vol, []).append(u)
 
-        if not pages_meta:
-            if upload_path.exists():
-                upload_path.unlink(missing_ok=True)
-            print(f"[Upload Warning] No readable pages found in {uploaded_file.filename}")
-            continue
+                if "" in image_groups:
+                    ungrouped = image_groups.pop("")
+                    vol = file_processor.derive_volume_name([u.filename for u in ungrouped])
+                    image_groups.setdefault(vol, []).extend(ungrouped)
 
-        for page in pages_meta:
-            page["status"] = "pending"
-            page["colorized_url"] = None
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            for vol_name, vol_images in image_groups.items():
+                session_id = str(uuid.uuid4())
+                temp_dir = UPLOAD_DIR / f"temp_{session_id}"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                saved_paths = []
+                try:
+                    for u in vol_images:
+                        base_name = Path((u.filename or "page.jpg").replace("\\", "/")).name
+                        out_p = temp_dir / base_name
+                        with open(out_p, "wb") as buffer:
+                            while chunk := await u.read(1024 * 1024):
+                                buffer.write(chunk)
+                        saved_paths.append(out_p)
 
-        detected = detect_manga_preset(uploaded_file.filename)
-        detected_preset_id = detected.id if detected else None
-        preset_title = detected.title if detected else None
+                    cbz_filename = f"{vol_name}.cbz"
+                    upload_path = UPLOAD_DIR / f"{session_id}_{cbz_filename}"
+                    pages_meta = file_processor.process_image_files(saved_paths, session_id, cbz_path=str(upload_path))
+                    if not pages_meta:
+                        continue
 
-        sess_obj = {
-            "session_id": session_id,
-            "batch_id": effective_batch_id,
-            "filename": uploaded_file.filename,
-            "file_path": str(upload_path),
-            "ext": ext,
-            "total_pages": len(pages_meta),
-            "pages": pages_meta,
-            "status": "idle",
-            "processed_count": 0,
-            "model_provider": "google_nano",
-            "model_name": "nano-banana",
-            "detected_preset": detected_preset_id,
-            "preset_title": preset_title,
-        }
-        if detected:
-            if detected.recommended_style:
-                sess_obj["recommended_style"] = detected.recommended_style
-            pal = CharacterPalette(
-                characters=[
-                    CharacterEntry(
-                        name=c.name,
-                        hair_hex=c.hair_hex,
-                        skin_hex=c.skin_hex,
-                        costume_hex=c.costume_hex,
-                        extra_hex=c.extra_hex,
-                        eye_hex=getattr(c, "eye_hex", ""),
-                        visual_traits=getattr(c, "visual_traits", []) or [],
-                        notes=getattr(c, "notes", ""),
-                    )
-                    for c in detected.characters
-                ],
-                preset_id=detected.id,
-                preset_title=detected.title,
-            )
-            SESSION_PALETTES[session_id] = pal
-            save_session_palette(session_id, pal)
+                    for page in pages_meta:
+                        page["status"] = "pending"
+                        page["colorized_url"] = None
 
-        SESSIONS[session_id] = sess_obj
-        EVENT_QUEUES[session_id] = []
-        save_session_meta(session_id)
-        created_sessions.append(sess_obj)
+                    detected = detect_manga_preset(vol_name) or (detect_manga_preset(saved_paths[0].name) if saved_paths else None)
+                    detected_preset_id = detected.id if detected else None
+                    preset_title = detected.title if detected else None
+
+                    sess_obj = {
+                        "session_id": session_id,
+                        "batch_id": effective_batch_id,
+                        "filename": cbz_filename,
+                        "file_path": str(upload_path),
+                        "ext": ".cbz",
+                        "total_pages": len(pages_meta),
+                        "pages": pages_meta,
+                        "status": "idle",
+                        "processed_count": 0,
+                        "model_provider": "google_nano",
+                        "model_name": "nano-banana",
+                        "detected_preset": detected_preset_id,
+                        "preset_title": preset_title,
+                    }
+                    if detected:
+                        if detected.recommended_style:
+                            sess_obj["recommended_style"] = detected.recommended_style
+                        pal = CharacterPalette(
+                            characters=[
+                                CharacterEntry(
+                                    name=c.name,
+                                    hair_hex=c.hair_hex,
+                                    skin_hex=c.skin_hex,
+                                    costume_hex=c.costume_hex,
+                                    extra_hex=c.extra_hex,
+                                    eye_hex=getattr(c, "eye_hex", ""),
+                                    visual_traits=getattr(c, "visual_traits", []) or [],
+                                    notes=getattr(c, "notes", ""),
+                                )
+                                for c in detected.characters
+                            ],
+                            preset_id=detected.id,
+                            preset_title=detected.title,
+                        )
+                        SESSION_PALETTES[session_id] = pal
+                        save_session_palette(session_id, pal)
+
+                    SESSIONS[session_id] = sess_obj
+                    EVENT_QUEUES[session_id] = []
+                    save_session_meta(session_id)
+                    created_sessions.append(sess_obj)
+                except Exception as e:
+                    print(f"[Upload Volume Error] {vol_name}: {e}")
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                finally:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+
+        for uploaded_file in container_uploads:
+            ext = Path(uploaded_file.filename).suffix.lower()
+            session_id = str(uuid.uuid4())
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            upload_path = UPLOAD_DIR / f"{session_id}_{uploaded_file.filename}"
+
+            with open(upload_path, "wb") as buffer:
+                while chunk := await uploaded_file.read(1024 * 1024):
+                    buffer.write(chunk)
+
+            try:
+                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+            except Exception as e:
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                print(f"[Upload Parse Error] {uploaded_file.filename}: {e}")
+                continue
+
+            if not pages_meta:
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                print(f"[Upload Warning] No readable pages found in {uploaded_file.filename}")
+                continue
+
+            for page in pages_meta:
+                page["status"] = "pending"
+                page["colorized_url"] = None
+
+            detected = detect_manga_preset(uploaded_file.filename)
+            detected_preset_id = detected.id if detected else None
+            preset_title = detected.title if detected else None
+
+            sess_obj = {
+                "session_id": session_id,
+                "batch_id": effective_batch_id,
+                "filename": uploaded_file.filename,
+                "file_path": str(upload_path),
+                "ext": ext,
+                "total_pages": len(pages_meta),
+                "pages": pages_meta,
+                "status": "idle",
+                "processed_count": 0,
+                "model_provider": "google_nano",
+                "model_name": "nano-banana",
+                "detected_preset": detected_preset_id,
+                "preset_title": preset_title,
+            }
+            if detected:
+                if detected.recommended_style:
+                    sess_obj["recommended_style"] = detected.recommended_style
+                pal = CharacterPalette(
+                    characters=[
+                        CharacterEntry(
+                            name=c.name,
+                            hair_hex=c.hair_hex,
+                            skin_hex=c.skin_hex,
+                            costume_hex=c.costume_hex,
+                            extra_hex=c.extra_hex,
+                            eye_hex=getattr(c, "eye_hex", ""),
+                            visual_traits=getattr(c, "visual_traits", []) or [],
+                            notes=getattr(c, "notes", ""),
+                        )
+                        for c in detected.characters
+                    ],
+                    preset_id=detected.id,
+                    preset_title=detected.title,
+                )
+                SESSION_PALETTES[session_id] = pal
+                save_session_palette(session_id, pal)
+
+            SESSIONS[session_id] = sess_obj
+            EVENT_QUEUES[session_id] = []
+            save_session_meta(session_id)
+            created_sessions.append(sess_obj)
+    else:
+        for uploaded_file in valid_uploads:
+            ext = Path(uploaded_file.filename).suffix.lower()
+            session_id = str(uuid.uuid4())
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            upload_path = UPLOAD_DIR / f"{session_id}_{uploaded_file.filename}"
+
+            with open(upload_path, "wb") as buffer:
+                while chunk := await uploaded_file.read(1024 * 1024):
+                    buffer.write(chunk)
+
+            try:
+                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+            except Exception as e:
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                print(f"[Upload Parse Error] {uploaded_file.filename}: {e}")
+                continue
+
+            if not pages_meta:
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+                print(f"[Upload Warning] No readable pages found in {uploaded_file.filename}")
+                continue
+
+            for page in pages_meta:
+                page["status"] = "pending"
+                page["colorized_url"] = None
+
+            detected = detect_manga_preset(uploaded_file.filename)
+            detected_preset_id = detected.id if detected else None
+            preset_title = detected.title if detected else None
+
+            sess_obj = {
+                "session_id": session_id,
+                "batch_id": effective_batch_id,
+                "filename": uploaded_file.filename,
+                "file_path": str(upload_path),
+                "ext": ext,
+                "total_pages": len(pages_meta),
+                "pages": pages_meta,
+                "status": "idle",
+                "processed_count": 0,
+                "model_provider": "google_nano",
+                "model_name": "nano-banana",
+                "detected_preset": detected_preset_id,
+                "preset_title": preset_title,
+            }
+            if detected:
+                if detected.recommended_style:
+                    sess_obj["recommended_style"] = detected.recommended_style
+                pal = CharacterPalette(
+                    characters=[
+                        CharacterEntry(
+                            name=c.name,
+                            hair_hex=c.hair_hex,
+                            skin_hex=c.skin_hex,
+                            costume_hex=c.costume_hex,
+                            extra_hex=c.extra_hex,
+                            eye_hex=getattr(c, "eye_hex", ""),
+                            visual_traits=getattr(c, "visual_traits", []) or [],
+                            notes=getattr(c, "notes", ""),
+                        )
+                        for c in detected.characters
+                    ],
+                    preset_id=detected.id,
+                    preset_title=detected.title,
+                )
+                SESSION_PALETTES[session_id] = pal
+                save_session_palette(session_id, pal)
+
+            SESSIONS[session_id] = sess_obj
+            EVENT_QUEUES[session_id] = []
+            save_session_meta(session_id)
+            created_sessions.append(sess_obj)
 
     if not created_sessions:
         raise HTTPException(status_code=400, detail="Failed to parse any of the uploaded files.")
@@ -809,34 +993,70 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
             detail=f"Directory does not exist or is not a directory: {req.directory_path} (resolved: {dir_path})",
         )
 
-    ALLOWED_EXTENSIONS = {".pdf", ".epub", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".zip", ".cbz"}
+    CONTAINER_EXTENSIONS = {".pdf", ".epub", ".zip", ".cbz"}
+    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"}
+    ALLOWED_EXTENSIONS = CONTAINER_EXTENSIONS | IMAGE_EXTENSIONS
 
-    discovered_files = []
+    folder_images = {}
+    container_files = []
+
     if req.recursive:
         for root, _, files in os.walk(str(dir_path)):
+            root_p = Path(root)
             for f in files:
                 if f.startswith(".") or f.startswith("__MACOSX"):
                     continue
-                p = Path(root) / f
-                if p.suffix.lower() in ALLOWED_EXTENSIONS:
-                    discovered_files.append(p)
+                p = root_p / f
+                ext = p.suffix.lower()
+                if ext in CONTAINER_EXTENSIONS:
+                    container_files.append(p)
+                elif ext in IMAGE_EXTENSIONS:
+                    if req.combine_images:
+                        folder_images.setdefault(root_p, []).append(p)
+                    else:
+                        container_files.append(p)
     else:
         for item in dir_path.iterdir():
             if item.is_file() and not item.name.startswith("."):
-                if item.suffix.lower() in ALLOWED_EXTENSIONS:
-                    discovered_files.append(item)
+                ext = item.suffix.lower()
+                if ext in CONTAINER_EXTENSIONS:
+                    container_files.append(item)
+                elif ext in IMAGE_EXTENSIONS:
+                    if req.combine_images:
+                        folder_images.setdefault(dir_path, []).append(item)
+                    else:
+                        container_files.append(item)
 
-    def _sort_key(p: Path):
-        fn = p.name.lower()
-        parts = [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', fn)]
-        return parts
+    import_items = []
+    # Add image folder items
+    for folder_p, imgs in folder_images.items():
+        if not imgs:
+            continue
+        imgs.sort(key=lambda p: file_processor.natural_sort_key(p.name))
+        vol_name = folder_p.name if folder_p != folder_p.parent else dir_path.name
+        if not vol_name or vol_name in ("/", "\\", "."):
+            vol_name = dir_path.name or "Manga Volume"
+        import_items.append({
+            "type": "image_folder",
+            "folder": folder_p,
+            "name": vol_name,
+            "images": imgs,
+        })
 
-    discovered_files.sort(key=_sort_key)
+    # Add container items
+    for cf in container_files:
+        import_items.append({
+            "type": "container",
+            "path": cf,
+            "name": cf.name,
+        })
 
-    if req.max_files and len(discovered_files) > req.max_files:
-        discovered_files = discovered_files[:req.max_files]
+    import_items.sort(key=lambda x: file_processor.natural_sort_key(x["name"]))
 
-    if not discovered_files:
+    if req.max_files and len(import_items) > req.max_files:
+        import_items = import_items[:req.max_files]
+
+    if not import_items:
         raise HTTPException(status_code=404, detail=f"No supported ebook files found in {dir_path}")
 
     import_id = str(uuid.uuid4())
@@ -847,7 +1067,7 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
         "batch_id": effective_batch_id,
         "directory": str(dir_path),
         "status": "running",
-        "total_files": len(discovered_files),
+        "total_files": len(import_items),
         "imported_files": 0,
         "failed_files": 0,
         "current_file": None,
@@ -858,92 +1078,180 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
     IMPORT_TASKS[import_id] = task_state
 
     def _process_import():
-        for file_p in discovered_files:
+        for item in import_items:
             if task_state.get("cancel_requested"):
                 task_state["status"] = "cancelled"
                 break
 
-            task_state["current_file"] = file_p.name
-            ext = file_p.suffix.lower()
-            session_id = str(uuid.uuid4())
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            upload_path = UPLOAD_DIR / f"{session_id}_{file_p.name}"
+            if item["type"] == "container":
+                file_p = item["path"]
+                task_state["current_file"] = file_p.name
+                ext = file_p.suffix.lower()
+                session_id = str(uuid.uuid4())
+                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                upload_path = UPLOAD_DIR / f"{session_id}_{file_p.name}"
 
-            try:
-                shutil.copy2(str(file_p), str(upload_path))
-                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
-                if not pages_meta:
+                try:
+                    shutil.copy2(str(file_p), str(upload_path))
+                    pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+                    if not pages_meta:
+                        if upload_path.exists():
+                            upload_path.unlink(missing_ok=True)
+                        task_state["failed_files"] += 1
+                        continue
+
+                    for page in pages_meta:
+                        page["status"] = "pending"
+                        page["colorized_url"] = None
+
+                    detected = detect_manga_preset(file_p.name)
+                    detected_preset_id = detected.id if detected else None
+                    preset_title = detected.title if detected else None
+
+                    sess_obj = {
+                        "session_id": session_id,
+                        "batch_id": effective_batch_id,
+                        "filename": file_p.name,
+                        "file_path": str(upload_path),
+                        "ext": ext,
+                        "total_pages": len(pages_meta),
+                        "pages": pages_meta,
+                        "status": "idle",
+                        "processed_count": 0,
+                        "model_provider": "google_nano",
+                        "model_name": "nano-banana",
+                        "detected_preset": detected_preset_id,
+                        "preset_title": preset_title,
+                    }
+                    if detected:
+                        if detected.recommended_style:
+                            sess_obj["recommended_style"] = detected.recommended_style
+                        pal = CharacterPalette(
+                            characters=[
+                                CharacterEntry(
+                                    name=c.name,
+                                    hair_hex=c.hair_hex,
+                                    skin_hex=c.skin_hex,
+                                    costume_hex=c.costume_hex,
+                                    extra_hex=c.extra_hex,
+                                    eye_hex=getattr(c, "eye_hex", ""),
+                                    visual_traits=getattr(c, "visual_traits", []) or [],
+                                    notes=getattr(c, "notes", ""),
+                                )
+                                for c in detected.characters
+                            ],
+                            preset_id=detected.id,
+                            preset_title=detected.title,
+                        )
+                        SESSION_PALETTES[session_id] = pal
+                        save_session_palette(session_id, pal)
+
+                    SESSIONS[session_id] = sess_obj
+                    EVENT_QUEUES[session_id] = []
+                    save_session_meta(session_id)
+                    task_state["imported_files"] += 1
+                    task_state["created_sessions"].append({
+                        "session_id": session_id,
+                        "batch_id": effective_batch_id,
+                        "filename": file_p.name,
+                        "ext": ext,
+                        "total_pages": len(pages_meta),
+                        "status": "idle",
+                        "processed_count": 0,
+                        "detected_preset": detected_preset_id,
+                        "preset_title": preset_title,
+                    })
+                except Exception as e:
+                    task_state["failed_files"] += 1
+                    print(f"[Directory Import Error] {file_p.name}: {e}")
                     if upload_path.exists():
                         upload_path.unlink(missing_ok=True)
+
+            elif item["type"] == "image_folder":
+                folder_p = item["folder"]
+                images = item["images"]
+                vol_name = item["name"]
+
+                task_state["current_file"] = f"{vol_name} ({len(images)} pages)"
+                session_id = str(uuid.uuid4())
+                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                cbz_filename = f"{vol_name}.cbz"
+                upload_path = UPLOAD_DIR / f"{session_id}_{cbz_filename}"
+
+                try:
+                    pages_meta = file_processor.process_image_files(images, session_id, cbz_path=str(upload_path))
+                    if not pages_meta:
+                        if upload_path.exists():
+                            upload_path.unlink(missing_ok=True)
+                        task_state["failed_files"] += 1
+                        continue
+
+                    for page in pages_meta:
+                        page["status"] = "pending"
+                        page["colorized_url"] = None
+
+                    detected = detect_manga_preset(vol_name) or (detect_manga_preset(images[0].name) if images else None)
+                    detected_preset_id = detected.id if detected else None
+                    preset_title = detected.title if detected else None
+
+                    sess_obj = {
+                        "session_id": session_id,
+                        "batch_id": effective_batch_id,
+                        "filename": cbz_filename,
+                        "file_path": str(upload_path),
+                        "ext": ".cbz",
+                        "total_pages": len(pages_meta),
+                        "pages": pages_meta,
+                        "status": "idle",
+                        "processed_count": 0,
+                        "model_provider": "google_nano",
+                        "model_name": "nano-banana",
+                        "detected_preset": detected_preset_id,
+                        "preset_title": preset_title,
+                    }
+                    if detected:
+                        if detected.recommended_style:
+                            sess_obj["recommended_style"] = detected.recommended_style
+                        pal = CharacterPalette(
+                            characters=[
+                                CharacterEntry(
+                                    name=c.name,
+                                    hair_hex=c.hair_hex,
+                                    skin_hex=c.skin_hex,
+                                    costume_hex=c.costume_hex,
+                                    extra_hex=c.extra_hex,
+                                    eye_hex=getattr(c, "eye_hex", ""),
+                                    visual_traits=getattr(c, "visual_traits", []) or [],
+                                    notes=getattr(c, "notes", ""),
+                                )
+                                for c in detected.characters
+                            ],
+                            preset_id=detected.id,
+                            preset_title=detected.title,
+                        )
+                        SESSION_PALETTES[session_id] = pal
+                        save_session_palette(session_id, pal)
+
+                    SESSIONS[session_id] = sess_obj
+                    EVENT_QUEUES[session_id] = []
+                    save_session_meta(session_id)
+                    task_state["imported_files"] += 1
+                    task_state["created_sessions"].append({
+                        "session_id": session_id,
+                        "batch_id": effective_batch_id,
+                        "filename": cbz_filename,
+                        "ext": ".cbz",
+                        "total_pages": len(pages_meta),
+                        "status": "idle",
+                        "processed_count": 0,
+                        "detected_preset": detected_preset_id,
+                        "preset_title": preset_title,
+                    })
+                except Exception as e:
                     task_state["failed_files"] += 1
-                    continue
-
-                for page in pages_meta:
-                    page["status"] = "pending"
-                    page["colorized_url"] = None
-
-                detected = detect_manga_preset(file_p.name)
-                detected_preset_id = detected.id if detected else None
-                preset_title = detected.title if detected else None
-
-                sess_obj = {
-                    "session_id": session_id,
-                    "batch_id": effective_batch_id,
-                    "filename": file_p.name,
-                    "file_path": str(upload_path),
-                    "ext": ext,
-                    "total_pages": len(pages_meta),
-                    "pages": pages_meta,
-                    "status": "idle",
-                    "processed_count": 0,
-                    "model_provider": "google_nano",
-                    "model_name": "nano-banana",
-                    "detected_preset": detected_preset_id,
-                    "preset_title": preset_title,
-                }
-                if detected:
-                    if detected.recommended_style:
-                        sess_obj["recommended_style"] = detected.recommended_style
-                    pal = CharacterPalette(
-                        characters=[
-                            CharacterEntry(
-                                name=c.name,
-                                hair_hex=c.hair_hex,
-                                skin_hex=c.skin_hex,
-                                costume_hex=c.costume_hex,
-                                extra_hex=c.extra_hex,
-                                eye_hex=getattr(c, "eye_hex", ""),
-                                visual_traits=getattr(c, "visual_traits", []) or [],
-                                notes=getattr(c, "notes", ""),
-                            )
-                            for c in detected.characters
-                        ],
-                        preset_id=detected.id,
-                        preset_title=detected.title,
-                    )
-                    SESSION_PALETTES[session_id] = pal
-                    save_session_palette(session_id, pal)
-
-                SESSIONS[session_id] = sess_obj
-                EVENT_QUEUES[session_id] = []
-                save_session_meta(session_id)
-                task_state["imported_files"] += 1
-                task_state["created_sessions"].append({
-                    "session_id": session_id,
-                    "batch_id": effective_batch_id,
-                    "filename": file_p.name,
-                    "ext": ext,
-                    "total_pages": len(pages_meta),
-                    "status": "idle",
-                    "processed_count": 0,
-                    "detected_preset": detected_preset_id,
-                    "preset_title": preset_title,
-                })
-            except Exception as e:
-                task_state["failed_files"] += 1
-                print(f"[Directory Import Error] {file_p.name}: {e}")
-                if upload_path.exists():
-                    upload_path.unlink(missing_ok=True)
+                    print(f"[Directory Import Volume Error] {vol_name}: {e}")
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
 
         if task_state["status"] != "cancelled":
             task_state["status"] = "completed"
@@ -955,9 +1263,9 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
             "status": "started",
             "import_id": import_id,
             "batch_id": effective_batch_id,
-            "total_files": len(discovered_files),
-            "total_scanned_files": len(discovered_files),
-            "message": f"Started background import of {len(discovered_files)} files from {dir_path.name}"
+            "total_files": len(import_items),
+            "total_scanned_files": len(import_items),
+            "message": f"Started background import of {len(import_items)} item(s) from {dir_path.name}"
         })
     else:
         _process_import()
@@ -965,8 +1273,8 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
             "status": "completed",
             "import_id": import_id,
             "batch_id": effective_batch_id,
-            "total_files": len(discovered_files),
-            "total_scanned_files": len(discovered_files),
+            "total_files": len(import_items),
+            "total_scanned_files": len(import_items),
             "imported_files": task_state["imported_files"],
             "processed_files": task_state["imported_files"] + task_state["failed_files"],
             "failed_files": task_state["failed_files"],
@@ -1241,7 +1549,7 @@ async def get_session(session_id: str):
 
 @app.get("/api/session/{session_id}/image/{img_type}/{filename}")
 async def get_session_image(session_id: str, img_type: str, filename: str):
-    if img_type not in ["original", "colorized"]:
+    if img_type not in ["original", "colorized", "colorized_raw"]:
         raise HTTPException(status_code=400, detail="Invalid image type")
 
     img_path = STORAGE_DIR / session_id / img_type / filename
@@ -1408,6 +1716,26 @@ def run_colorization_worker(session_id: str, req: ColorizeRequest):
     loop.run_until_complete(_async_colorization_worker(session_id, req))
 
 
+def page_needs_translation(page_info: dict) -> bool:
+    """
+    Checks if a page still requires translation:
+    1. Not yet translated (page_info.get('translated') is False/None)
+    2. Or contains stale/rate-limited translations where english is identical to raw Japanese
+    """
+    if not page_info.get("translated"):
+        return True
+    translations = page_info.get("translations", [])
+    if not translations:
+        return False
+    # If any translation has Japanese text identical to English text, it failed previously
+    for t in translations:
+        ja = (t.get("japanese") or "").strip()
+        en = (t.get("english") or "").strip()
+        if ja and en == ja and any(ord(c) > 0x3000 for c in ja):
+            return True
+    return False
+
+
 async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
     sess = SESSIONS.get(session_id)
     if not sess:
@@ -1443,8 +1771,16 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
     colorized_dir = session_dir / "colorized"
     colorized_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure processed_count strictly reflects actual colorized pages
-    sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+    if req.force_recolorize:
+        for idx in target_pages:
+            if idx < len(pages):
+                pages[idx]["status"] = "pending"
+                pages[idx].pop("skipped_colored", None)
+        sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
+        save_session_meta(session_id)
+    else:
+        # Ensure processed_count strictly reflects actual colorized pages
+        sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
 
     try:
         for idx in target_pages:
@@ -1473,7 +1809,7 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             output_path = str(colorized_dir / color_filename)
 
             # Skip if page is already colorized and output file exists on disk,
-            # UNLESS the caller explicitly requested a force recolorize.
+            # UNLESS the caller explicitly requested a force recolorize OR translation is needed.
             if (
                 not req.force_recolorize
                 and page_info.get("status") == "colorized"
@@ -1484,6 +1820,69 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     page_info["colorized_url"] = (
                         f"/api/session/{session_id}/image/colorized/{color_filename}"
                     )
+
+                # Fast-path: if page is already colorized on disk, but translation is requested and pending:
+                if req.translate_page and page_needs_translation(page_info):
+                    page_info["status"] = "processing"
+                    await notify_sse_listeners(
+                        session_id,
+                        {
+                            "type": "page_update",
+                            "page_index": idx,
+                            "status": "processing",
+                            "progress": f"Translating {idx + 1}/{len(pages)}",
+                        },
+                    )
+                    try:
+                        from manga_translator import MANGA_TRANSLATOR
+
+                        raw_color_dir = colorized_dir.parent / "colorized_raw"
+                        raw_color_dir.mkdir(parents=True, exist_ok=True)
+                        raw_color_path = raw_color_dir / color_filename
+
+                        if raw_color_path.exists():
+                            source_img_path = str(raw_color_path)
+                        elif not page_info.get("translated") and os.path.exists(output_path):
+                            shutil.copy2(output_path, str(raw_color_path))
+                            source_img_path = str(raw_color_path)
+                        elif os.path.exists(output_path):
+                            source_img_path = output_path
+                        else:
+                            source_img_path = orig_path
+
+                        trans_pil, trans_meta = await asyncio.to_thread(
+                            MANGA_TRANSLATOR.translate_page,
+                            image_input=source_img_path,
+                            target_lang=getattr(req, "target_language", "en"),
+                            engine=getattr(req, "translation_engine", "auto"),
+                            api_key=req.api_key or sess.get("api_key") or "",
+                        )
+                        if trans_meta:
+                            trans_pil.save(output_path, format="JPEG", quality=92)
+                            page_info["translations"] = trans_meta
+                            page_info["translated"] = True
+                        else:
+                            page_info["translations"] = []
+                            page_info["translated"] = False
+                    except Exception as e:
+                        print(f"[MangaColorizer WARNING] Fast translation error on page {idx}: {e}")
+
+                    page_info["status"] = "colorized"
+                    save_session_meta(session_id)
+                    await notify_sse_listeners(
+                        session_id,
+                        {
+                            "type": "page_update",
+                            "page_index": idx,
+                            "status": "colorized",
+                            "colorized_url": page_info["colorized_url"],
+                            "translations": page_info.get("translations", []),
+                            "translated": bool(page_info.get("translated")),
+                            "processed_count": sess["processed_count"],
+                            "total": sess["total_pages"],
+                        },
+                    )
+
                 continue
 
             # When forcing recolorize, reset page status so the UI shows it as in-flight
@@ -1495,6 +1894,10 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
             # copy original immediately and NEVER show as "processing" in-flight
             if req.skip_if_colored and is_colored_page(orig_path):
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                raw_color_dir = colorized_dir.parent / "colorized_raw"
+                raw_color_dir.mkdir(parents=True, exist_ok=True)
+                raw_color_path = raw_color_dir / color_filename
+                shutil.copy2(orig_path, str(raw_color_path))
                 shutil.copy2(orig_path, output_path)
                 page_info["status"] = "colorized"
                 page_info["skipped_colored"] = True
@@ -1502,6 +1905,32 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     f"/api/session/{session_id}/image/colorized/{color_filename}"
                 )
                 page_info["engine_used"] = "original (already colored)"
+
+                # Translate skipped colored page if requested
+                if req.translate_page:
+                    try:
+                        from manga_translator import MANGA_TRANSLATOR
+
+                        trans_pil, trans_meta = await asyncio.to_thread(
+                            MANGA_TRANSLATOR.translate_page,
+                            image_input=str(raw_color_path),
+                            target_lang=getattr(req, "target_language", "en"),
+                            engine=getattr(req, "translation_engine", "auto"),
+                            api_key=req.api_key or sess.get("api_key") or "",
+                        )
+                        if trans_meta:
+                            trans_pil.save(output_path, format="JPEG", quality=92)
+                            page_info["translations"] = trans_meta
+                            page_info["translated"] = True
+                        else:
+                            page_info["translations"] = []
+                            page_info["translated"] = False
+                    except Exception as e:
+                        print(f"[MangaColorizer WARNING] Translation error on colored page {idx}: {e}")
+                else:
+                    page_info["translations"] = []
+                    page_info["translated"] = False
+
                 sess["processed_count"] = sum(1 for p in pages if p.get("status") == "colorized")
                 save_session_meta(session_id)
 
@@ -1584,6 +2013,13 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     active_palette = palette.optimize_for_page(actual_recs)
                     skip_rec = True
 
+                page_should_translate = getattr(req, "translate_page", False) or bool(page_info.get("translated"))
+                existing_trans = (
+                    page_info.get("translations")
+                    if (page_should_translate and page_info.get("translated"))
+                    else None
+                )
+
                 # Run CPU-bound colorization in a thread without blocking main asyncio loop
                 res = await asyncio.to_thread(
                     colorizer_engine.colorize_page,
@@ -1606,6 +2042,10 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     exemplar_image_paths=exemplar_paths,
                     series_key=s_key,
                     use_series_adapter=True,
+                    translate_page=page_should_translate,
+                    translation_engine=getattr(req, "translation_engine", "auto"),
+                    target_language=getattr(req, "target_language", "en"),
+                    existing_translations=existing_trans,
                 )
 
                 # Check again immediately after colorizing in case cancel was pressed mid-task
@@ -1641,6 +2081,17 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                     page_info["exemplars_used"] = res["exemplars_used"]
                 if res.get("adapter_used"):
                     page_info["adapter_used"] = True
+                if res.get("translations"):
+                    page_info["translations"] = res["translations"]
+                    page_info["translated"] = True
+                elif res.get("translated"):
+                    page_info["translated"] = True
+                elif page_should_translate and existing_trans:
+                    page_info["translations"] = existing_trans
+                    page_info["translated"] = True
+                elif not page_should_translate:
+                    page_info["translated"] = False
+                    page_info["translations"] = []
                 if res.get("recognized_characters"):
                     page_info["recognized_characters"] = res["recognized_characters"]
                 elif page_recs:
@@ -1702,6 +2153,8 @@ async def _async_colorization_worker(session_id: str, req: ColorizeRequest):
                         "quality_score": page_info.get("quality_score"),
                         "auto_harvested": bool(page_info.get("auto_harvested")),
                         "recognized_characters": page_info.get("recognized_characters", []),
+                        "translations": page_info.get("translations", []),
+                        "translated": bool(page_info.get("translated")),
                         "processed_count": sess["processed_count"],
                         "total": sess["total_pages"],
                     },
@@ -1801,6 +2254,7 @@ async def resume_colorization(session_id: str, req: Optional[ColorizeRequest] = 
         if p.get("status") != "colorized"
         or not (colorized_dir / p.get("filename", "")).exists()
         or (colorized_dir / p.get("filename", "")).stat().st_size == 0
+        or (req is not None and getattr(req, "translate_page", False) and page_needs_translation(p))
     ]
 
     if not uncolorized_indices and len(pages) > 0:
@@ -1954,6 +2408,20 @@ async def preview_single_page(req: PreviewRequest):
         ]
         exemplar_path = exemplar_paths[0] if exemplar_paths else None
 
+        # Determine whether to translate page:
+        # If req.translate_page is explicitly specified, use it.
+        # Otherwise, preserve existing translation status of the page.
+        if req.translate_page is not None:
+            should_translate = req.translate_page
+        else:
+            should_translate = bool(page_info.get("translated"))
+
+        existing_trans = (
+            page_info.get("translations")
+            if (should_translate and page_info.get("translated"))
+            else None
+        )
+
         res = await asyncio.to_thread(
             colorizer_engine.colorize_page,
             image_path=orig_path,
@@ -1975,7 +2443,21 @@ async def preview_single_page(req: PreviewRequest):
             exemplar_image_paths=exemplar_paths,
             series_key=s_key,
             use_series_adapter=True,
+            translate_page=should_translate,
+            translation_engine=getattr(req, "translation_engine", "auto"),
+            target_language=getattr(req, "target_language", "en"),
+            existing_translations=existing_trans,
         )
+
+        # Ensure raw color is guaranteed to exist on disk in colorized_raw
+        raw_color_dir = session_dir / "colorized_raw"
+        raw_color_dir.mkdir(parents=True, exist_ok=True)
+        raw_color_path = raw_color_dir / color_filename
+        if not raw_color_path.exists() and os.path.exists(output_path) and not should_translate:
+            try:
+                shutil.copy2(output_path, str(raw_color_path))
+            except Exception:
+                pass
 
         page_info["status"] = "colorized"
         page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
@@ -1990,6 +2472,17 @@ async def preview_single_page(req: PreviewRequest):
             page_info["adapter_used"] = True
         if res.get("quality_score"):
             page_info["quality_score"] = res["quality_score"]
+        if res.get("translations"):
+            page_info["translations"] = res["translations"]
+            page_info["translated"] = True
+        elif res.get("translated"):
+            page_info["translated"] = True
+        elif should_translate and existing_trans:
+            page_info["translations"] = existing_trans
+            page_info["translated"] = True
+        elif not should_translate:
+            page_info["translated"] = False
+            page_info["translations"] = []
         if res.get("recognized_characters"):
             page_info["recognized_characters"] = res["recognized_characters"]
 
@@ -2013,6 +2506,8 @@ async def preview_single_page(req: PreviewRequest):
                 "adapter_used": bool(page_info.get("adapter_used")),
                 "quality_score": page_info.get("quality_score"),
                 "recognized_characters": page_info.get("recognized_characters", []),
+                "translations": page_info.get("translations", []),
+                "translated": bool(page_info.get("translated")),
                 "processed_count": sess["processed_count"],
                 "total": sess.get("total_pages", len(pages)),
             },
@@ -2027,6 +2522,8 @@ async def preview_single_page(req: PreviewRequest):
                 "page_info": page_info,
                 "quality_score": page_info.get("quality_score"),
                 "recognized_characters": res.get("recognized_characters") or page_info.get("recognized_characters", []),
+                "translations": page_info.get("translations", []),
+                "translated": bool(page_info.get("translated")),
                 "exemplar_used": res.get("exemplar_used"),
                 "exemplars_used": res.get("exemplars_used", []),
                 "adapter_used": bool(res.get("adapter_used")),
@@ -2037,6 +2534,313 @@ async def preview_single_page(req: PreviewRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+
+
+class TranslatePageRequest(BaseModel):
+    session_id: str
+    page_index: int = 0
+    target_language: str = "en"
+    translation_engine: str = "auto"
+    translate_colorized: bool = True
+    api_key: Optional[str] = ""
+    force: bool = False
+
+
+@app.post("/api/translate/page")
+async def translate_page_endpoint(req: TranslatePageRequest):
+    """
+    Translates speech bubbles and text on a specific manga page on-demand.
+    Uses either the colorized version (default) or the original grayscale version.
+    Sourced from pristine colorized_raw to prevent text degradation on re-translation.
+    """
+    session_id = req.session_id
+    sess = SESSIONS.get(session_id) or get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    pages = sess.get("pages", [])
+    if req.page_index < 0 or req.page_index >= len(pages):
+        raise HTTPException(status_code=400, detail="Invalid page index")
+
+    page_info = pages[req.page_index]
+    orig_path = page_info.get("original_path")
+    if not orig_path or not os.path.exists(orig_path):
+        raise HTTPException(status_code=404, detail="Original image not found")
+
+    color_dir = STORAGE_DIR / session_id / "colorized"
+    color_dir.mkdir(parents=True, exist_ok=True)
+    color_filename = (
+        Path(page_info["colorized_url"].split("?")[0]).name
+        if page_info.get("colorized_url")
+        else (page_info.get("filename") or f"page_{req.page_index + 1:04d}.jpg")
+    )
+    color_output_path = str(color_dir / color_filename)
+
+    raw_color_dir = STORAGE_DIR / session_id / "colorized_raw"
+    raw_color_dir.mkdir(parents=True, exist_ok=True)
+    raw_color_path = raw_color_dir / color_filename
+
+    if req.translate_colorized:
+        if raw_color_path.exists():
+            source_img_path = str(raw_color_path)
+        elif os.path.exists(color_output_path):
+            source_img_path = color_output_path
+            if not page_info.get("translated"):
+                try:
+                    shutil.copy2(color_output_path, str(raw_color_path))
+                except Exception:
+                    pass
+        else:
+            source_img_path = orig_path
+    else:
+        source_img_path = orig_path
+
+    try:
+        from manga_translator import MANGA_TRANSLATOR
+
+        trans_pil, trans_meta = await asyncio.to_thread(
+            MANGA_TRANSLATOR.translate_page,
+            image_input=source_img_path,
+            target_lang=req.target_language,
+            engine=req.translation_engine,
+            api_key=req.api_key or sess.get("api_key") or "",
+        )
+
+        has_translations = len(trans_meta) > 0
+        if has_translations:
+            trans_pil.save(color_output_path, format="JPEG", quality=92)
+            page_info["status"] = "colorized"
+            page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+            page_info["translations"] = trans_meta
+            page_info["translated"] = True
+        else:
+            if not os.path.exists(color_output_path):
+                trans_pil.save(color_output_path, format="JPEG", quality=92)
+                page_info["status"] = "colorized"
+                page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+            page_info["translations"] = []
+            page_info["translated"] = False
+
+        save_session_meta(session_id)
+
+        await notify_sse_listeners(
+            session_id,
+            {
+                "type": "page_update",
+                "page_index": req.page_index,
+                "status": "colorized",
+                "colorized_url": page_info.get("colorized_url"),
+                "translations": page_info.get("translations", []),
+                "translated": has_translations,
+                "processed_count": sess.get("processed_count", 0),
+                "total": sess.get("total_pages", len(pages)),
+            },
+        )
+
+        return JSONResponse(
+            {
+                "status": "success",
+                "page_index": req.page_index,
+                "colorized_url": page_info.get("colorized_url"),
+                "translations": page_info.get("translations", []),
+                "bubble_count": len(trans_meta),
+                "translated": has_translations,
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+
+
+class TranslateSessionRequest(BaseModel):
+    session_id: str
+    target_language: str = "en"
+    translation_engine: str = "auto"
+    api_key: Optional[str] = ""
+    force: bool = False  # if True, re-translate even if already translated
+    selected_pages: Optional[list[int]] = None
+
+
+@app.post("/api/translate/session")
+async def translate_session_endpoint(req: TranslateSessionRequest):
+    """
+    Translates all pages (or selected pages) of a session on-demand with live progress broadcasting.
+    Uses pristine colorized_raw pages if available, or originals otherwise.
+    """
+    session_id = req.session_id
+    sess = SESSIONS.get(session_id) or get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    pages = sess.get("pages", [])
+    if not pages:
+        return JSONResponse({"status": "empty", "message": "No pages in session"})
+
+    target_indices = (
+        [i for i in req.selected_pages if 0 <= i < len(pages)]
+        if req.selected_pages is not None
+        else list(range(len(pages)))
+    )
+
+    async def _run_session_translation():
+        from manga_translator import MANGA_TRANSLATOR
+
+        color_dir = STORAGE_DIR / session_id / "colorized"
+        color_dir.mkdir(parents=True, exist_ok=True)
+        raw_color_dir = STORAGE_DIR / session_id / "colorized_raw"
+        raw_color_dir.mkdir(parents=True, exist_ok=True)
+
+        total = len(target_indices)
+        for step_i, idx in enumerate(target_indices):
+            if sess.get("cancel_requested"):
+                break
+
+            page_info = pages[idx]
+            if not req.force and not page_needs_translation(page_info):
+                continue
+
+            orig_path = page_info.get("original_path")
+            color_filename = (
+                Path(page_info["colorized_url"].split("?")[0]).name
+                if page_info.get("colorized_url")
+                else (page_info.get("filename") or f"page_{idx + 1:04d}.jpg")
+            )
+            color_output_path = str(color_dir / color_filename)
+            raw_color_path = raw_color_dir / color_filename
+
+            if raw_color_path.exists():
+                source_img_path = str(raw_color_path)
+            elif os.path.exists(color_output_path):
+                source_img_path = color_output_path
+                if not page_info.get("translated"):
+                    try:
+                        shutil.copy2(color_output_path, str(raw_color_path))
+                    except Exception:
+                        pass
+            else:
+                source_img_path = orig_path
+
+            if not source_img_path or not os.path.exists(source_img_path):
+                continue
+
+            page_info["status"] = "processing"
+            await notify_sse_listeners(
+                session_id,
+                {
+                    "type": "page_update",
+                    "page_index": idx,
+                    "status": "processing",
+                    "progress": f"Translating {step_i + 1}/{total}",
+                },
+            )
+
+            try:
+                trans_pil, trans_meta = await asyncio.to_thread(
+                    MANGA_TRANSLATOR.translate_page,
+                    image_input=source_img_path,
+                    target_lang=req.target_language,
+                    engine=req.translation_engine,
+                    api_key=req.api_key or sess.get("api_key") or "",
+                )
+                if trans_meta:
+                    trans_pil.save(color_output_path, format="JPEG", quality=92)
+                    page_info["translations"] = trans_meta
+                    page_info["translated"] = True
+                else:
+                    page_info["translations"] = []
+                    page_info["translated"] = False
+
+                page_info["status"] = "colorized"
+                page_info["colorized_url"] = f"/api/session/{session_id}/image/colorized/{color_filename}"
+                save_session_meta(session_id)
+
+                await notify_sse_listeners(
+                    session_id,
+                    {
+                        "type": "page_update",
+                        "page_index": idx,
+                        "status": "colorized",
+                        "colorized_url": page_info["colorized_url"],
+                        "translations": page_info.get("translations", []),
+                        "translated": bool(page_info.get("translated")),
+                        "processed_count": sum(1 for p in pages if p.get("status") == "colorized"),
+                        "total": sess.get("total_pages", len(pages)),
+                        "message": f"Translated page {idx + 1} ({step_i + 1}/{total})",
+                    },
+                )
+            except Exception as e:
+                print(f"[TranslateSession WARNING] Page {idx} translation error: {e}")
+                page_info["status"] = "colorized"
+
+        sess["status"] = "completed"
+        save_session_meta(session_id)
+        await notify_sse_listeners(
+            session_id,
+            {
+                "type": "completed",
+                "total_processed": sum(1 for p in pages if p.get("status") == "colorized"),
+                "message": f"Document translation completed",
+            },
+        )
+
+    task = asyncio.create_task(_run_session_translation())
+    ACTIVE_COLORIZATION_TASKS[session_id] = task
+
+    return JSONResponse(
+        {
+            "status": "started",
+            "session_id": session_id,
+            "total_pages": len(pages),
+            "target_pages": len(target_indices),
+            "message": f"Translation started for {len(target_indices)} pages",
+        }
+    )
+
+
+class TranslateBatchRequest(BaseModel):
+    session_ids: list[str]
+    target_language: str = "en"
+    translation_engine: str = "auto"
+    api_key: Optional[str] = ""
+    force: bool = False
+
+
+@app.post("/api/translate/batch")
+async def translate_batch_endpoint(req: TranslateBatchRequest):
+    """
+    Translates all pages across multiple sessions.
+    """
+    valid_sessions = [sid for sid in req.session_ids if SESSIONS.get(sid) or get_or_restore_session(sid)]
+    if not valid_sessions:
+        raise HTTPException(status_code=404, detail="No valid sessions found")
+
+    batch_req = BatchColorizeRequest(
+        session_ids=valid_sessions,
+        translate_page=True,
+        translation_engine=req.translation_engine,
+        target_language=req.target_language,
+        api_key=req.api_key,
+    )
+    return await start_batch_colorization(batch_req)
+
+
+@app.get("/api/session/{session_id}/page/{page_index}/translations")
+def get_page_translations_endpoint(session_id: str, page_index: int):
+    """Returns detected text, speech bubbles, and English translations for a page."""
+    sess = SESSIONS.get(session_id) or get_or_restore_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    pages = sess.get("pages", [])
+    if page_index < 0 or page_index >= len(pages):
+        raise HTTPException(status_code=400, detail="Invalid page index")
+    page = pages[page_index]
+    return JSONResponse(
+        {
+            "session_id": session_id,
+            "page_index": page_index,
+            "translations": page.get("translations", []),
+            "translated": bool(page.get("translated", False)),
+        }
+    )
 
 
 @app.get("/api/palette/presets")
@@ -3568,8 +4372,9 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     if p.get("status") != "colorized"
                     or not (colorized_dir / p.get("filename", "")).exists()
                 ]
+                needs_trans = getattr(req, "translate_page", False) and any(page_needs_translation(p) for p in pages)
 
-                if not uncolorized and len(pages) > 0:
+                if not uncolorized and not needs_trans and len(pages) > 0:
                     sess["status"] = "completed"
                     sess["processed_count"] = len(pages)
                     save_session_meta(sid)
@@ -3601,6 +4406,9 @@ async def start_batch_colorization(req: BatchColorizeRequest):
                     denoise_screentone=req.denoise_screentone,
                     denoise_sigma=req.denoise_sigma,
                     recognition_mode=req.recognition_mode or "auto",
+                    translate_page=getattr(req, "translate_page", False),
+                    translation_engine=getattr(req, "translation_engine", "auto"),
+                    target_language=getattr(req, "target_language", "en"),
                 )
                 task = asyncio.current_task()
                 if task:
@@ -3627,7 +4435,7 @@ async def start_batch_colorization(req: BatchColorizeRequest):
 @app.post("/api/colorize/batch/resume")
 async def resume_batch_colorization(req: Optional[BatchColorizeRequest] = None):
     """
-    Resumes batch colorization for pending sessions (where processed_count < total_pages).
+    Resumes batch colorization for pending sessions (where processed_count < total_pages or translation is pending).
     """
     global CURRENT_BATCH
     if CURRENT_BATCH.get("is_running"):
@@ -3661,7 +4469,12 @@ async def resume_batch_colorization(req: Optional[BatchColorizeRequest] = None):
                 or (colorized_dir / p.get("filename", "")).stat().st_size == 0
                 for p in sess.get("pages", [])
             )
-            if has_pending:
+            has_trans_pending = (
+                req is not None
+                and getattr(req, "translate_page", False)
+                and any(page_needs_translation(p) for p in sess.get("pages", []))
+            )
+            if has_pending or has_trans_pending:
                 target_sessions.append(sid)
 
     if not target_sessions:

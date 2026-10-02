@@ -20,6 +20,13 @@ def create_dummy_png_bytes(text: str = "Test") -> bytes:
     return buf.getvalue()
 
 
+def create_dummy_jpeg_bytes(text: str = "Test") -> bytes:
+    img = Image.new("RGB", (100, 100), color=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
 def test_bulk_chunked_upload_backend():
     """Verify backend accepts bulk uploads (> 5 files in chunked form)."""
     # Create 8 dummy image files to simulate a bulk chunk
@@ -94,3 +101,94 @@ def test_static_app_js_bulk_upload_contract():
     render_dash_body = render_dash_match.group(1)
 
     assert "if (!currentSession)" in render_dash_body, "renderDashboard must guard against null currentSession"
+
+
+def test_bulk_upload_combine_images_into_volume():
+    """Verify backend combines multiple uploaded JPEGs into a single manga volume when requested."""
+    files = []
+    for i in range(5):
+        jpeg_bytes = create_dummy_jpeg_bytes(f"MazinPage_{i+1}")
+        files.append(("files", (f"Mazinsaga01-{i+1:03d}.jpg", jpeg_bytes, "image/jpeg")))
+
+    batch_id = str(uuid.uuid4())
+    created_sessions = []
+    try:
+        response = client.post(
+            "/api/upload",
+            data={
+                "batch_id": batch_id,
+                "volume_name": "Mazin Saga v01",
+                "combine_images": "true",
+            },
+            files=files,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+
+        assert data["status"] == "success"
+        assert data["batch_id"] == batch_id
+        assert data["total_files"] == 1, "Should combine into 1 volume session"
+        assert len(data["sessions"]) == 1
+        assert data["total_pages"] == 5
+        assert data["filename"] == "Mazin Saga v01.cbz"
+
+        vol_session_id = data["session_id"]
+        created_sessions.append(vol_session_id)
+
+        # Verify session details
+        sess_res = client.get(f"/api/session/{vol_session_id}")
+        assert sess_res.status_code == 200
+        sess_data = sess_res.json()
+        assert sess_data["session_id"] == vol_session_id
+        assert sess_data["filename"] == "Mazin Saga v01.cbz"
+        assert sess_data["total_pages"] == 5
+        assert len(sess_data["pages"]) == 5
+        for idx, p in enumerate(sess_data["pages"]):
+            assert p["page_index"] == idx
+            assert f"Mazinsaga01-00{idx+1}" in p["display_name"]
+    finally:
+        for sid in created_sessions:
+            SESSIONS.pop(sid, None)
+            s_dir = STORAGE_DIR / sid
+            if s_dir.exists():
+                shutil.rmtree(str(s_dir), ignore_errors=True)
+            for f in UPLOAD_DIR.glob(f"{sid}_*"):
+                f.unlink(missing_ok=True)
+
+
+def test_bulk_upload_folder_relative_path_auto_combine():
+    """Verify backend automatically combines files containing directory paths into volumes."""
+    files = []
+    for i in range(3):
+        jpeg_bytes = create_dummy_jpeg_bytes(f"FolderPage_{i+1}")
+        # Pass folder relative paths like browser folder drop does
+        files.append(("files", (f"Mazin Saga v01/Mazinsaga01-{i+1:03d}.jpg", jpeg_bytes, "image/jpeg")))
+
+    batch_id = str(uuid.uuid4())
+    created_sessions = []
+    try:
+        response = client.post(
+            "/api/upload",
+            data={"batch_id": batch_id},
+            files=files,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+
+        assert data["status"] == "success"
+        assert data["total_files"] == 1
+        assert len(data["sessions"]) == 1
+        assert data["sessions"][0]["filename"] == "Mazin Saga v01.cbz"
+        assert data["total_pages"] == 3
+
+        vol_session_id = data["session_id"]
+        created_sessions.append(vol_session_id)
+    finally:
+        for sid in created_sessions:
+            SESSIONS.pop(sid, None)
+            s_dir = STORAGE_DIR / sid
+            if s_dir.exists():
+                shutil.rmtree(str(s_dir), ignore_errors=True)
+            for f in UPLOAD_DIR.glob(f"{sid}_*"):
+                f.unlink(missing_ok=True)
+

@@ -182,3 +182,108 @@ def test_batch_colorization_respects_skip_if_colored():
     finally:
         shutil.rmtree(sess_dir, ignore_errors=True)
         SESSIONS.pop(session_id, None)
+
+
+def test_colorize_current_document_whole_session_and_force_recolorize(tmp_path):
+    """Verifies that Colorize Current Document (selected_pages=None) colorizes all pages,
+    and subsequent force_recolorize=True resets processed_count and recolorizes cleanly."""
+    session_id = f"test_doc_color_{uuid.uuid4().hex[:8]}"
+    sess_dir = STORAGE_DIR / session_id
+    orig_dir = sess_dir / "original"
+    orig_dir.mkdir(parents=True, exist_ok=True)
+
+    p1_path = orig_dir / "page_0001.jpg"
+    p2_path = orig_dir / "page_0002.jpg"
+
+    img1 = Image.new("RGB", (200, 200), color=(255, 255, 255))
+    img1.save(p1_path, format="JPEG", quality=90)
+    img2 = Image.new("RGB", (200, 200), color=(255, 255, 255))
+    img2.save(p2_path, format="JPEG", quality=90)
+
+    sess = {
+        "session_id": session_id,
+        "filename": "test_doc.pdf",
+        "total_pages": 2,
+        "processed_count": 0,
+        "status": "idle",
+        "pages": [
+            {
+                "page_index": 0,
+                "display_name": "Page 1",
+                "filename": "page_0001.jpg",
+                "original_path": str(p1_path),
+                "status": "pending",
+            },
+            {
+                "page_index": 1,
+                "display_name": "Page 2",
+                "filename": "page_0002.jpg",
+                "original_path": str(p2_path),
+                "status": "pending",
+            },
+        ],
+    }
+    SESSIONS[session_id] = sess
+    import json
+    import time
+
+    with open(sess_dir / "meta.json", "w") as f:
+        json.dump(sess, f)
+
+    try:
+        # 1. Start colorizing entire document with selected_pages=None
+        resp = requests.post(
+            f"{BASE_URL}/api/colorize/start",
+            json={
+                "session_id": session_id,
+                "model_provider": "local_smart",
+                "style": "shonen_vivid",
+                "selected_pages": None,
+                "force_recolorize": False,
+            },
+        )
+        assert resp.status_code == 200
+
+        # Wait for completion
+        for _ in range(50):
+            time.sleep(0.2)
+            r = requests.get(f"{BASE_URL}/api/session/{session_id}")
+            if r.status_code == 200 and r.json().get("status") == "completed":
+                break
+
+        res_json = requests.get(f"{BASE_URL}/api/session/{session_id}").json()
+        assert res_json["status"] == "completed"
+        assert res_json["processed_count"] == 2
+        assert res_json["pages"][0]["status"] == "colorized"
+        assert res_json["pages"][1]["status"] == "colorized"
+
+        # 2. Recolorize with force_recolorize=True and selected_pages=None
+        resp2 = requests.post(
+            f"{BASE_URL}/api/colorize/start",
+            json={
+                "session_id": session_id,
+                "model_provider": "local_smart",
+                "style": "anime_pastel",
+                "selected_pages": None,
+                "force_recolorize": True,
+            },
+        )
+        assert resp2.status_code == 200
+
+        # Wait for completion
+        for _ in range(50):
+            time.sleep(0.2)
+            r = requests.get(f"{BASE_URL}/api/session/{session_id}")
+            if r.status_code == 200 and r.json().get("status") == "completed":
+                break
+
+        res_json2 = requests.get(f"{BASE_URL}/api/session/{session_id}").json()
+        assert res_json2["status"] == "completed"
+        assert res_json2["processed_count"] == 2
+        assert res_json2["pages"][0]["status"] == "colorized"
+        assert res_json2["pages"][1]["status"] == "colorized"
+
+    finally:
+        shutil.rmtree(sess_dir, ignore_errors=True)
+        SESSIONS.pop(session_id, None)
+

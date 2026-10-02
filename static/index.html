@@ -335,12 +335,44 @@
                 </label>
               </div>
 
+              <!-- Manga Translation Toggle & Options -->
+              <div class="form-group" style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--border-color, rgba(255,255,255,0.08));">
+                <label class="toggle-label" style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" title="Automatically detects Japanese speech bubbles, performs OCR, translates text, and typesets English dialogue directly into speech bubbles.">
+                  <input type="checkbox" id="chk-translate-page" style="width:16px;height:16px;accent-color:var(--accent-blue, #3b82f6);" onchange="toggleTranslationOptions()" />
+                  <span style="font-size:0.85rem;font-weight:600;color:var(--text-primary);">
+                    <i class="ri-translate-2" style="color:var(--accent-blue, #3b82f6);"></i>
+                    Translate Manga to English
+                  </span>
+                </label>
+
+                <div id="translation-options-panel" class="hidden" style="margin-top: 0.5rem; padding: 0.5rem; background: var(--bg-secondary, rgba(255,255,255,0.03)); border-radius: 6px; border: 1px solid var(--border-color, rgba(255,255,255,0.06)); display: flex; flex-direction: column; gap: 0.5rem;">
+                  <div>
+                    <label for="translation-engine-select" style="font-size: 0.75rem; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Translation Engine</label>
+                    <select id="translation-engine-select" class="form-select form-select-sm" style="width: 100%; font-size: 0.8rem;">
+                      <option value="auto" selected>⚡ Auto (Gemini if key set, else Manga-OCR)</option>
+                      <option value="local">🤖 Local Manga-OCR + Deep Translator (Offline)</option>
+                      <option value="gemini">✨ Google Gemini Multimodal Vision</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="translation-lang-select" style="font-size: 0.75rem; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Target Language</label>
+                    <select id="translation-lang-select" class="form-select form-select-sm" style="width: 100%; font-size: 0.8rem;">
+                      <option value="en" selected>English (EN)</option>
+                      <option value="es">Spanish (ES)</option>
+                      <option value="fr">French (FR)</option>
+                      <option value="de">German (DE)</option>
+                      <option value="vi">Vietnamese (VI)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
               <!-- Action Buttons -->
               <div class="action-btn-group">
                 <button class="btn btn-secondary btn-block" id="btn-preview-page" onclick="previewCurrentPage()">
                   <i class="ri-sparkles-line"></i> Preview Page 1
                 </button>
-                <button class="btn btn-accent btn-block" id="btn-start-colorize">
+                <button class="btn btn-accent btn-block" id="btn-start-colorize" onclick="startColorization()">
                   <i class="ri-magic-line"></i> Colorize Current Document
                 </button>
                 <button class="btn btn-primary btn-block hidden" id="btn-start-batch-colorize" onclick="startBatchColorization()">
@@ -749,6 +781,14 @@
 
               <div class="header-divider"></div>
 
+              <button class="btn btn-sm btn-translate-accent" id="btn-translate-page" onclick="translateCurrentPage()"
+                      title="Translate speech bubbles on this page to English">
+                <i class="ri-translate-2"></i> Translate Page
+              </button>
+              <button class="btn btn-sm btn-secondary" id="btn-translate-doc" onclick="translateCurrentDocument()"
+                      title="Translate all pages in this document to English">
+                <i class="ri-book-read-line"></i> Translate Document
+              </button>
               <button class="btn btn-sm btn-recolorize-accent" id="btn-recolorize-page" onclick="recolorizePage(currentPreviewPageIndex)"
                       title="Force re-colorize this page from scratch">
                 <i class="ri-magic-line"></i> Recolorize
@@ -763,6 +803,11 @@
           <!-- Dedicated Comparator Status & Memory Sub-Bar -->
           <div class="comparator-meta-bar" id="comparator-meta-bar" style="display:none;">
             <div class="comparator-meta-chips" id="comparator-meta-chips">
+              <!-- Translation Status Chip -->
+              <span class="badge" id="preview-translation-chip" style="display:none;" title="Page Translation Status">
+                <i class="ri-translate-2"></i> <span id="preview-translation-label">Translated</span>
+              </span>
+
               <!-- Quality & Confidence Score Chip -->
               <span class="badge" id="preview-quality-chip" style="display:none;" title="Colorization Quality & Confidence Score">
                 <i class="ri-shield-check-line" id="preview-quality-icon"></i> <span id="preview-quality-label">Quality: --</span>
@@ -923,6 +968,12 @@
                       onclick="recolorizeSelected()">
                 <i class="ri-refresh-line"></i>
                 <span>Recolorize Selected</span>
+              </button>
+              <button class="btn btn-primary btn-sm btn-retranslate-pill hidden" id="btn-retranslate-selected"
+                      title="Translate or re-translate selected pages"
+                      onclick="retranslateSelected()">
+                <i class="ri-translate-2"></i>
+                <span id="retranslate-selected-text">Translate Selected</span>
               </button>
               
               <div class="gallery-quick-exports gallery-export-segmented" role="group" aria-label="Export Formats">
@@ -1105,16 +1156,21 @@
   </div>
 
   <!-- Bulk Import Progress Modal Overlay -->
-  <div class="modal-overlay hidden" id="import-progress-modal-overlay">
+  <div class="modal-overlay hidden" id="import-progress-modal-overlay" onclick="handleImportProgressOverlayClick(event)">
     <div class="bulk-import-dialog" role="dialog" aria-modal="true" aria-labelledby="bulk-import-title">
       <div class="bulk-import-header">
-        <div class="bulk-import-icon">
-          <i class="ri-file-upload-line"></i>
+        <div class="bulk-import-header-left">
+          <div class="bulk-import-icon">
+            <i class="ri-file-upload-line"></i>
+          </div>
+          <div>
+            <h3 id="bulk-import-title" class="bulk-import-title">Importing Ebook Files</h3>
+            <p class="bulk-import-subtitle" id="bulk-import-subtitle">Processing files in optimized batches...</p>
+          </div>
         </div>
-        <div>
-          <h3 id="bulk-import-title" class="bulk-import-title">Importing Ebook Files</h3>
-          <p class="bulk-import-subtitle" id="bulk-import-subtitle">Processing files in optimized batches...</p>
-        </div>
+        <button class="btn-icon history-close-btn" onclick="closeImportProgressModal()" title="Close (Esc)">
+          <i class="ri-close-line"></i>
+        </button>
       </div>
 
       <div class="bulk-import-body">
@@ -1146,6 +1202,9 @@
       <div class="bulk-import-footer">
         <button class="btn btn-outline btn-danger-outline btn-sm" id="btn-cancel-bulk-import" onclick="cancelBatchImport()">
           <i class="ri-close-circle-line"></i> Cancel Import
+        </button>
+        <button class="btn btn-primary btn-sm hidden" id="btn-done-bulk-import" onclick="closeImportProgressModal()">
+          <i class="ri-check-line"></i> Done
         </button>
       </div>
     </div>
@@ -1210,10 +1269,14 @@
           </div>
         </div>
 
-        <div class="form-group-row" style="display: flex; gap: 1.5rem; align-items: center; margin-top: 0.75rem;">
+        <div class="form-group-row" style="display: flex; gap: 1.5rem; align-items: center; margin-top: 0.75rem; flex-wrap: wrap;">
           <label class="checkbox-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.85rem;">
             <input type="checkbox" id="folder-import-recursive" checked />
             <span>Scan subfolders recursively</span>
+          </label>
+          <label class="checkbox-label" style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.85rem;" title="Combine bulk image files (.jpg, .png) in each folder as multiple pages of a manga volume">
+            <input type="checkbox" id="folder-import-combine-images" checked />
+            <span>Combine image pages into volume</span>
           </label>
           <div style="display: flex; align-items: center; gap: 0.5rem;">
             <label for="folder-import-max" style="font-size: 0.85rem; color: var(--text-secondary);">Max Files:</label>

@@ -2709,6 +2709,30 @@ select.custom-select-hidden,
   transform: translateY(-1px);
 }
 
+.btn-translate-accent {
+  background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%) !important;
+  border-color: #0284c7 !important;
+  color: #fff !important;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(14, 165, 233, 0.35);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+
+.btn-translate-accent:hover:not(:disabled) {
+  box-shadow: 0 4px 14px rgba(14, 165, 233, 0.55);
+  transform: translateY(-1px);
+}
+
+#preview-translation-chip {
+  background: rgba(14, 165, 233, 0.15) !important;
+  color: #38bdf8 !important;
+  border: 1px solid rgba(56, 189, 248, 0.35) !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 /* Comparator Metadata Sub-Bar & Status Chips */
 .comparator-meta-bar {
   display: flex;
@@ -3931,6 +3955,39 @@ body.comparator-fullscreen-active {
   transform: rotate(90deg);
 }
 
+/* Retranslate Selected Pill Button */
+.btn-retranslate-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.32rem 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: var(--radius-full, 9999px);
+  background: linear-gradient(135deg, #06b6d4 0%, #0284c7 100%) !important;
+  border: 1px solid #38bdf8 !important;
+  color: #ffffff !important;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(6, 182, 212, 0.35);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  white-space: nowrap;
+}
+
+.btn-retranslate-pill:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.5);
+  background: linear-gradient(135deg, #38bdf8 0%, #06b6d4 100%) !important;
+}
+
+.btn-retranslate-pill i {
+  font-size: 0.85rem;
+  transition: transform 0.3s ease;
+}
+
+.btn-retranslate-pill:hover:not(:disabled) i {
+  transform: scale(1.15);
+}
+
 /* Export Segmented Capsule */
 .gallery-export-segmented {
   display: inline-flex;
@@ -4259,12 +4316,18 @@ body.comparator-fullscreen-active {
   color: #fff;
 }
 
-.page-recolorize-btn {
+.page-card-actions {
   position: absolute;
   bottom: 8px;
   right: 8px;
   z-index: 4;
-  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.page-recolorize-btn,
+.page-translate-btn {
   border: 1px solid rgba(255, 255, 255, 0.25);
   border-radius: 5px;
   padding: 3px 8px;
@@ -4275,13 +4338,36 @@ body.comparator-fullscreen-active {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  box-shadow: 0 2px 8px rgba(234, 88, 12, 0.35);
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.page-recolorize-btn {
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  box-shadow: 0 2px 8px rgba(234, 88, 12, 0.35);
 }
 
 .page-recolorize-btn:hover {
   transform: translateY(-1px) scale(1.03);
   box-shadow: 0 4px 14px rgba(234, 88, 12, 0.55);
+}
+
+.page-translate-btn {
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+  box-shadow: 0 2px 8px rgba(6, 182, 212, 0.35);
+}
+
+.page-translate-btn.translated {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35);
+}
+
+.page-translate-btn:hover {
+  transform: translateY(-1px) scale(1.03);
+  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.55);
+}
+
+.page-translate-btn.translated:hover {
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.55);
 }
 
 .page-card-footer {
@@ -5457,16 +5543,14 @@ body.comparator-fullscreen-active {
 .folder-import-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 1rem;
   padding: 1.25rem 1.5rem;
   background: rgba(255, 255, 255, 0.02);
   border-bottom: 1px solid var(--bg-card-border);
 }
 
-.folder-import-header {
-  justify-content: space-between;
-}
-
+.bulk-import-header-left,
 .folder-import-header-left {
   display: flex;
   align-items: center;
@@ -5582,6 +5666,7 @@ body.comparator-fullscreen-active {
   padding: 1rem 1.5rem;
   display: flex;
   justify-content: flex-end;
+  gap: 0.75rem;
   background: rgba(0, 0, 0, 0.2);
   border-top: 1px solid var(--bg-card-border);
 }

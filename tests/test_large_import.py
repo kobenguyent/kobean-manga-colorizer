@@ -25,6 +25,13 @@ def create_dummy_png(text="Page"):
     return buf.getvalue()
 
 
+def create_dummy_jpeg(path: Path, text="Page"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", (200, 300), color=(240, 240, 240))
+    img.save(str(path), format="JPEG")
+
+
+
 def create_dummy_cbz(path: Path, num_pages: int = 2):
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(str(path), "w") as z:
@@ -200,6 +207,9 @@ class TestLargeImport(unittest.TestCase):
         html_content = index_path.read_text(encoding="utf-8")
 
         self.assertIn('id="import-progress-modal-overlay"', html_content)
+        self.assertIn('handleImportProgressOverlayClick', html_content)
+        self.assertIn('btn-done-bulk-import', html_content)
+        self.assertIn('closeImportProgressModal()', html_content)
         self.assertIn('id="folder-import-modal-overlay"', html_content)
         self.assertIn('id="doc-queue-filter-wrap"', html_content)
         self.assertIn('id="history-pagination-wrap"', html_content)
@@ -211,11 +221,13 @@ class TestLargeImport(unittest.TestCase):
         js_content = app_path.read_text(encoding="utf-8")
 
         self.assertIn("handleBulkChunkedUpload", js_content)
+        self.assertIn("handleImportProgressOverlayClick", js_content)
         self.assertIn("openFolderImportModal", js_content)
         self.assertIn("filterDocumentQueue", js_content)
         self.assertIn("changeHistoryPage", js_content)
         self.assertIn("window.handleBulkChunkedUpload", js_content)
         self.assertIn("window.openFolderImportModal", js_content)
+        self.assertIn("window.handleImportProgressOverlayClick", js_content)
 
     def test_08_normalize_directory_path(self):
         """Test path normalization for quotes, file:// URLs, escaped spaces, and home expansion."""
@@ -362,6 +374,125 @@ class TestLargeImport(unittest.TestCase):
         # Ensure zero native confirm() calls remain in app.js
         self.assertNotIn("confirm(`", js_content)
         self.assertNotIn('confirm("', js_content)
+
+    def test_14_directory_import_bulk_jpeg_combined_volume(self):
+        """Test importing a folder of loose JPEG files combines them into a single volume session."""
+        test_dir = Path("/tmp/test_bulk_jpegs_vol")
+        vol_folder = test_dir / "Mazin Saga v01"
+        vol_folder.mkdir(parents=True, exist_ok=True)
+        created_session_id = None
+        try:
+            # Create 5 JPEG files named naturally like Mazinsaga01-001.jpg .. 005.jpg
+            for i in range(1, 6):
+                create_dummy_jpeg(vol_folder / f"Mazinsaga01-{i:03d}.jpg", f"Page {i}")
+
+            resp = requests.post(
+                f"{SERVER_URL}/api/import/directory",
+                json={
+                    "directory_path": str(vol_folder),
+                    "recursive": False,
+                    "combine_images": True,
+                },
+                timeout=5,
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            data = resp.json()
+            import_id = data["import_id"]
+
+            # Poll until completed
+            stat = None
+            for _ in range(30):
+                time.sleep(0.2)
+                stat_resp = requests.get(f"{SERVER_URL}/api/import/status/{import_id}", timeout=5)
+                self.assertEqual(stat_resp.status_code, 200)
+                stat = stat_resp.json()
+                if stat["status"] in ("completed", "failed", "cancelled"):
+                    break
+
+            self.assertEqual(stat["status"], "completed")
+            self.assertEqual(stat["imported_files"], 1, "Should create 1 volume session, not 5 separate sessions")
+            self.assertEqual(stat["failed_files"], 0)
+            self.assertEqual(len(stat["created_sessions"]), 1)
+
+            sess_info = stat["created_sessions"][0]
+            created_session_id = sess_info["session_id"]
+            self.assertEqual(sess_info["total_pages"], 5)
+            self.assertEqual(sess_info["filename"], "Mazin Saga v01.cbz")
+
+            # Check full session detail endpoint
+            sess_resp = requests.get(f"{SERVER_URL}/api/session/{created_session_id}", timeout=5)
+            self.assertEqual(sess_resp.status_code, 200)
+            sess_data = sess_resp.json()
+            self.assertEqual(sess_data["total_pages"], 5)
+            self.assertEqual(sess_data["filename"], "Mazin Saga v01.cbz")
+            self.assertEqual(len(sess_data["pages"]), 5)
+
+            # Check page names and natural order
+            for idx, p in enumerate(sess_data["pages"]):
+                self.assertEqual(p["page_index"], idx)
+                self.assertIn(f"Mazinsaga01-00{idx+1}", p["display_name"])
+                self.assertTrue(Path(p["original_path"]).exists())
+
+            # Verify packaged CBZ is a valid archive
+            cbz_path = Path(sess_data["file_path"])
+            self.assertTrue(cbz_path.exists())
+            with zipfile.ZipFile(str(cbz_path), "r") as zf:
+                cbz_names = zf.namelist()
+                self.assertEqual(len(cbz_names), 5)
+                self.assertIn("page_0001.jpg", cbz_names)
+                self.assertIn("page_0005.jpg", cbz_names)
+        finally:
+            if created_session_id:
+                main.SESSIONS.pop(created_session_id, None)
+                s_dir = main.STORAGE_DIR / created_session_id
+                shutil.rmtree(str(s_dir), ignore_errors=True)
+                for f in main.UPLOAD_DIR.glob(f"{created_session_id}_*"):
+                    f.unlink(missing_ok=True)
+            shutil.rmtree(str(test_dir), ignore_errors=True)
+
+    def test_15_directory_import_separate_images_when_combine_false(self):
+        """Test importing a folder with combine_images=False creates separate sessions."""
+        test_dir = Path("/tmp/test_separate_jpegs")
+        vol_folder = test_dir / "Separate Images"
+        vol_folder.mkdir(parents=True, exist_ok=True)
+        created_ids = []
+        try:
+            for i in range(1, 4):
+                create_dummy_jpeg(vol_folder / f"page_{i}.jpg", f"Page {i}")
+
+            resp = requests.post(
+                f"{SERVER_URL}/api/import/directory",
+                json={
+                    "directory_path": str(vol_folder),
+                    "recursive": False,
+                    "combine_images": False,
+                },
+                timeout=5,
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            data = resp.json()
+            import_id = data["import_id"]
+
+            stat = None
+            for _ in range(30):
+                time.sleep(0.2)
+                stat_resp = requests.get(f"{SERVER_URL}/api/import/status/{import_id}", timeout=5)
+                self.assertEqual(stat_resp.status_code, 200)
+                stat = stat_resp.json()
+                if stat["status"] in ("completed", "failed", "cancelled"):
+                    break
+
+            self.assertEqual(stat["status"], "completed")
+            self.assertEqual(stat["imported_files"], 3, "Should create 3 separate sessions when combine_images is False")
+            self.assertEqual(len(stat["created_sessions"]), 3)
+            created_ids = [s["session_id"] for s in stat["created_sessions"]]
+        finally:
+            for cid in created_ids:
+                main.SESSIONS.pop(cid, None)
+                shutil.rmtree(str(main.STORAGE_DIR / cid), ignore_errors=True)
+                for f in main.UPLOAD_DIR.glob(f"{cid}_*"):
+                    f.unlink(missing_ok=True)
+            shutil.rmtree(str(test_dir), ignore_errors=True)
 
 
 if __name__ == "__main__":

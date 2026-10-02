@@ -1050,6 +1050,11 @@ function setupEventListeners() {
         resolveCustomConfirm(false);
         return;
       }
+      const importOverlay = document.getElementById("import-progress-modal-overlay");
+      if (importOverlay && !importOverlay.classList.contains("hidden")) {
+        closeImportProgressModal();
+        return;
+      }
       const browserOverlay = document.getElementById("folder-browser-modal-overlay");
       if (browserOverlay && !browserOverlay.classList.contains("hidden")) {
         closeFolderBrowserModal();
@@ -1385,6 +1390,52 @@ function toggleApiKeyVisibility() {
   }
 }
 
+function toggleTranslationOptions() {
+  const chk = document.getElementById("chk-translate-page");
+  const panel = document.getElementById("translation-options-panel");
+  if (panel && chk) {
+    if (chk.checked) {
+      panel.classList.remove("hidden");
+    } else {
+      panel.classList.add("hidden");
+    }
+  }
+}
+
+function deriveVolumeTitle(fileNames, fallbackFolder = "") {
+  if (fallbackFolder && fallbackFolder.trim() && !["/", "\\", "."].includes(fallbackFolder.trim())) {
+    const clean = fallbackFolder.trim();
+    if (isNaN(clean) && clean.length > 1) return clean;
+  }
+  if (!fileNames || fileNames.length === 0) return fallbackFolder || "Manga Volume";
+
+  const stems = fileNames.map(f => {
+    const base = f.split("/").pop().split("\\").pop();
+    const lastDot = base.lastIndexOf(".");
+    return lastDot > 0 ? base.substring(0, lastDot) : base;
+  });
+
+  let prefix = stems[0] || "";
+  for (let i = 1; i < stems.length; i++) {
+    while (!stems[i].startsWith(prefix)) {
+      prefix = prefix.substring(0, prefix.length - 1);
+      if (!prefix) break;
+    }
+  }
+
+  prefix = prefix.replace(/[\s_\-\.0-9]+$/, "").trim();
+  if (prefix.length >= 3) return prefix;
+
+  if (fallbackFolder && fallbackFolder.trim() && !["/", "\\", "."].includes(fallbackFolder.trim())) {
+    return fallbackFolder.trim();
+  }
+
+  const firstStem = stems[0].replace(/[\s_\-\.0-9]+$/, "").trim();
+  if (firstStem.length >= 3) return firstStem;
+
+  return "Manga Volume";
+}
+
 async function handleFileSelection(fileOrFiles) {
   const allowed = ["pdf", "epub", "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "zip", "cbz"];
   const fileList = Array.from(fileOrFiles instanceof FileList ? fileOrFiles : (Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles]));
@@ -1439,6 +1490,19 @@ async function handleFileSelection(fileOrFiles) {
   const formData = new FormData();
   if (currentBatchId) {
     formData.append("batch_id", currentBatchId);
+  }
+  const imgExts = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
+  const allImages = validFiles.every(f => imgExts.includes(f.name.split(".").pop().toLowerCase()));
+  if (validFiles.length > 1 && allImages) {
+    let fallbackFolder = "";
+    if (validFiles[0].relativePath && validFiles[0].relativePath.includes("/")) {
+      fallbackFolder = validFiles[0].relativePath.split("/")[0];
+    } else if (validFiles[0].webkitRelativePath && validFiles[0].webkitRelativePath.includes("/")) {
+      fallbackFolder = validFiles[0].webkitRelativePath.split("/")[0];
+    }
+    const volTitle = deriveVolumeTitle(validFiles.map(f => f.name), fallbackFolder);
+    formData.append("volume_name", volTitle);
+    formData.append("combine_images", "true");
   }
   validFiles.forEach(f => formData.append("files", f));
 
@@ -1500,85 +1564,195 @@ async function handleFileSelection(fileOrFiles) {
 
 // Optimized chunked uploader for importing large numbers of files (+1076 files)
 async function handleBulkChunkedUpload(files) {
+  const preferredVolumeName = arguments.length > 1 ? arguments[1] : null;
   isImportCancelled = false;
   const totalFiles = files.length;
-  const chunkSize = 8; // Upload 8 files per chunk to avoid browser payload timeouts
-  const totalChunks = Math.ceil(totalFiles / chunkSize);
   const startTime = Date.now();
+  let totalChunks = 1;
 
-  openImportProgressModal(totalFiles);
+  const imageExts = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
+  const allImages = files.length > 1 && files.every(f => imageExts.includes(f.name.split(".").pop().toLowerCase()));
+  const hasRelative = files.some(f => (f.relativePath || f.webkitRelativePath || "").includes("/"));
 
   let successCount = 0;
   let failCount = 0;
   let firstUploadedSessionId = null;
 
-  for (let i = 0; i < totalChunks; i++) {
-    if (isImportCancelled) {
-      showToast("Batch import cancelled by user.", "info");
-      break;
-    }
-
-    const chunk = files.slice(i * chunkSize, (i + 1) * chunkSize);
-    const chunkNames = chunk.map(f => f.name).join(", ");
-    updateImportProgressModal(
-      successCount + failCount,
-      totalFiles,
-      chunkNames,
-      i + 1,
-      totalChunks,
-      successCount,
-      failCount,
-      startTime
-    );
-
-    const formData = new FormData();
-    if (currentBatchId) {
-      formData.append("batch_id", currentBatchId);
-    }
-    chunk.forEach(f => formData.append("files", f));
-
-    try {
-      const resp = await fetch("/api/upload", {
-        method: "POST",
-        body: formData
+  if (preferredVolumeName || hasRelative || allImages) {
+    const volumeGroups = {};
+    if (preferredVolumeName) {
+      volumeGroups[preferredVolumeName] = files;
+    } else if (hasRelative) {
+      files.forEach(f => {
+        const rel = f.relativePath || f.webkitRelativePath || "";
+        const vol = rel.includes("/") ? rel.split("/")[0] : deriveVolumeTitle(files.map(x => x.name));
+        volumeGroups[vol] = volumeGroups[vol] || [];
+        volumeGroups[vol].push(f);
       });
-      const data = await resp.json();
-      if (resp.ok && data.status === "success") {
-        successCount += (data.total_files || chunk.length);
-        if (!firstUploadedSessionId) {
-          if (data.session_id) {
-            firstUploadedSessionId = data.session_id;
-          } else if (data.sessions && data.sessions.length > 0) {
-            firstUploadedSessionId = data.sessions[0].session_id;
-          }
-        }
-        if (data.batch_id) {
-          currentBatchId = data.batch_id;
-          sessionStorage.setItem("active_batch_id", currentBatchId);
-        }
-      } else {
-        failCount += chunk.length;
-        console.error("Chunk upload error:", data.detail || (data.message || resp.statusText));
-      }
-    } catch (err) {
-      failCount += chunk.length;
-      console.error("Chunk upload fetch error:", err);
+    } else {
+      const vol = deriveVolumeTitle(files.map(f => f.name));
+      volumeGroups[vol] = files;
     }
 
-    updateImportProgressModal(
-      successCount + failCount,
-      totalFiles,
-      chunkNames,
-      i + 1,
-      totalChunks,
-      successCount,
-      failCount,
-      startTime
-    );
+    const volEntries = Object.entries(volumeGroups);
+    totalChunks = volEntries.length;
+    openImportProgressModal(totalFiles);
+
+    for (let i = 0; i < volEntries.length; i++) {
+      if (isImportCancelled) {
+        showToast("Batch import cancelled by user.", "info");
+        break;
+      }
+      const [volName, volFiles] = volEntries[i];
+      updateImportProgressModal(
+        successCount + failCount,
+        totalFiles,
+        `Packaging volume "${volName}" (${volFiles.length} pages)...`,
+        i + 1,
+        volEntries.length,
+        successCount,
+        failCount,
+        startTime
+      );
+
+      const formData = new FormData();
+      if (currentBatchId) {
+        formData.append("batch_id", currentBatchId);
+      }
+      formData.append("volume_name", volName);
+      formData.append("combine_images", "true");
+      volFiles.forEach(f => formData.append("files", f));
+
+      try {
+        const resp = await fetch("/api/upload", {
+          method: "POST",
+          body: formData
+        });
+        const data = await resp.json();
+        if (resp.ok && data.status === "success") {
+          successCount += volFiles.length;
+          if (!firstUploadedSessionId) {
+            firstUploadedSessionId = data.session_id || (data.sessions && data.sessions[0]?.session_id);
+          }
+          if (data.batch_id) {
+            currentBatchId = data.batch_id;
+            sessionStorage.setItem("active_batch_id", currentBatchId);
+          }
+        } else {
+          failCount += volFiles.length;
+          console.error("Volume upload error:", data.detail || (data.message || resp.statusText));
+        }
+      } catch (err) {
+        failCount += volFiles.length;
+        console.error("Volume upload fetch error:", err);
+      }
+
+      updateImportProgressModal(
+        successCount + failCount,
+        totalFiles,
+        `Imported "${volName}"`,
+        i + 1,
+        volEntries.length,
+        successCount,
+        failCount,
+        startTime
+      );
+    }
+  } else {
+    const chunkSize = 8; // Upload 8 files per chunk to avoid browser payload timeouts
+    totalChunks = Math.ceil(totalFiles / chunkSize);
+    openImportProgressModal(totalFiles);
+
+    for (let i = 0; i < totalChunks; i++) {
+      if (isImportCancelled) {
+        showToast("Batch import cancelled by user.", "info");
+        break;
+      }
+
+      const chunk = files.slice(i * chunkSize, (i + 1) * chunkSize);
+      const chunkNames = chunk.map(f => f.name).join(", ");
+      updateImportProgressModal(
+        successCount + failCount,
+        totalFiles,
+        chunkNames,
+        i + 1,
+        totalChunks,
+        successCount,
+        failCount,
+        startTime
+      );
+
+      const formData = new FormData();
+      if (currentBatchId) {
+        formData.append("batch_id", currentBatchId);
+      }
+      chunk.forEach(f => formData.append("files", f));
+
+      try {
+        const resp = await fetch("/api/upload", {
+          method: "POST",
+          body: formData
+        });
+        const data = await resp.json();
+        if (resp.ok && data.status === "success") {
+          successCount += (data.total_files || chunk.length);
+          if (!firstUploadedSessionId) {
+            if (data.session_id) {
+              firstUploadedSessionId = data.session_id;
+            } else if (data.sessions && data.sessions.length > 0) {
+              firstUploadedSessionId = data.sessions[0].session_id;
+            }
+          }
+          if (data.batch_id) {
+            currentBatchId = data.batch_id;
+            sessionStorage.setItem("active_batch_id", currentBatchId);
+          }
+        } else {
+          failCount += chunk.length;
+          console.error("Chunk upload error:", data.detail || (data.message || resp.statusText));
+        }
+      } catch (err) {
+        failCount += chunk.length;
+        console.error("Chunk upload fetch error:", err);
+      }
+
+      updateImportProgressModal(
+        successCount + failCount,
+        totalFiles,
+        chunkNames,
+        i + 1,
+        totalChunks,
+        successCount,
+        failCount,
+        startTime
+      );
+    }
   }
 
-  // Refresh sessions after upload finishes
+  // Set modal to 100% complete state
+  updateImportProgressModal(
+    totalFiles,
+    totalFiles,
+    "Upload complete!",
+    totalChunks,
+    totalChunks,
+    successCount,
+    failCount,
+    startTime
+  );
+
+  // Trigger prompt auto-close timer so user sees 100% completion briefly
+  setTimeout(() => {
+    closeImportProgressModal();
+    if (successCount > 0) {
+      showToast(`Successfully imported ${successCount} document(s)!${failCount > 0 ? ` (${failCount} failed)` : ""}`, "success");
+    } else {
+      showToast("Bulk import completed with errors.", "error");
+    }
+  }, 400);
+
   try {
+    // Refresh sessions after upload finishes
     const sessRes = await fetch("/api/sessions");
     if (sessRes.ok) {
       const sessData = await sessRes.json();
@@ -1599,43 +1773,34 @@ async function handleBulkChunkedUpload(files) {
         console.error("Error fetching target session:", e);
       }
     }
-  } catch (err) {
-    console.error("Error refreshing sessions after bulk upload:", err);
-  }
 
   if (currentSession) {
     renderDashboard();
   } else {
-    const uploadSec = document.getElementById("upload-section");
-    const dashSec = document.getElementById("dashboard-section");
-    if (uploadSec) uploadSec.classList.remove("hidden");
-    if (dashSec) dashSec.classList.add("hidden");
-    const idleContent = document.getElementById("dropzone-idle-content");
-    const loadingContent = document.getElementById("dropzone-loading-content");
-    if (idleContent) idleContent.classList.remove("hidden");
-    if (loadingContent) loadingContent.classList.add("hidden");
-  }
-  renderDocumentQueue();
-  updateCombinedTitleInput(true);
-
-  const addBtn = document.getElementById("btn-add-files");
-  if (addBtn) {
-    addBtn.disabled = false;
-  }
-
-  setTimeout(() => {
-    closeImportProgressModal();
-    if (successCount > 0) {
-      showToast(`Successfully imported ${successCount} document(s)!${failCount > 0 ? ` (${failCount} failed)` : ""}`, "success");
-    } else {
-      showToast("Bulk import completed with errors.", "error");
+      const uploadSec = document.getElementById("upload-section");
+      const dashSec = document.getElementById("dashboard-section");
+      if (uploadSec) uploadSec.classList.remove("hidden");
+      if (dashSec) dashSec.classList.add("hidden");
+      const idleContent = document.getElementById("dropzone-idle-content");
+      const loadingContent = document.getElementById("dropzone-loading-content");
+      if (idleContent) idleContent.classList.remove("hidden");
+      if (loadingContent) loadingContent.classList.add("hidden");
     }
-  }, 1000);
-
-  const addMore = document.getElementById("add-more-input");
-  if (addMore) addMore.value = "";
-  const fileInput = document.getElementById("file-input");
-  if (fileInput) fileInput.value = "";
+    renderDocumentQueue();
+    updateCombinedTitleInput(true);
+  } catch (err) {
+    console.error("Error refreshing sessions/UI after bulk upload:", err);
+  } finally {
+    closeImportProgressModal();
+    const addBtn = document.getElementById("btn-add-files");
+    if (addBtn) {
+      addBtn.disabled = false;
+    }
+    const addMore = document.getElementById("add-more-input");
+    if (addMore) addMore.value = "";
+    const fileInput = document.getElementById("file-input");
+    if (fileInput) fileInput.value = "";
+  }
 }
 
 // Bulk Import Progress Modal Controls
@@ -1649,6 +1814,7 @@ function openImportProgressModal(totalCount) {
   const successText = document.getElementById("bulk-import-success-count");
   const failText = document.getElementById("bulk-import-fail-count");
   const cancelBtn = document.getElementById("btn-cancel-bulk-import");
+  const doneBtn = document.getElementById("btn-done-bulk-import");
 
   if (fill) fill.style.width = "0%";
   if (statusText) statusText.innerText = `Importing 0 of ${totalCount} files (0%)`;
@@ -1658,8 +1824,12 @@ function openImportProgressModal(totalCount) {
   if (successText) successText.innerText = "0";
   if (failText) failText.innerText = "0";
   if (cancelBtn) {
+    cancelBtn.classList.remove("hidden");
     cancelBtn.disabled = false;
     cancelBtn.innerHTML = '<i class="ri-close-circle-line"></i> Cancel Import';
+  }
+  if (doneBtn) {
+    doneBtn.classList.add("hidden");
   }
 
   if (overlay) overlay.classList.remove("hidden");
@@ -1691,6 +1861,10 @@ function updateImportProgressModal(processed, total, currentFile, chunkNum, tota
     }
   } else if (processed >= total && etaText) {
     etaText.innerText = "Complete!";
+    const cancelBtn = document.getElementById("btn-cancel-bulk-import");
+    const doneBtn = document.getElementById("btn-done-bulk-import");
+    if (cancelBtn) cancelBtn.classList.add("hidden");
+    if (doneBtn) doneBtn.classList.remove("hidden");
   }
 
   if (curFile && currentFile) curFile.innerText = currentFile;
@@ -1702,6 +1876,12 @@ function updateImportProgressModal(processed, total, currentFile, chunkNum, tota
 function closeImportProgressModal() {
   const overlay = document.getElementById("import-progress-modal-overlay");
   if (overlay) overlay.classList.add("hidden");
+}
+
+function handleImportProgressOverlayClick(event) {
+  if (event.target.id === "import-progress-modal-overlay") {
+    closeImportProgressModal();
+  }
 }
 
 function cancelBatchImport() {
@@ -1978,6 +2158,7 @@ function confirmFolderBrowserSelection() {
 
 // Local Folder Import Modal Controls & State
 let chosenFolderFiles = [];
+let chosenFolderName = "";
 let folderValidationTimeout = null;
 
 function triggerFolderPicker() {
@@ -2006,7 +2187,7 @@ function processChosenFiles(files) {
   if (files[0]) {
     if (files[0].path) {
       const p = files[0].path;
-      const rel = files[0].webkitRelativePath || files[0].name;
+      const rel = files[0].relativePath || files[0].webkitRelativePath || files[0].name;
       if (p.endsWith(rel)) {
         const rootDirName = rel.split("/")[0];
         detectedPath = p.substring(0, p.length - rel.length) + rootDirName;
@@ -2017,10 +2198,14 @@ function processChosenFiles(files) {
 
     if (files[0].webkitRelativePath && files[0].webkitRelativePath.includes("/")) {
       folderName = files[0].webkitRelativePath.split("/")[0];
+    } else if (files[0].relativePath && files[0].relativePath.includes("/")) {
+      folderName = files[0].relativePath.split("/")[0];
     } else {
       folderName = files[0].name ? files[0].name.split("/")[0] : "Selected Folder";
     }
   }
+
+  chosenFolderName = folderName;
 
   const dropLabel = document.getElementById("folder-dropzone-label");
   const dropSub = document.getElementById("folder-dropzone-sub");
@@ -2097,6 +2282,9 @@ async function scanFilesFromDataTransfer(dataTransfer) {
         if (entry.isFile) {
           try {
             const file = await new Promise((res, rej) => entry.file(res, rej));
+            if (entry.fullPath) {
+              file.relativePath = entry.fullPath.startsWith("/") ? entry.fullPath.slice(1) : entry.fullPath;
+            }
             files.push(file);
           } catch (err) {
             console.warn("Could not read file entry:", err);
@@ -2186,6 +2374,7 @@ async function validateAndDisplayFolderPath(rawVal) {
 
 function openFolderImportModal() {
   chosenFolderFiles = [];
+  chosenFolderName = "";
   const overlay = document.getElementById("folder-import-modal-overlay");
   const progressArea = document.getElementById("folder-import-progress-area");
   const runBtn = document.getElementById("btn-run-folder-import");
@@ -2223,6 +2412,11 @@ function closeFolderImportModal() {
     clearInterval(folderImportPoller);
     folderImportPoller = null;
   }
+  const runBtn = document.getElementById("btn-run-folder-import");
+  if (runBtn) {
+    runBtn.disabled = false;
+    runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+  }
 }
 
 function handleFolderImportOverlayClick(event) {
@@ -2234,18 +2428,20 @@ function handleFolderImportOverlayClick(event) {
 async function startFolderImport() {
   const pathInput = document.getElementById("folder-import-path");
   const recursiveCb = document.getElementById("folder-import-recursive");
+  const combineCb = document.getElementById("folder-import-combine-images");
   const maxInput = document.getElementById("folder-import-max");
   const progressArea = document.getElementById("folder-import-progress-area");
   const runBtn = document.getElementById("btn-run-folder-import");
 
   const rawDirPath = pathInput ? pathInput.value.trim() : "";
   const recursive = recursiveCb ? recursiveCb.checked : true;
+  const combineImages = combineCb ? combineCb.checked : true;
   const maxFiles = maxInput ? parseInt(maxInput.value, 10) || 5000 : 5000;
 
   if (!rawDirPath) {
     if (chosenFolderFiles && chosenFolderFiles.length > 0) {
       closeFolderImportModal();
-      await handleBulkChunkedUpload(chosenFolderFiles);
+      await handleBulkChunkedUpload(chosenFolderFiles, chosenFolderName || null);
       return;
     }
     showToast("Please enter a valid directory path or choose a folder.", "error");
@@ -2266,6 +2462,7 @@ async function startFolderImport() {
       body: JSON.stringify({
         directory_path: rawDirPath,
         recursive: recursive,
+        combine_images: combineImages,
         max_files: maxFiles,
         batch_id: currentBatchId || undefined
       })
@@ -2276,7 +2473,7 @@ async function startFolderImport() {
       if (chosenFolderFiles && chosenFolderFiles.length > 0) {
         showToast("Path not found on host; importing chosen folder files via browser upload...", "info");
         closeFolderImportModal();
-        await handleBulkChunkedUpload(chosenFolderFiles);
+        await handleBulkChunkedUpload(chosenFolderFiles, chosenFolderName || null);
         return;
       }
       showToast(data.detail || "Folder import failed to start.", "error");
@@ -2337,32 +2534,43 @@ function pollFolderImport(importId) {
       if (data.status === "completed") {
         clearInterval(folderImportPoller);
         folderImportPoller = null;
+        if (runBtn) {
+          runBtn.disabled = false;
+          runBtn.innerHTML = '<i class="ri-folder-download-line"></i> Start Import';
+        }
         showToast(`Imported ${data.processed_files} documents successfully!`, "success");
 
-        // Refresh sessions
-        const sessRes = await fetch("/api/sessions");
-        if (sessRes.ok) {
-          const sessData = await sessRes.json();
-          if (sessData && sessData.sessions) {
-            activeSessions = sessData.sessions;
-          }
-        }
-        if (data.created_session_ids && data.created_session_ids.length > 0 && !currentSession) {
-          const firstSess = await fetch(`/api/session/${data.created_session_ids[0]}`);
-          if (firstSess.ok) {
-            currentSession = await firstSess.json();
-            sessionStorage.setItem("active_session_id", currentSession.session_id);
-          }
-        }
-
-        if (currentSession) {
-          renderDashboard();
-        }
-        renderDocumentQueue();
-
+        // Promptly close the modal so it never hangs
         setTimeout(() => {
           closeFolderImportModal();
-        }, 1200);
+        }, 400);
+
+        try {
+          // Refresh sessions
+          const sessRes = await fetch("/api/sessions");
+          if (sessRes.ok) {
+            const sessData = await sessRes.json();
+            if (sessData && sessData.sessions) {
+              activeSessions = sessData.sessions;
+            }
+          }
+          if (data.created_session_ids && data.created_session_ids.length > 0 && !currentSession) {
+            const firstSess = await fetch(`/api/session/${data.created_session_ids[0]}`);
+            if (firstSess.ok) {
+              currentSession = await firstSess.json();
+              sessionStorage.setItem("active_session_id", currentSession.session_id);
+            }
+          }
+
+          if (currentSession) {
+            renderDashboard();
+          }
+          renderDocumentQueue();
+        } catch (err) {
+          console.error("Error refreshing sessions after folder import:", err);
+        } finally {
+          closeFolderImportModal();
+        }
       } else if (data.status === "cancelled" || data.status === "error") {
         clearInterval(folderImportPoller);
         folderImportPoller = null;
@@ -2768,13 +2976,22 @@ function updateColorizedCount() {
     if (sidebarExportCard) sidebarExportCard.classList.add("hidden");
   }
 
-  // Show "Recolorize Selected" button when at least one page is already colorized
+  // Show "Recolorize Selected" and "Translate Selected" buttons
   const btnRecolorizeSelected = document.getElementById("btn-recolorize-selected");
   if (btnRecolorizeSelected) {
     if (colorizedCount > 0) {
       btnRecolorizeSelected.classList.remove("hidden");
     } else {
       btnRecolorizeSelected.classList.add("hidden");
+    }
+  }
+
+  const btnRetranslateSelected = document.getElementById("btn-retranslate-selected");
+  if (btnRetranslateSelected) {
+    if (totalCount > 0) {
+      btnRetranslateSelected.classList.remove("hidden");
+    } else {
+      btnRetranslateSelected.classList.add("hidden");
     }
   }
 
@@ -2815,13 +3032,27 @@ function renderGalleryGrid() {
     const thumbUrl = page.colorized_url || origUrl;
     const dimText = (page.width && page.height) ? `${page.width} × ${page.height}` : "";
 
-    // Show a small recolorize button on colorized pages
+    // Show action buttons on page card (Recolorize & Translate/Re-translate)
     const recolorizeBtn = page.status === "colorized"
       ? `<button class="page-recolorize-btn" title="Force re-colorize this page"
                onclick="event.stopPropagation(); recolorizePage(${idx})">
            <i class="ri-refresh-line"></i> Recolorize
          </button>`
       : "";
+
+    const translateLabel = page.translated ? "Re-translate" : "Translate";
+    const translateTitle = page.translated ? "Re-translate speech bubbles on this page" : "Translate speech bubbles on this page";
+    const translateIcon = page.translated ? "ri-refresh-line" : "ri-translate-2";
+    const translateBtn = `<button class="page-translate-btn ${page.translated ? 'translated' : ''}" title="${translateTitle}"
+               onclick="event.stopPropagation(); translateCurrentPage(${idx})">
+           <i class="${translateIcon}"></i> ${translateLabel}
+         </button>`;
+
+    const cardActions = `<div class="page-card-actions">
+        ${recolorizeBtn}
+        ${translateBtn}
+      </div>`;
+
     card.innerHTML = `
       <div class="page-thumb-container">
         <label class="page-select-checkbox ${isSelected ? 'checked' : ''}" onclick="event.stopPropagation()" title="Select/Deselect page for colorization">
@@ -2834,7 +3065,7 @@ function renderGalleryGrid() {
         <span class="page-status-badge ${page.skipped_colored ? 'status-skipped-colored' : ('status-' + page.status)}" id="page-badge-${idx}" ${page.skipped_colored ? 'title="Already contained color — original artwork preserved"' : ''}>
           ${page.skipped_colored ? '<i class="ri-palette-line"></i> ORIGINAL COLOR' : page.status.toUpperCase()}
         </span>
-        ${recolorizeBtn}
+        ${cardActions}
         <img class="page-thumb-img" id="page-img-${idx}" src="${thumbUrl}" alt="${page.display_name}" loading="lazy" />
       </div>
       <div class="page-card-footer">
@@ -2937,6 +3168,27 @@ function updateSelectionUI() {
     }
   }
 
+  // Update Re-translate Selected button state dynamically
+  const btnRetranslateSelected = document.getElementById("btn-retranslate-selected");
+  if (btnRetranslateSelected) {
+    const hasAnyTranslated = currentSession?.pages?.some((p, i) => selectedPages.has(i) && p.translated);
+    const textSpan = document.getElementById("retranslate-selected-text");
+    if (textSpan) {
+      textSpan.innerText = hasAnyTranslated ? "Re-translate Selected" : "Translate Selected";
+    }
+    if (count === 0) {
+      btnRetranslateSelected.disabled = true;
+      btnRetranslateSelected.title = "Select one or more pages to translate";
+      btnRetranslateSelected.style.opacity = "0.55";
+      btnRetranslateSelected.style.cursor = "not-allowed";
+    } else {
+      btnRetranslateSelected.disabled = false;
+      btnRetranslateSelected.title = `${hasAnyTranslated ? 'Re-translate' : 'Translate'} ${count} selected page(s)`;
+      btnRetranslateSelected.style.opacity = "1";
+      btnRetranslateSelected.style.cursor = "pointer";
+    }
+  }
+
   const btnStart = document.getElementById("btn-start-colorize");
   if (btnStart) {
     const totalPages = currentSession ? (currentSession.total_pages || (currentSession.pages ? currentSession.pages.length : 0)) : 0;
@@ -2945,17 +3197,20 @@ function updateSelectionUI() {
 
     if (isBatchColorizing) {
       btnStart.disabled = true;
-    } else if (count === 0) {
-      btnStart.innerHTML = '<i class="ri-checkbox-blank-line"></i> Select Pages to Colorize';
+    } else if (totalPages === 0) {
+      btnStart.innerHTML = '<i class="ri-magic-line"></i> Colorize Current Document';
       btnStart.disabled = true;
-    } else if (processedPages > 0 && count === total && remainingPages > 0) {
+    } else if (count > 0 && count < total) {
+      btnStart.innerHTML = `<i class="ri-magic-line"></i> Colorize (${count} Selected Pages)`;
+      btnStart.disabled = false;
+    } else if (processedPages > 0 && remainingPages > 0) {
       btnStart.innerHTML = `<i class="ri-play-circle-line"></i> Continue Colorizing (${remainingPages} Remaining Pages)`;
       btnStart.disabled = false;
-    } else if (count === total) {
-      btnStart.innerHTML = `<i class="ri-magic-line"></i> Start Colorizing All (${total} Pages)`;
+    } else if (processedPages === total && total > 0) {
+      btnStart.innerHTML = `<i class="ri-refresh-line"></i> Recolorize Current Document (${total} Pages)`;
       btnStart.disabled = false;
     } else {
-      btnStart.innerHTML = `<i class="ri-magic-line"></i> Start Colorizing (${count} Selected Pages)`;
+      btnStart.innerHTML = `<i class="ri-magic-line"></i> Colorize Current Document (${total} Pages)`;
       btnStart.disabled = false;
     }
   }
@@ -2970,14 +3225,17 @@ async function startColorization() {
   const linePreserve = parseFloat(document.getElementById("slider-line").value) / 100.0;
   const saturation = parseFloat(document.getElementById("slider-saturation").value) / 10.0;
 
-  // Determine selected pages
+  // Determine selected pages:
+  // If specific pages are selected (subset), colorize only those.
+  // If 0 pages are selected (or all pages selected), colorize the entire document!
   let pagesToColorize = null;
   if (selectedPages && selectedPages.size > 0 && selectedPages.size < currentSession.pages.length) {
     pagesToColorize = Array.from(selectedPages).sort((a, b) => a - b);
-  } else if (selectedPages && selectedPages.size === 0) {
-    showToast("Please select at least one page to colorize.", "warning");
-    return;
   }
+
+  const totalPages = currentSession ? (currentSession.total_pages || (currentSession.pages ? currentSession.pages.length : 0)) : 0;
+  const processedPages = currentSession ? (currentSession.processed_count || 0) : 0;
+  const isAllColorized = totalPages > 0 && processedPages >= totalPages && (!pagesToColorize || pagesToColorize.length === totalPages);
 
   const payload = {
     session_id: currentSession.session_id,
@@ -2989,9 +3247,13 @@ async function startColorization() {
     contrast: 1.1,
     line_preserve: linePreserve,
     selected_pages: pagesToColorize,
+    force_recolorize: Boolean(isAllColorized),
     skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
     denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
-    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
+    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto",
+    translate_page: document.getElementById("chk-translate-page")?.checked || false,
+    translation_engine: document.getElementById("translation-engine-select")?.value || "auto",
+    target_language: document.getElementById("translation-lang-select")?.value || "en"
   };
 
   // UI state updates
@@ -3048,8 +3310,8 @@ function subscribeToProgressStream(sessionId = null, autoResume = false) {
     const data = JSON.parse(e.data);
 
     if (data.type === "init") {
-      // If the session was already completed or skipped before connecting, finish immediately
-      if (data.session && (data.session.status === "completed" || (data.session.total_pages > 0 && data.session.processed_count >= data.session.total_pages))) {
+      // ONLY finish immediately if NO active task is running AND session is completed
+      if (!data.is_active && data.session && (data.session.status === "completed" || (data.session.total_pages > 0 && data.session.processed_count >= data.session.total_pages))) {
         if (eventSource) {
           eventSource.close();
           eventSource = null;
@@ -3147,6 +3409,12 @@ function subscribeToProgressStream(sessionId = null, autoResume = false) {
         if (data.recognized_characters && data.recognized_characters.length > 0) {
           pageInfo.recognized_characters = data.recognized_characters;
         }
+        if (data.translated !== undefined) {
+          pageInfo.translated = data.translated;
+        }
+        if (data.translations) {
+          pageInfo.translations = data.translations;
+        }
         if (currentPreviewPageIndex === idx) {
           if (pageInfo.recognized_characters && pageInfo.recognized_characters.length > 0 && typeof renderPageCharacterChips === "function") {
             renderPageCharacterChips(pageInfo.recognized_characters);
@@ -3156,6 +3424,9 @@ function subscribeToProgressStream(sessionId = null, autoResume = false) {
           }
           if (typeof updateQualityPreviewChip === "function") {
             updateQualityPreviewChip(pageInfo);
+          }
+          if (typeof updateTranslationChip === "function") {
+            updateTranslationChip(data.translations ? data.translations.length : (data.translated ? 1 : 0));
           }
         }
 
@@ -3343,7 +3614,10 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     line_preserve: linePreserve,
     denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
     active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null,
-    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
+    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto",
+    translate_page: document.getElementById("chk-translate-page")?.checked || false,
+    translation_engine: document.getElementById("translation-engine-select")?.value || "auto",
+    target_language: document.getElementById("translation-lang-select")?.value || "en"
   };
 
   try {
@@ -3357,6 +3631,12 @@ async function previewSinglePage(pageIdx, showToastFeedback = true) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
+      if (data.translated !== undefined) {
+        page.translated = data.translated;
+      }
+      if (data.translations) {
+        page.translations = data.translations;
+      }
       if (data.recognized_characters && data.recognized_characters.length > 0) {
         page.recognized_characters = data.recognized_characters;
         if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
@@ -3592,8 +3872,35 @@ function openSplitPreview(pageIdx, preventScroll = false) {
   if (typeof updateQualityPreviewChip === "function") {
     updateQualityPreviewChip(page);
   }
+  if (typeof updateTranslationChip === "function") {
+    updateTranslationChip(page.translations ? page.translations.length : (page.translated ? 1 : 0));
+  }
   if (typeof updateComparatorMetaBar === "function") {
     updateComparatorMetaBar();
+  }
+
+  // Update comparator modal translate buttons
+  const translatePageBtn = document.getElementById("btn-translate-page");
+  if (translatePageBtn) {
+    if (page.translated) {
+      translatePageBtn.innerHTML = '<i class="ri-refresh-line"></i> Re-translate Page';
+      translatePageBtn.title = "Re-translate speech bubbles on this page";
+    } else {
+      translatePageBtn.innerHTML = '<i class="ri-translate-2"></i> Translate Page';
+      translatePageBtn.title = "Translate speech bubbles on this page to English";
+    }
+  }
+
+  const translateDocBtn = document.getElementById("btn-translate-doc");
+  if (translateDocBtn) {
+    const anyDocTranslated = currentSession?.pages?.some(p => p.translated);
+    if (anyDocTranslated) {
+      translateDocBtn.innerHTML = '<i class="ri-refresh-line"></i> Re-translate Document';
+      translateDocBtn.title = "Re-translate all pages in this document to English";
+    } else {
+      translateDocBtn.innerHTML = '<i class="ri-book-read-line"></i> Translate Document';
+      translateDocBtn.title = "Translate all pages in this document to English";
+    }
   }
 }
 
@@ -4375,8 +4682,15 @@ async function startBatchColorization() {
   const linePreserve = parseFloat(document.getElementById("slider-line").value) / 100.0;
   const saturation = parseFloat(document.getElementById("slider-saturation").value) / 10.0;
 
-  const pendingSessions = activeSessions.filter(s => s.status !== "completed");
-  const targetSessions = pendingSessions.length > 0 ? pendingSessions : activeSessions;
+  const wantsTranslate = document.getElementById("chk-translate-page")?.checked || false;
+  let targetSessions;
+  if (wantsTranslate) {
+    const needsWork = activeSessions.filter(s => s.status !== "completed" || !s.translated);
+    targetSessions = needsWork.length > 0 ? needsWork : activeSessions;
+  } else {
+    const pendingSessions = activeSessions.filter(s => s.status !== "completed");
+    targetSessions = pendingSessions.length > 0 ? pendingSessions : activeSessions;
+  }
   const sessionIds = targetSessions.map(s => s.session_id);
   showToast(`Starting batch colorization for ${sessionIds.length} documents...`, "info");
 
@@ -4401,7 +4715,10 @@ async function startBatchColorization() {
         line_preserve: linePreserve,
         skip_if_colored: document.getElementById("chk-skip-colored")?.checked || false,
         denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
-        recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
+        recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto",
+        translate_page: document.getElementById("chk-translate-page")?.checked || false,
+        translation_engine: document.getElementById("translation-engine-select")?.value || "auto",
+        target_language: document.getElementById("translation-lang-select")?.value || "en"
       })
     });
 
@@ -6518,6 +6835,9 @@ async function recolorizePage(pageIdx) {
         denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
         active_character_names: activePageCharacterNames && activePageCharacterNames.size > 0 ? Array.from(activePageCharacterNames) : null,
         recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto",
+        translate_page: Boolean(document.getElementById("chk-translate-page")?.checked || page.translated),
+        translation_engine: document.getElementById("translation-engine-select")?.value || "auto",
+        target_language: document.getElementById("translation-lang-select")?.value || "en",
       })
     });
 
@@ -6525,6 +6845,12 @@ async function recolorizePage(pageIdx) {
     if (resp.ok && data.status === "success") {
       page.status = "colorized";
       page.colorized_url = data.colorized_url;
+      if (data.translated !== undefined) {
+        page.translated = data.translated;
+      }
+      if (data.translations) {
+        page.translations = data.translations;
+      }
       if (data.recognized_characters && data.recognized_characters.length > 0) {
         page.recognized_characters = data.recognized_characters;
         if (currentPreviewPageIndex === pageIdx && typeof renderPageCharacterChips === "function") {
@@ -6553,6 +6879,9 @@ async function recolorizePage(pageIdx) {
         showToast(`✨ ${page.display_name} recolorized with series exemplar (${data.exemplar_used})!`, "success");
       } else {
         showToast(`${page.display_name} recolorized!`, "success");
+      }
+      if (typeof updateTranslationChip === "function") {
+        updateTranslationChip(data.translations ? data.translations.length : (data.translated ? 1 : 0));
       }
       updateColorizedCount();
       // Re-render gallery so card recolorize button refreshes
@@ -6612,7 +6941,13 @@ async function recolorizeSelected() {
     force_recolorize: true,
     skip_if_colored:  false,
     denoise_screentone: document.getElementById("chk-denoise-screentone") ? document.getElementById("chk-denoise-screentone").checked : true,
-    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto"
+    recognition_mode: document.getElementById("recognition-mode-select") ? document.getElementById("recognition-mode-select").value : "auto",
+    translate_page: Boolean(
+      document.getElementById("chk-translate-page")?.checked ||
+      pagesToRecolorize.some(idx => Boolean(currentSession.pages[idx]?.translated))
+    ),
+    translation_engine: document.getElementById("translation-engine-select")?.value || "auto",
+    target_language: document.getElementById("translation-lang-select")?.value || "en"
   };
 
   // UI feedback
@@ -6809,13 +7144,15 @@ function updateComparatorMetaBar() {
   const memoryBadge = document.getElementById("series-memory-preview-badge");
   const exemplarChip = document.getElementById("preview-exemplar-chip");
   const qualityChip = document.getElementById("preview-quality-chip");
+  const translationChip = document.getElementById("preview-translation-chip");
   const page = currentSession?.pages?.[currentPreviewPageIndex];
   const isColorized = !!(page && (page.status === "colorized" || page.colorized_url));
 
   const hasVisibleChip =
     (memoryBadge && memoryBadge.style.display !== "none" && memoryBadge.style.display !== "") ||
     (exemplarChip && exemplarChip.style.display !== "none" && exemplarChip.style.display !== "") ||
-    (qualityChip && qualityChip.style.display !== "none" && qualityChip.style.display !== "");
+    (qualityChip && qualityChip.style.display !== "none" && qualityChip.style.display !== "") ||
+    (translationChip && translationChip.style.display !== "none" && translationChip.style.display !== "");
 
   if (hasVisibleChip || isColorized) {
     metaBar.style.display = "flex";
@@ -6823,6 +7160,215 @@ function updateComparatorMetaBar() {
     metaBar.style.display = "none";
   }
 }
+
+function updateTranslationChip(count = 0) {
+  const chip = document.getElementById("preview-translation-chip");
+  const label = document.getElementById("preview-translation-label");
+  if (!chip || !label) return;
+
+  const page = currentSession?.pages?.[currentPreviewPageIndex];
+  const isTranslated = !!(page && (page.translated || (page.translations && page.translations.length > 0) || count > 0));
+
+  if (isTranslated) {
+    const bubbleCount = page?.translations?.length || count;
+    label.innerText = bubbleCount > 0 ? `Translated (${bubbleCount} bubbles)` : "Translated";
+    chip.style.display = "inline-flex";
+  } else {
+    chip.style.display = "none";
+  }
+  if (typeof updateComparatorMetaBar === "function") {
+    updateComparatorMetaBar();
+  }
+}
+
+async function translateCurrentPage(pageIdx = currentPreviewPageIndex, force = false) {
+  if (!currentSession) return;
+  const page = currentSession.pages[pageIdx];
+  if (!page) return;
+
+  const translationEngine = document.getElementById("translation-engine-select")?.value || "auto";
+  const targetLanguage = document.getElementById("translation-lang-select")?.value || "en";
+  const apiKey = document.getElementById("api-key-input")?.value || "";
+
+  const isRetranslate = Boolean(page.translated || force);
+  const translateBtn = document.getElementById("btn-translate-page");
+  if (translateBtn && currentPreviewPageIndex === pageIdx) {
+    translateBtn.disabled = true;
+    translateBtn.innerHTML = `<i class="ri-loader-4-line spinner"></i> ${isRetranslate ? 'Re-translating…' : 'Translating…'}`;
+  }
+
+  showToast(`${isRetranslate ? 'Re-translating' : 'Translating'} ${page.display_name}…`, "info");
+
+  try {
+    const resp = await fetch("/api/translate/page", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: currentSession.session_id,
+        page_index: pageIdx,
+        translation_engine: translationEngine,
+        target_language: targetLanguage,
+        api_key: apiKey,
+        force: isRetranslate
+      })
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.status === "success") {
+      const bubbleCount = data.bubble_count !== undefined ? data.bubble_count : (data.translations ? data.translations.length : 0);
+      page.translated = bubbleCount > 0;
+      page.translations = data.translations || [];
+      const ts = Date.now();
+
+      // Refresh split preview images
+      const colorImg = document.getElementById("split-img-colorized");
+      if (colorImg && currentPreviewPageIndex === pageIdx && data.colorized_url) {
+        colorImg.src = `${data.colorized_url}?t=${ts}`;
+      }
+
+      // Update comparator navigation thumbnail if rendered
+      const compThumbImg = document.getElementById(`comp-thumb-img-${pageIdx}`);
+      if (compThumbImg && data.colorized_url) compThumbImg.src = `${data.colorized_url}?t=${ts}`;
+
+      // Update gallery thumbnail
+      const imgElem = document.getElementById(`page-img-${pageIdx}`);
+      if (imgElem && data.colorized_url) imgElem.src = `${data.colorized_url}?t=${ts}`;
+
+      // Update translation chip in comparator
+      updateTranslationChip(bubbleCount);
+
+      // Re-render gallery grid to sync card translate button state
+      renderGalleryGrid();
+
+      if (bubbleCount > 0) {
+        showToast(`✨ ${page.display_name} ${isRetranslate ? 're-translated' : 'translated'} (${bubbleCount} speech bubbles)!`, "success");
+      } else {
+        showToast(`ℹ️ No dialogue or speech bubbles detected on ${page.display_name}.`, "info");
+      }
+    } else {
+      showToast(data.detail || "Translation failed.", "error");
+    }
+  } catch (err) {
+    showToast(`Translation error: ${err.message}`, "error");
+  } finally {
+    if (translateBtn && currentPreviewPageIndex === pageIdx) {
+      translateBtn.disabled = false;
+      if (page.translated) {
+        translateBtn.innerHTML = '<i class="ri-refresh-line"></i> Re-translate Page';
+        translateBtn.title = "Re-translate speech bubbles on this page";
+      } else {
+        translateBtn.innerHTML = '<i class="ri-translate-2"></i> Translate Page';
+        translateBtn.title = "Translate speech bubbles on this page to English";
+      }
+    }
+  }
+}
+
+async function translateCurrentDocument(sessionId = null, force = null) {
+  const targetId = sessionId || currentSession?.session_id;
+  if (!targetId) return;
+
+  const translationEngine = document.getElementById("translation-engine-select")?.value || "auto";
+  const targetLanguage = document.getElementById("translation-lang-select")?.value || "en";
+  const apiKey = document.getElementById("api-key-input")?.value || "";
+
+  const anyDocTranslated = currentSession?.pages?.some(p => p.translated);
+  const shouldForce = force !== null ? force : Boolean(anyDocTranslated);
+
+  const docBtn = document.getElementById("btn-translate-doc");
+  if (docBtn) {
+    docBtn.disabled = true;
+    docBtn.innerHTML = `<i class="ri-loader-4-line spinner"></i> ${shouldForce ? 'Re-translating…' : 'Translating…'}`;
+  }
+
+  showToast(`${shouldForce ? 'Re-translating' : 'Translating'} document ${currentSession?.filename || ''}…`, "info");
+
+  try {
+    const resp = await fetch("/api/translate/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: targetId,
+        translation_engine: translationEngine,
+        target_language: targetLanguage,
+        api_key: apiKey,
+        force: shouldForce
+      })
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.status === "started") {
+      showToast(data.message || "Translation in progress…", "success");
+      const progCard = document.getElementById("progress-card");
+      if (progCard) progCard.classList.remove("hidden");
+      subscribeToProgressStream(targetId, true);
+    } else {
+      showToast(data.detail || data.message || "Failed to start translation.", "error");
+    }
+  } catch (err) {
+    showToast(`Translation error: ${err.message}`, "error");
+  } finally {
+    if (docBtn) {
+      docBtn.disabled = false;
+      const anyTranslatedAfter = currentSession?.pages?.some(p => p.translated);
+      if (anyTranslatedAfter) {
+        docBtn.innerHTML = '<i class="ri-refresh-line"></i> Re-translate Document';
+        docBtn.title = "Re-translate all pages in this document to English";
+      } else {
+        docBtn.innerHTML = '<i class="ri-book-read-line"></i> Translate Document';
+        docBtn.title = "Translate all pages in this document to English";
+      }
+    }
+  }
+}
+window.translateCurrentDocument = translateCurrentDocument;
+
+async function retranslateSelected() {
+  if (!currentSession) return;
+
+  const pagesToTranslate = selectedPages.size > 0
+    ? Array.from(selectedPages).sort((a, b) => a - b)
+    : null;
+
+  if (!pagesToTranslate || pagesToTranslate.length === 0) {
+    showToast("No pages selected.", "warning");
+    return;
+  }
+
+  const translationEngine = document.getElementById("translation-engine-select")?.value || "auto";
+  const targetLanguage = document.getElementById("translation-lang-select")?.value || "en";
+  const apiKey = document.getElementById("api-key-input")?.value || "";
+
+  showToast(`Translating ${pagesToTranslate.length} selected page(s)…`, "info");
+
+  try {
+    const resp = await fetch("/api/translate/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: currentSession.session_id,
+        target_language: targetLanguage,
+        translation_engine: translationEngine,
+        api_key: apiKey,
+        force: true,
+        selected_pages: pagesToTranslate
+      })
+    });
+
+    const data = await resp.json();
+    if (resp.ok && data.status === "started") {
+      showToast(data.message || `Re-translating ${pagesToTranslate.length} page(s)…`, "success");
+      const progCard = document.getElementById("progress-card");
+      if (progCard) progCard.classList.remove("hidden");
+      subscribeToProgressStream(currentSession.session_id, true);
+    } else {
+      showToast(data.detail || data.message || "Failed to start translation.", "error");
+    }
+  } catch (err) {
+    showToast(`Translation error: ${err.message}`, "error");
+  }
+}
+window.retranslateSelected = retranslateSelected;
 
 function updateExemplarPreviewChip(page) {
   const chip = document.getElementById("preview-exemplar-chip");
@@ -7315,10 +7861,12 @@ async function toggleAutoRefineAdapter(enabled) {
 
 window.recolorizePage     = recolorizePage;
 window.recolorizeSelected = recolorizeSelected;
+window.retranslateSelected = retranslateSelected;
 window.changeHistoryPage = changeHistoryPage;
 window.handleBulkChunkedUpload = handleBulkChunkedUpload;
 window.openImportProgressModal = openImportProgressModal;
 window.closeImportProgressModal = closeImportProgressModal;
+window.handleImportProgressOverlayClick = handleImportProgressOverlayClick;
 window.cancelBatchImport = cancelBatchImport;
 window.openFolderImportModal = openFolderImportModal;
 window.closeFolderImportModal = closeFolderImportModal;
@@ -7365,4 +7913,9 @@ window.selectTheme = selectTheme;
 window.toggleThemeDropdown = toggleThemeDropdown;
 window.closeThemeDropdown = closeThemeDropdown;
 window.updateComparatorMetaBar = updateComparatorMetaBar;
+window.toggleTranslationOptions = toggleTranslationOptions;
+window.translateCurrentPage = translateCurrentPage;
+window.updateTranslationChip = updateTranslationChip;
+window.startColorization = startColorization;
+
 
