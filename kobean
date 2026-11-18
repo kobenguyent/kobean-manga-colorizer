@@ -53,6 +53,7 @@ show_help() {
   echo ""
   echo -e "${BOLD}Available Commands:${RESET}"
   echo -e "  ${GREEN}run app${RESET} [flags]      Launch the Web Studio (auto-opens browser)"
+  echo -e "  ${GREEN}macos${RESET} [subcommand]   Build, test, or launch the native macOS SwiftUI app"
   echo -e "  ${GREEN}setup${RESET}                Install dependencies via UV & setup environment"
   echo -e "  ${GREEN}test${RESET}                 Run the full automated test suite"
   echo -e "  ${GREEN}lint${RESET}                 Audit code for PEP 8 compliance using Ruff"
@@ -238,12 +239,48 @@ cmd_hook() {
   esac
 }
 
+# Subcommand: macos (Native SwiftUI macOS App)
+cmd_macos() {
+  ACTION="${1:-launch}"
+  case "$ACTION" in
+    test)
+      print_banner
+      echo -e "${BOLD}${BLUE}==> Running native macOS SwiftUI XCTest suite...${RESET}\n"
+      (cd "$REPO_DIR/macos" && swift test)
+      ;;
+    build|app)
+      print_banner
+      echo -e "${BOLD}${BLUE}==> Building & packaging dist-macos/KobeanMangaColorizer.app...${RESET}\n"
+      bash "$REPO_DIR/scripts/build-macos-app.sh"
+      ;;
+    dmg)
+      print_banner
+      echo -e "${BOLD}${BLUE}==> Building dist-macos/KobeanMangaColorizer.app & DMG installer...${RESET}\n"
+      bash "$REPO_DIR/scripts/build-macos-app.sh" --dmg
+      ;;
+    icon)
+      print_banner
+      echo -e "${BOLD}${BLUE}==> Generating macOS AppIcon.icns...${RESET}\n"
+      swift "$REPO_DIR/scripts/generate-macos-icon.swift" "$REPO_DIR/macos/AppIcon.icns" "$REPO_DIR/static/brand-icon.png"
+      ;;
+    run|launch|open|*)
+      print_banner
+      echo -e "${BOLD}${BLUE}==> Building & launching native macOS Kobean Manga Colorizer.app...${RESET}\n"
+      bash "$REPO_DIR/scripts/build-macos-app.sh" --launch
+      ;;
+  esac
+}
+
 # Main Command Dispatcher
 COMMAND="$1"
 
 case "$COMMAND" in
   run|app|start)
     cmd_run "$@"
+    ;;
+  macos)
+    shift
+    cmd_macos "$@"
     ;;
   setup)
     cmd_setup
