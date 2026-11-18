@@ -22,6 +22,8 @@ import copy
 import json
 import re
 import shutil
+import threading
+import urllib.parse
 import uuid
 from typing import Any, Optional
 
@@ -45,6 +47,7 @@ from colorizer_engine import (
     CharacterPalette,
     MangaColorizerEngine,
     RecognizedCharacter,
+    get_hardware_profile,
     is_colored_page,
 )
 from file_processor import MangaFileProcessor, derive_volume_name, natural_sort_key
@@ -63,19 +66,73 @@ from series_memory import (
 
 app = FastAPI(title="Manga Colorizer Pro", version="1.0.0")
 
-# Enable CORS
+# Enable CORS strictly for local loopback studio origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1",
+        "http://localhost",
+    ],
+    allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """Attaches baseline HTTP security headers to all studio responses."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+    return response
+
+
+def resolve_data_dirs(
+    base_dir: Path, env_data_dir: Optional[str] = None
+) -> tuple[Path, Path, Path]:
+    """Resolves uploads, sessions, and output directories under env_data_dir or base_dir."""
+    raw = str(env_data_dir).strip() if env_data_dir is not None else ""
+    root = Path(raw).expanduser() if raw else Path(base_dir)
+    return root / "uploads", root / "sessions", root / "output"
+
+
+def resolve_safe_child_path(root_dir: Path, *parts: str) -> Path:
+    """Resolves child path segments and enforces strict containment inside root_dir."""
+    if not parts:
+        raise HTTPException(status_code=400, detail="Invalid or unsafe file path")
+    base = root_dir.resolve()
+    candidate = base
+    for part in parts:
+        if not isinstance(part, str) or not part or "\x00" in part:
+            raise HTTPException(status_code=400, detail="Invalid or unsafe file path")
+        decoded = urllib.parse.unquote(part)
+        double_decoded = urllib.parse.unquote(decoded)
+        for variant in (part, decoded, double_decoded):
+            if (
+                not variant
+                or variant in (".", "..")
+                or "/" in variant
+                or "\\" in variant
+                or "\x00" in variant
+            ):
+                raise HTTPException(status_code=400, detail="Invalid or unsafe file path")
+        candidate = candidate / part
+    resolved = candidate.resolve()
+    if resolved == base or not resolved.is_relative_to(base):
+        raise HTTPException(status_code=400, detail="Invalid or unsafe file path")
+    return resolved
+
+
 BASE_DIR = Path(__file__).parent.resolve()
-UPLOAD_DIR = BASE_DIR / "uploads"
-STORAGE_DIR = BASE_DIR / "sessions"
-OUTPUT_DIR = BASE_DIR / "output"
+UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR = resolve_data_dirs(
+    BASE_DIR, os.environ.get("KOBEAN_DATA_DIR")
+)
 STATIC_DIR = BASE_DIR / "static"
 
 for d in [UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR, STATIC_DIR]:
@@ -127,8 +184,11 @@ CURRENT_BATCH: dict[str, Any] = {
 }
 
 
+_META_WRITE_LOCK = threading.Lock()
+
+
 def save_session_meta(session_id: str):
-    """Persists session state to meta.json on disk to survive server restarts."""
+    """Persists session state atomically to meta.json via meta.json.tmp and os.replace."""
     sess = SESSIONS.get(session_id)
     if not sess:
         return
@@ -140,10 +200,15 @@ def save_session_meta(session_id: str):
     sess_dir = STORAGE_DIR / session_id
     sess_dir.mkdir(parents=True, exist_ok=True)
     meta_path = sess_dir / "meta.json"
+    tmp_path = sess_dir / "meta.json.tmp"
     try:
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(sess, f, indent=2)
+        with _META_WRITE_LOCK:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(sess, f, indent=2)
+                f.flush()
+            os.replace(tmp_path, meta_path)
     except Exception as e:
+        tmp_path.unlink(missing_ok=True)
         print(f"[Session Warning] Failed to write meta.json: {e}")
 
 
@@ -1552,11 +1617,12 @@ async def get_session_image(session_id: str, img_type: str, filename: str):
     if img_type not in ["original", "colorized", "colorized_raw"]:
         raise HTTPException(status_code=400, detail="Invalid image type")
 
-    img_path = STORAGE_DIR / session_id / img_type / filename
-    if not img_path.exists():
+    img_path = resolve_safe_child_path(STORAGE_DIR, session_id, img_type, filename)
+    if not img_path.is_file():
         raise HTTPException(status_code=404, detail="Image not found")
 
-    return FileResponse(str(img_path))
+    cache_control = "public, max-age=3600" if img_type == "original" else "no-cache"
+    return FileResponse(str(img_path), headers={"Cache-Control": cache_control})
 
 
 async def notify_sse_listeners(session_id: str, event_data: dict):
@@ -3235,10 +3301,12 @@ async def get_series_exemplars_endpoint(session_id: str):
 @app.get("/api/series-memory/{series_key}/exemplar-image/{filename}")
 async def get_series_exemplar_image(series_key: str, filename: str):
     """Serves a stored exemplar image for a given series."""
-    img_path = STORAGE_DIR / "series_exemplars" / series_key / filename
-    if not img_path.exists():
-        bank_path = SERIES_BANK.storage_path.parent / "series_exemplars" / series_key / filename
-        if bank_path.exists():
+    img_path = resolve_safe_child_path(STORAGE_DIR / "series_exemplars", series_key, filename)
+    if not img_path.is_file():
+        bank_path = resolve_safe_child_path(
+            SERIES_BANK.storage_path.parent / "series_exemplars", series_key, filename
+        )
+        if bank_path.is_file():
             img_path = bank_path
         else:
             raise HTTPException(status_code=404, detail="Exemplar image not found")
@@ -4088,8 +4156,9 @@ async def get_combined_export_status(job_id: str):
 @app.get("/api/download/combined/{filename}")
 async def download_combined_file(filename: str):
     """Serves a combined single-volume export file."""
-    out_filepath = str(OUTPUT_DIR / f"combined_{filename}")
-    if not os.path.exists(out_filepath):
+    resolve_safe_child_path(OUTPUT_DIR, filename)
+    out_path = resolve_safe_child_path(OUTPUT_DIR, f"combined_{filename}")
+    if not out_path.is_file():
         raise HTTPException(status_code=404, detail="Combined export not found or expired")
     ext = Path(filename).suffix.lower()
     if ext == ".epub":
@@ -4105,7 +4174,7 @@ async def download_combined_file(filename: str):
     else:
         media_type = "application/octet-stream"
     return FileResponse(
-        out_filepath, filename=filename, media_type=media_type, headers={"Accept-Ranges": "bytes"}
+        str(out_path), filename=filename, media_type=media_type, headers={"Accept-Ranges": "bytes"}
     )
 
 
@@ -4194,8 +4263,10 @@ async def export_document(session_id: str, format: Optional[str] = None):
 
 @app.get("/api/download/{session_id}/{filename}")
 async def download_file(session_id: str, filename: str):
-    out_filepath = str(OUTPUT_DIR / f"{session_id}_{filename}")
-    if not os.path.exists(out_filepath):
+    resolve_safe_child_path(OUTPUT_DIR, session_id)
+    resolve_safe_child_path(OUTPUT_DIR, filename)
+    out_path = resolve_safe_child_path(OUTPUT_DIR, f"{session_id}_{filename}")
+    if not out_path.is_file():
         raise HTTPException(status_code=404, detail="File not found or export expired")
 
     ext = Path(filename).suffix.lower()
@@ -4211,13 +4282,20 @@ async def download_file(session_id: str, filename: str):
     }
     media_type = media_map.get(ext, "application/octet-stream")
 
-    return FileResponse(out_filepath, filename=filename, media_type=media_type)
+    return FileResponse(str(out_path), filename=filename, media_type=media_type)
 
 
 @app.get("/api/sessions")
 async def list_sessions(batch_id: Optional[str] = None):
     """Returns list of active/cached sessions, optionally filtered by batch_id, naturally sorted by filename."""
-    existing_dirs = {d.name for d in STORAGE_DIR.iterdir() if d.is_dir()}
+    with os.scandir(STORAGE_DIR) as entries:
+        existing_dirs = {
+            entry.name
+            for entry in entries
+            if entry.is_dir()
+            and not entry.name.startswith(".")
+            and entry.name != "series_exemplars"
+        }
     for sid in list(SESSIONS.keys()):
         if sid not in existing_dirs:
             SESSIONS.pop(sid, None)
@@ -4946,6 +5024,39 @@ async def delete_all_sessions(
     return JSONResponse(
         {"status": "success", "message": "All document sessions and files deleted successfully"}
     )
+
+
+@app.get("/api/health")
+async def get_health():
+    """Returns backend liveness and active job counters for desktop supervisor polling."""
+    active_tasks = sum(1 for sid in list(ACTIVE_COLORIZATION_TASKS) if is_task_active(sid))
+    return JSONResponse(
+        {
+            "status": "ok",
+            "service": "kobean-manga-colorizer",
+            "version": app.version,
+            "active_colorization_tasks": active_tasks,
+            "batch_running": bool(CURRENT_BATCH.get("is_running", False)),
+            "total_sessions": len(SESSIONS),
+        }
+    )
+
+
+@app.get("/api/hardware")
+async def get_hardware():
+    """Returns detected hardware acceleration profile, weights status, and storage directories."""
+    hw = getattr(colorizer_engine, "hw_profile", None)
+    profile = dict(hw) if isinstance(hw, dict) else get_hardware_profile()
+    profile["generator_weights_ready"] = bool(
+        getattr(colorizer_engine, "colorizer_model", None) is not None
+        or (BASE_DIR / "networks" / "generator.zip").is_file()
+    )
+    profile["storage"] = {
+        "sessions_dir": str(STORAGE_DIR),
+        "uploads_dir": str(UPLOAD_DIR),
+        "output_dir": str(OUTPUT_DIR),
+    }
+    return JSONResponse(profile)
 
 
 @app.get("/favicon.ico", include_in_schema=False)
