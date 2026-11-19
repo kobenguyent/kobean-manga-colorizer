@@ -19,6 +19,14 @@ class TestResumePendingSessions(unittest.TestCase):
 
     def tearDown(self):
         for sid in self.test_sessions_to_clean:
+            try:
+                requests.post(f"{BASE_URL}/api/colorize/cancel/{sid}", timeout=3)
+            except requests.RequestException:
+                pass
+            try:
+                requests.delete(f"{BASE_URL}/api/session/{sid}", timeout=3)
+            except requests.RequestException:
+                pass
             SESSIONS.pop(sid, None)
             sess_dir = STORAGE_DIR / sid
             if sess_dir.exists():
@@ -74,6 +82,7 @@ class TestResumePendingSessions(unittest.TestCase):
             "status": initial_status,
             "model_provider": "local_smart",
             "model_name": "smart-color",
+            "denoise_screentone": False,
             "pages": pages,
         }
 
@@ -109,6 +118,7 @@ class TestResumePendingSessions(unittest.TestCase):
                 "session_id": session_id,
                 "model_provider": "local_smart",
                 "model_name": "smart-color",
+                "denoise_screentone": False,
             }
         )
         self.assertEqual(start_res.status_code, 200)
@@ -124,15 +134,15 @@ class TestResumePendingSessions(unittest.TestCase):
         data = res.json()
         self.assertIn(data["status"], ["resumed", "already_running"])
 
-        # Wait for the remaining page to complete (up to 10s)
+        # Wait for the remaining page to complete (up to 30s on slow CPU-only CI runners)
         check_data = {}
-        for _ in range(30):
+        for _ in range(60):
             check_res = requests.get(f"{BASE_URL}/api/session/{session_id}")
             if check_res.status_code == 200:
                 check_data = check_res.json()
                 if check_data.get("status") == "completed":
                     break
-            time.sleep(0.3)
+            time.sleep(0.5)
 
         # Verify session is completed and all pages are colorized
         self.assertEqual(check_data.get("status"), "completed")
@@ -151,13 +161,16 @@ class TestResumePendingSessions(unittest.TestCase):
         """Connecting to SSE stream with auto_resume=True resumes pending pages automatically."""
         session_id, _ = self._create_mock_session(total_pages=2, colorized_count=1, initial_status="pending")
 
-        # Connect to stream with auto_resume=true
-        resp = requests.get(f"{BASE_URL}/api/colorize/stream/{session_id}?auto_resume=true", stream=True, timeout=15)
+        # Connect to stream with auto_resume=true (server emits SSE keepalive comments every 5s)
+        resp = requests.get(f"{BASE_URL}/api/colorize/stream/{session_id}?auto_resume=true", stream=True, timeout=20)
         self.assertEqual(resp.status_code, 200)
 
         received_events = []
+        deadline = time.monotonic() + 45.0
         for line in resp.iter_lines(decode_unicode=True):
-            if line.startswith("data: "):
+            if time.monotonic() > deadline:
+                break
+            if line and line.startswith("data: "):
                 event_data = json.loads(line[6:])
                 received_events.append(event_data.get("type"))
                 if event_data.get("type") in ["completed", "idle", "cancelled"]:

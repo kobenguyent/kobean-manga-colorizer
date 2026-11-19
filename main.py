@@ -1647,6 +1647,11 @@ async def stream_progress(session_id: str, auto_resume: bool = Query(False)):
         or (colorized_dir / p.get("filename", "")).stat().st_size == 0
     ]
 
+    q = asyncio.Queue()
+    if session_id not in EVENT_QUEUES:
+        EVENT_QUEUES[session_id] = []
+    EVENT_QUEUES[session_id].append(q)
+
     # Auto-resume interrupted session if requested or if status was left in processing without an active task
     if (auto_resume or sess.get("status") == "processing") and not is_task_active(session_id):
         if uncolorized_indices:
@@ -1675,11 +1680,6 @@ async def stream_progress(session_id: str, auto_resume: bool = Query(False)):
             sess["processed_count"] = len(pages)
             save_session_meta(session_id)
 
-    q = asyncio.Queue()
-    if session_id not in EVENT_QUEUES:
-        EVENT_QUEUES[session_id] = []
-    EVENT_QUEUES[session_id].append(q)
-
     async def event_generator():
         try:
             # Yield initial status
@@ -1705,7 +1705,19 @@ async def stream_progress(session_id: str, auto_resume: bool = Query(False)):
                 return
 
             while True:
-                data = await q.get()
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # Keep SSE connection alive during long CPU/API inference and exit cleanly if worker finished
+                    if not is_task_active(session_id) and sess.get("status") in [
+                        "completed",
+                        "cancelled",
+                        "error",
+                    ]:
+                        yield f"data: {json.dumps({'type': sess.get('status'), 'total_processed': sess.get('processed_count', 0)})}\n\n"
+                        break
+                    yield ": keepalive\n\n"
+                    continue
                 yield f"data: {json.dumps(data)}\n\n"
                 if data.get("type") in ["completed", "error", "cancelled"]:
                     break
