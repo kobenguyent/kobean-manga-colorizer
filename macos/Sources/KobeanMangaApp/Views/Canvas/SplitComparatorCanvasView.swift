@@ -3,12 +3,15 @@ import SwiftUI
 
 struct SplitComparatorCanvasView: View {
     @Bindable var store: StudioStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showQualityPopover: Bool = false
     @State private var dragBaseOffset: CGSize = .zero
     @State private var gestureBaseZoom: Double = 1.0
     @State private var isHoveringSplitHandle: Bool = false
     @State private var isDraggingSplitHandle: Bool = false
     @State private var isWelcomeLogoHovered: Bool = false
+    @State private var isQualityBadgeHovered: Bool = false
+    @State private var hoveredWelcomeSessionId: String?
 
     var body: some View {
         let theme = store.currentTheme
@@ -92,9 +95,14 @@ struct SplitComparatorCanvasView: View {
                     Image(systemName: "minus.magnifyingglass")
                         .font(.caption)
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
+                .buttonStyle(
+                    StudioInlineIconButtonStyle(
+                        theme: theme,
+                        cornerRadius: 6,
+                        paddingHorizontal: 6,
+                        paddingVertical: 4
+                    )
+                )
                 .help("Zoom Out (⌘-)")
 
                 Menu {
@@ -106,11 +114,21 @@ struct SplitComparatorCanvasView: View {
                     Divider()
                     Button("Reset 100%") { store.resetZoom() }
                 } label: {
-                    Text("\(Int((store.zoomScale * 100).rounded()))%")
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(theme.textPrimary)
-                        .frame(minWidth: 42)
+                    StudioHoverMenuTrigger(theme: theme, cornerRadius: 5.5, showChrome: false) { isHovered in
+                        HStack(spacing: 3) {
+                            Text("\(Int((store.zoomScale * 100).rounded()))%")
+                                .font(.caption.weight(.semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(isHovered ? theme.accentPrimary : theme.textPrimary)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 7.5, weight: .bold))
+                                .foregroundStyle(isHovered ? theme.accentPrimary : theme.textMuted)
+                                .offset(y: isHovered ? 0.5 : 0)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3.5)
+                        .frame(minWidth: 46)
+                    }
                 }
                 .menuStyle(.button)
                 .buttonStyle(.plain)
@@ -122,54 +140,40 @@ struct SplitComparatorCanvasView: View {
                     Image(systemName: "plus.magnifyingglass")
                         .font(.caption)
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
+                .buttonStyle(
+                    StudioInlineIconButtonStyle(
+                        theme: theme,
+                        cornerRadius: 6,
+                        paddingHorizontal: 6,
+                        paddingVertical: 4
+                    )
+                )
                 .help("Zoom In (⌘+)")
             }
+            .padding(2)
             .background(theme.bgInput, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(theme.bgCardBorder, lineWidth: 1)
             )
 
-            Button {
+            StudioToolbarIconButton(
+                title: "Toggle Thumbnail Rail (⌃⌘T)",
+                systemImage: "sidebar.left",
+                isActive: store.showThumbnailStrip,
+                theme: theme
+            ) {
                 store.toggleThumbnailStrip()
-            } label: {
-                Image(systemName: "sidebar.left")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(store.showThumbnailStrip ? theme.accentPrimary : theme.textSecondary)
-                    .padding(6)
-                    .background(
-                        store.showThumbnailStrip ? theme.accentPrimary.opacity(0.16) : theme.bgInput,
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(store.showThumbnailStrip ? theme.accentPrimary.opacity(0.6) : theme.bgCardBorder, lineWidth: 1)
-                    )
             }
-            .buttonStyle(.plain)
-            .help("Toggle Thumbnail Rail (⌃⌘T)")
 
-            Button {
+            StudioToolbarIconButton(
+                title: "Toggle Fullscreen Comparator (⌃⌘F)",
+                systemImage: store.isFullscreenComparator ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                isActive: store.isFullscreenComparator,
+                theme: theme
+            ) {
                 store.toggleFullscreenComparator()
-            } label: {
-                Image(systemName: store.isFullscreenComparator ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(store.isFullscreenComparator ? theme.accentPrimary : theme.textSecondary)
-                    .padding(6)
-                    .background(
-                        store.isFullscreenComparator ? theme.accentPrimary.opacity(0.16) : theme.bgInput,
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(store.isFullscreenComparator ? theme.accentPrimary.opacity(0.6) : theme.bgCardBorder, lineWidth: 1)
-                    )
             }
-            .buttonStyle(.plain)
-            .help("Toggle Fullscreen Comparator (⌃⌘F)")
         }
     }
 
@@ -182,9 +186,14 @@ struct SplitComparatorCanvasView: View {
                 Image(systemName: "chevron.left")
                     .font(.caption.weight(.semibold))
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
+            .buttonStyle(
+                StudioInlineIconButtonStyle(
+                    theme: theme,
+                    cornerRadius: 10,
+                    paddingHorizontal: 7,
+                    paddingVertical: 4
+                )
+            )
             .disabled(store.activePageIndex <= 0)
 
             Text(total > 0 ? "Page \(store.activePageIndex + 1)/\(total)" : "0/0")
@@ -198,11 +207,17 @@ struct SplitComparatorCanvasView: View {
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
+            .buttonStyle(
+                StudioInlineIconButtonStyle(
+                    theme: theme,
+                    cornerRadius: 10,
+                    paddingHorizontal: 7,
+                    paddingVertical: 4
+                )
+            )
             .disabled(store.activePageIndex + 1 >= total)
         }
+        .padding(2)
         .background(theme.bgInput, in: Capsule())
         .overlay(
             Capsule().strokeBorder(theme.bgCardBorder, lineWidth: 1)
@@ -218,9 +233,7 @@ struct SplitComparatorCanvasView: View {
                 } label: {
                     Label(store.isPreviewing ? "Previewing…" : "Preview", systemImage: "sparkles")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(theme.accentPrimary)
-                .controlSize(.small)
+                .studioButtonStyle(.prominent, theme: theme, size: .small)
                 .disabled(store.isPreviewing || store.isColorizing)
 
                 Button {
@@ -233,8 +246,7 @@ struct SplitComparatorCanvasView: View {
                 } label: {
                     Label("Recolorize", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
                 .disabled(store.isColorizing)
 
                 Button {
@@ -242,8 +254,7 @@ struct SplitComparatorCanvasView: View {
                 } label: {
                     Label(store.isTranslating ? "Translating…" : "Translate", systemImage: "character.bubble")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
                 .disabled(store.isTranslating)
 
                 Button {
@@ -251,9 +262,7 @@ struct SplitComparatorCanvasView: View {
                 } label: {
                     Label("Learn", systemImage: "brain")
                 }
-                .buttonStyle(.bordered)
-                .tint(theme.accentSecondary)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small, tint: theme.accentSecondary)
                 .disabled(store.currentPage?.isColorized != true)
             }
         }
@@ -272,11 +281,23 @@ struct SplitComparatorCanvasView: View {
                             text: "Quality \(Int((q.overall * 100).rounded()))%",
                             systemImage: q.autoLearnEligible ? "checkmark.seal.fill" : "chart.bar.fill",
                             foreground: q.autoLearnEligible ? theme.accentGreen : theme.accentYellow,
-                            background: (q.autoLearnEligible ? theme.accentGreen : theme.accentYellow).opacity(0.14),
-                            border: (q.autoLearnEligible ? theme.accentGreen : theme.accentYellow).opacity(0.35)
+                            background: (q.autoLearnEligible ? theme.accentGreen : theme.accentYellow).opacity(isQualityBadgeHovered ? 0.24 : 0.14),
+                            border: (q.autoLearnEligible ? theme.accentGreen : theme.accentYellow).opacity(isQualityBadgeHovered ? 0.65 : 0.35)
+                        )
+                        .scaleEffect(
+                            isQualityBadgeHovered
+                                ? StudioMotion.effectiveScale(StudioMotion.buttonHoverScale + 0.015, reduceMotion: reduceMotion)
+                                : 1.0
                         )
                     }
                     .buttonStyle(.plain)
+                    .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isQualityBadgeHovered)
+                    .onHover { hovering in
+                        isQualityBadgeHovered = hovering
+                    }
+                    .onDisappear {
+                        isQualityBadgeHovered = false
+                    }
                     .popover(isPresented: $showQualityPopover, arrowEdge: .bottom) {
                         QualityBreakdownPopover(score: q, theme: theme)
                     }
@@ -366,9 +387,11 @@ struct SplitComparatorCanvasView: View {
                                 }
                             }
                             .padding(4)
-                            .background(
-                                isCurrent ? theme.accentPrimary.opacity(0.12) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .studioHoverRow(
+                                theme: theme,
+                                cornerRadius: 8,
+                                isSelected: isCurrent,
+                                scaleOnHover: true
                             )
                         }
                         .buttonStyle(.plain)
@@ -663,9 +686,7 @@ struct SplitComparatorCanvasView: View {
                             Label("Import Manga Files… (⌘O)", systemImage: "doc.badge.plus")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.accentPrimary)
-                        .controlSize(.large)
+                        .studioButtonStyle(.prominent, theme: theme, size: .large)
 
                         Button {
                             if let folder = StudioFilePanels.pickFolder() {
@@ -675,8 +696,7 @@ struct SplitComparatorCanvasView: View {
                             Label("Import Manga Folder… (⇧⌘O)", systemImage: "folder.badge.plus")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
+                        .studioButtonStyle(.secondary, theme: theme, size: .large)
                     }
 
                     Text("PDF · EPUB3 · CBZ · ZIP · PNG · JPG")
@@ -695,6 +715,7 @@ struct SplitComparatorCanvasView: View {
                             ScrollView {
                                 VStack(spacing: 6) {
                                     ForEach(store.sessions.prefix(5)) { summary in
+                                        let isRowHovered = hoveredWelcomeSessionId == summary.sessionId
                                         Button {
                                             Task { await store.selectSession(id: summary.sessionId) }
                                         } label: {
@@ -710,24 +731,53 @@ struct SplitComparatorCanvasView: View {
                                                 Text("\(summary.processedCount)/\(summary.totalPages)")
                                                     .font(.caption.weight(.semibold))
                                                     .monospacedDigit()
-                                                    .foregroundStyle(theme.textSecondary)
+                                                    .foregroundStyle(isRowHovered ? theme.accentPrimary : theme.textSecondary)
                                                 Image(systemName: "chevron.right")
-                                                    .font(.caption2)
-                                                    .foregroundStyle(theme.textMuted)
+                                                    .font(.caption2.weight(.semibold))
+                                                    .foregroundStyle(isRowHovered ? theme.accentPrimary : theme.textMuted)
+                                                    .offset(
+                                                        x: isRowHovered
+                                                            ? StudioMotion.effectiveOffset(StudioMotion.rowChevronHoverOffset, reduceMotion: reduceMotion)
+                                                            : 0
+                                                    )
                                             }
                                             .padding(.horizontal, 10)
                                             .padding(.vertical, 7)
-                                            .background(theme.bgInput, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            .background {
+                                                let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                ZStack {
+                                                    shape.fill(theme.bgInput)
+                                                    if isRowHovered {
+                                                        shape.fill(theme.hoverFillOverlay)
+                                                    }
+                                                }
+                                            }
                                             .overlay(
                                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                    .strokeBorder(theme.bgCardBorder, lineWidth: 1)
+                                                    .strokeBorder(
+                                                        isRowHovered ? theme.hoverBorderAccent : theme.bgCardBorder,
+                                                        lineWidth: isRowHovered ? 1.0 : 0.85
+                                                    )
                                             )
+                                            .scaleEffect(
+                                                isRowHovered
+                                                    ? StudioMotion.effectiveScale(StudioMotion.buttonHoverScale, reduceMotion: reduceMotion)
+                                                    : 1.0
+                                            )
+                                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                         }
                                         .buttonStyle(.plain)
+                                        .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isRowHovered)
+                                        .onHover { hovering in
+                                            hoveredWelcomeSessionId = hovering ? summary.sessionId : (hoveredWelcomeSessionId == summary.sessionId ? nil : hoveredWelcomeSessionId)
+                                        }
                                     }
                                 }
                             }
                             .frame(maxHeight: 168)
+                            .onDisappear {
+                                hoveredWelcomeSessionId = nil
+                            }
                         }
                     }
                 }
@@ -748,8 +798,7 @@ struct SplitComparatorCanvasView: View {
             } label: {
                 Label("Prev", systemImage: "chevron.left")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .studioButtonStyle(.secondary, theme: theme, size: .small)
             .disabled(store.activePageIndex <= 0)
 
             if total > 1 {
@@ -775,8 +824,7 @@ struct SplitComparatorCanvasView: View {
             } label: {
                 Label("Next", systemImage: "chevron.right")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .studioButtonStyle(.secondary, theme: theme, size: .small)
             .disabled(store.activePageIndex + 1 >= total)
 
             Spacer()

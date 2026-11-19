@@ -3,9 +3,12 @@ import SwiftUI
 
 struct PageGalleryGridView: View {
     @Bindable var store: StudioStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded: Bool = true
     @State private var galleryHeight: CGFloat = 196
     @State private var dragStartHeight: CGFloat?
+    @State private var isResizeHandleHovered: Bool = false
+    @State private var isTitleToggleHovered: Bool = false
 
     private let columns = [
         GridItem(.adaptive(minimum: 112, maximum: 148), spacing: 10)
@@ -95,15 +98,23 @@ struct PageGalleryGridView: View {
     }
 
     private func resizeHandleBar(theme: StudioTheme) -> some View {
-        ZStack {
+        let isActive = isResizeHandleHovered || dragStartHeight != nil
+        return ZStack {
             Capsule()
-                .fill(theme.textMuted.opacity(0.45))
-                .frame(width: 38, height: 4)
+                .fill(isActive ? theme.accentPrimary.opacity(0.85) : theme.textMuted.opacity(0.45))
+                .frame(width: isActive ? 56 : 38, height: isActive ? 4.5 : 4)
         }
         .frame(maxWidth: .infinity)
         .frame(height: 10)
-        .background(theme.bgHeader)
+        .background(isActive ? theme.hoverFillOverlay : theme.bgHeader)
         .contentShape(Rectangle())
+        .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isActive)
+        .onHover { hovering in
+            isResizeHandleHovered = hovering
+        }
+        .onDisappear {
+            isResizeHandleHovered = false
+        }
         .gesture(
             DragGesture(minimumDistance: 1)
                 .onChanged { value in
@@ -148,19 +159,35 @@ struct PageGalleryGridView: View {
     private func galleryTitleAndFilter(theme: StudioTheme) -> some View {
         HStack(spacing: 10) {
             Button {
-                withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
+                withAnimation(StudioMotion.selectionAnimation(reduceMotion: reduceMotion)) {
                     isExpanded.toggle()
                 }
             } label: {
-                Label(
-                    "Page Gallery (\(store.activeSession?.pages.count ?? 0))",
-                    systemImage: isExpanded ? "chevron.down" : "chevron.right"
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(isTitleToggleHovered ? theme.accentPrimary : theme.textSecondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Text("Page Gallery (\(store.activeSession?.pages.count ?? 0))")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(theme.textPrimary)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    isTitleToggleHovered ? theme.hoverFillOverlay : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
                 )
-                .font(.subheadline.weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(theme.textPrimary)
             }
             .buttonStyle(.plain)
+            .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isTitleToggleHovered)
+            .onHover { hovering in
+                isTitleToggleHovered = hovering
+            }
+            .onDisappear {
+                isTitleToggleHovered = false
+            }
 
             StudioSegmentedControl(
                 items: [
@@ -174,19 +201,15 @@ struct PageGalleryGridView: View {
             )
 
             if isExpanded {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
+                StudioToolbarIconButton(
+                    title: "Toggle Compact / Tall Gallery",
+                    systemImage: galleryHeight > 240 ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                    theme: theme
+                ) {
+                    withAnimation(StudioMotion.selectionAnimation(reduceMotion: reduceMotion)) {
                         galleryHeight = galleryHeight > 240 ? 180 : 280
                     }
-                } label: {
-                    Image(systemName: galleryHeight > 240 ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(.caption2)
-                        .foregroundStyle(theme.textSecondary)
-                        .padding(5)
-                        .background(theme.bgInput, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                .buttonStyle(.plain)
-                .help("Toggle Compact / Tall Gallery")
             }
         }
     }
@@ -194,18 +217,15 @@ struct PageGalleryGridView: View {
     private func galleryActionsCluster(theme: StudioTheme) -> some View {
         HStack(spacing: 6) {
             Button("Select All") { store.selectAllPages() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
                 .disabled(store.activeSession?.pages.isEmpty ?? true)
 
             Button("Uncolorized") { store.selectUncolorizedPages() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
                 .disabled(store.activeSession?.pages.isEmpty ?? true)
 
             Button("Clear") { store.deselectAllPages() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
                 .disabled(store.selectedPageIndices.isEmpty)
 
             Button {
@@ -214,9 +234,7 @@ struct PageGalleryGridView: View {
                 Label("Colorize (\(store.selectedPageIndices.count))", systemImage: "wand.and.stars")
                     .monospacedDigit()
             }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.accentPrimary)
-            .controlSize(.small)
+            .studioButtonStyle(.prominent, theme: theme, size: .small)
             .disabled(!store.canStartColorize)
 
             Button {
@@ -225,8 +243,7 @@ struct PageGalleryGridView: View {
                 Label("Translate (\(store.selectedPageIndices.count))", systemImage: "character.bubble")
                     .monospacedDigit()
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .studioButtonStyle(.secondary, theme: theme, size: .small)
             .disabled(store.selectedPageIndices.isEmpty || store.isTranslating || store.isColorizing)
         }
     }
@@ -257,6 +274,7 @@ private struct PageGalleryTile: View {
     let onLearn: () -> Void
     let onDelete: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
 
     var body: some View {
@@ -362,12 +380,15 @@ private struct PageGalleryTile: View {
             radius: isHovered || isCurrent ? 8 : 3,
             y: isHovered || isCurrent ? 3 : 1
         )
-        .scaleEffect(isHovered ? 1.025 : 1.0)
-        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: isHovered)
-        .animation(.spring(response: 0.24, dampingFraction: 0.80), value: isCurrent)
+        .scaleEffect(isHovered ? StudioMotion.effectiveScale(StudioMotion.tileHoverScale, reduceMotion: reduceMotion) : 1.0)
+        .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isHovered)
+        .animation(StudioMotion.selectionAnimation(reduceMotion: reduceMotion), value: isCurrent)
         .contentShape(shape)
         .onHover { hovering in
             isHovered = hovering
+        }
+        .onDisappear {
+            isHovered = false
         }
         .onTapGesture(perform: onInspect)
         .contextMenu {

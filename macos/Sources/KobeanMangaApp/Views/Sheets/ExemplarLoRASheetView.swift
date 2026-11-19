@@ -29,6 +29,7 @@ struct ExemplarLoRASheetView: View {
                 }
                 Spacer()
                 Button("Done") { dismiss() }
+                    .studioButtonStyle(.secondary, theme: theme, size: .small)
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
@@ -98,12 +99,22 @@ struct ExemplarLoRASheetView: View {
                         .font(.callout)
                         .monospacedDigit()
 
-                    Picker("Learning Rate", selection: $learningRate) {
-                        Text("1e-4").tag(1e-4)
-                        Text("2e-4").tag(2e-4)
-                        Text("5e-4").tag(5e-4)
+                    HStack(spacing: 6) {
+                        Text("Learning Rate")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(theme.textSecondary)
+                        StudioDropdownPicker(
+                            selection: $learningRate,
+                            options: [
+                                StudioDropdownOption(value: 1e-4, title: "1e-4"),
+                                StudioDropdownOption(value: 2e-4, title: "2e-4"),
+                                StudioDropdownOption(value: 5e-4, title: "5e-4"),
+                            ],
+                            theme: theme,
+                            size: .small
+                        )
+                        .frame(width: 96)
                     }
-                    .frame(width: 180)
                 }
 
                 HStack(spacing: 8) {
@@ -112,15 +123,14 @@ struct ExemplarLoRASheetView: View {
                     } label: {
                         Label("Train LoRA Adapter", systemImage: "play.fill")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(theme.accentPrimary)
+                    .studioButtonStyle(.prominent, theme: theme, size: .regular)
                     .disabled(store.seriesExemplars.isEmpty || (store.adapterStatus?.isTraining ?? false))
 
                     if store.adapterStatus?.isTraining == true {
                         Button("Cancel Training", role: .destructive) {
                             Task { await store.cancelAdapterTraining() }
                         }
-                        .buttonStyle(.bordered)
+                        .studioButtonStyle(.destructive, theme: theme, size: .regular)
                     }
 
                     Spacer()
@@ -128,7 +138,7 @@ struct ExemplarLoRASheetView: View {
                     Button("Reset Adapter", role: .destructive) {
                         Task { await store.deleteSeriesAdapter() }
                     }
-                    .buttonStyle(.bordered)
+                    .studioButtonStyle(.destructive, theme: theme, size: .regular)
                     .disabled(store.adapterStatus?.isReady != true)
                 }
             }
@@ -146,8 +156,7 @@ struct ExemplarLoRASheetView: View {
                     Button("Save Auto-Refine") {
                         Task { await store.updateAutoRefineSettings(refineSettingsDraft) }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .studioButtonStyle(.secondary, theme: theme, size: .small)
                 }
 
                 Toggle("Enable Automatic High-Confidence Harvesting", isOn: $refineSettingsDraft.autoRefineEnabled)
@@ -210,24 +219,32 @@ struct ExemplarLoRASheetView: View {
                                         Task { await store.togglePinExemplar(pageIndex: ex.pageIndex, pinned: !ex.pinned) }
                                     } label: {
                                         Image(systemName: ex.pinned ? "pin.fill" : "pin")
-                                            .foregroundStyle(ex.pinned ? theme.accentYellow : theme.textMuted)
+                                            .font(.caption)
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(
+                                        StudioInlineIconButtonStyle(
+                                            theme: theme,
+                                            tint: ex.pinned ? theme.accentYellow : theme.textMuted
+                                        )
+                                    )
 
                                     Button(role: .destructive) {
                                         Task { await store.deleteExemplar(pageIndex: ex.pageIndex) }
                                     } label: {
                                         Image(systemName: "trash")
-                                            .foregroundStyle(theme.textMuted)
+                                            .font(.caption)
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(StudioInlineIconButtonStyle(theme: theme, isDestructive: true))
                                 }
                             }
                             .padding(8)
                             .background(theme.bgCardSubtle, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(ex.pinned ? theme.accentYellow : theme.bgCardBorder, lineWidth: 1)
+                            .studioHoverRow(
+                                theme: theme,
+                                cornerRadius: 10,
+                                isSelected: ex.pinned,
+                                showIdleBorder: true,
+                                scaleOnHover: true
                             )
                         }
                     }

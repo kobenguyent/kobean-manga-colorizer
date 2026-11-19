@@ -276,6 +276,7 @@ struct StudioSegmentedControl<Value: Hashable>: View {
     var fullWidth: Bool = false
 
     @Namespace private var segmentNamespace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hoveredValue: Value?
 
     init(
@@ -296,7 +297,7 @@ struct StudioSegmentedControl<Value: Hashable>: View {
                 let isSelected = selection == item.value
                 let isHovered = !isSelected && hoveredValue == item.value
                 Button {
-                    withAnimation(.spring(response: 0.22, dampingFraction: 0.82)) {
+                    withAnimation(StudioMotion.selectionAnimation(reduceMotion: reduceMotion)) {
                         selection = item.value
                     }
                 } label: {
@@ -304,6 +305,11 @@ struct StudioSegmentedControl<Value: Hashable>: View {
                         if let icon = item.icon {
                             Image(systemName: icon)
                                 .font(.caption2.weight(.semibold))
+                                .scaleEffect(
+                                    isHovered
+                                        ? StudioMotion.effectiveScale(1.06, reduceMotion: reduceMotion)
+                                        : 1.0
+                                )
                         }
                         Text(item.title)
                             .font(.caption.weight(isSelected ? .semibold : .medium))
@@ -364,19 +370,27 @@ struct StudioSegmentedControl<Value: Hashable>: View {
                                 .matchedGeometryEffect(id: "activeSegmentPill", in: segmentNamespace)
                         } else if isHovered {
                             RoundedRectangle(cornerRadius: 6.5, style: .continuous)
-                                .fill(theme.textPrimary.opacity(0.06))
-                                .transition(.opacity)
+                                .fill(theme.hoverFillOverlay)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                                        .strokeBorder(theme.bgCardBorder.opacity(0.6), lineWidth: 0.65)
+                                )
+                                .matchedGeometryEffect(id: "hoveredSegmentPill", in: segmentNamespace)
                         }
                     }
                 }
                 .buttonStyle(.plain)
                 .contentShape(RoundedRectangle(cornerRadius: 6.5, style: .continuous))
+                .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isHovered)
                 .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.14)) {
+                    withAnimation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion)) {
                         hoveredValue = hovering ? item.value : (hoveredValue == item.value ? nil : hoveredValue)
                     }
                 }
             }
+        }
+        .onDisappear {
+            hoveredValue = nil
         }
         .padding(3)
         .background {
@@ -421,54 +435,119 @@ struct StudioToolbarIconButton: View {
     let theme: StudioTheme
     let action: () -> Void
 
-    @State private var isHovered: Bool = false
-
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 6.5, style: .continuous)
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 12, weight: .medium))
+        }
+        .buttonStyle(
+            StudioToolbarIconButtonStyle(
+                isActive: isActive,
+                theme: theme
+            )
+        )
+        .disabled(isDisabled)
+        .help(title)
+    }
+}
+
+private struct StudioToolbarIconButtonStyle: ButtonStyle {
+    let isActive: Bool
+    let theme: StudioTheme
+
+    func makeBody(configuration: Configuration) -> some View {
+        ToolbarIconBody(
+            configuration: configuration,
+            isActive: isActive,
+            theme: theme
+        )
+    }
+
+    private struct ToolbarIconBody: View {
+        let configuration: Configuration
+        let isActive: Bool
+        let theme: StudioTheme
+
+        @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @State private var isHovered: Bool = false
+
+        private var effectiveHover: Bool { isHovered && isEnabled }
+        private var effectivePress: Bool { configuration.isPressed && isEnabled }
+
+        private var scale: CGFloat {
+            if effectivePress {
+                return StudioMotion.effectiveScale(StudioMotion.iconPressScale, reduceMotion: reduceMotion)
+            }
+            if effectiveHover {
+                return StudioMotion.effectiveScale(StudioMotion.iconHoverScale, reduceMotion: reduceMotion)
+            }
+            return 1.0
+        }
+
+        var body: some View {
+            let shape = RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+            configuration.label
                 .foregroundStyle(
-                    isDisabled
+                    !isEnabled
                         ? theme.textMuted.opacity(0.45)
-                        : (isActive ? theme.accentPrimary : (isHovered ? theme.textPrimary : theme.textSecondary))
+                        : (isActive ? theme.accentPrimary : (effectiveHover ? theme.textPrimary : theme.textSecondary))
                 )
                 .frame(width: 26, height: 24)
                 .background {
                     if isActive {
-                        shape.fill(
-                            LinearGradient(
-                                colors: [
-                                    theme.accentPrimary.opacity(0.24),
-                                    theme.accentPrimary.opacity(0.12),
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
+                        ZStack {
+                            shape.fill(
+                                LinearGradient(
+                                    colors: [
+                                        theme.accentPrimary.opacity(effectiveHover ? 0.30 : 0.24),
+                                        theme.accentPrimary.opacity(effectiveHover ? 0.16 : 0.12),
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                             )
-                        )
-                    } else if isHovered && !isDisabled {
-                        shape.fill(theme.bgInput)
+                            if effectivePress {
+                                shape.fill(theme.pressFillOverlay)
+                            }
+                        }
+                    } else if effectivePress {
+                        shape.fill(theme.pressFillOverlay)
+                    } else if effectiveHover {
+                        ZStack {
+                            shape.fill(theme.bgInput)
+                            shape.fill(theme.hoverFillOverlay)
+                        }
                     }
                 }
                 .overlay(
                     shape.strokeBorder(
                         isActive
-                            ? theme.accentPrimary.opacity(0.48)
-                            : (isHovered && !isDisabled ? theme.bgCardBorder : Color.clear),
-                        lineWidth: 0.8
+                            ? theme.accentPrimary.opacity(effectiveHover ? 0.68 : 0.48)
+                            : (effectiveHover ? theme.hoverBorderAccent.opacity(0.65) : Color.clear),
+                        lineWidth: 0.85
                     )
                 )
-                .scaleEffect(isHovered && !isDisabled ? 1.04 : 1.0)
+                .shadow(
+                    color: effectiveHover ? theme.hoverGlowColor.opacity(isActive ? 0.45 : 0.25) : .clear,
+                    radius: effectiveHover ? 4 : 0,
+                    y: 1
+                )
+                .scaleEffect(scale)
                 .contentShape(shape)
+                .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: effectiveHover)
+                .animation(StudioMotion.pressAnimation(reduceMotion: reduceMotion), value: effectivePress)
+                .animation(StudioMotion.selectionAnimation(reduceMotion: reduceMotion), value: isActive)
+                .onHover { hovering in
+                    isHovered = hovering
+                }
+                .onChange(of: isEnabled) { _, enabled in
+                    if !enabled { isHovered = false }
+                }
+                .onDisappear {
+                    isHovered = false
+                }
         }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: isHovered)
-        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: isActive)
-        .onHover { hovering in
-            isHovered = hovering
-        }
-        .help(title)
     }
 }
 
@@ -497,7 +576,10 @@ struct StudioToggleRow: View {
                 .controlSize(.small)
                 .tint(theme.accentPrimary)
         }
-        .contentShape(Rectangle())
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .studioHoverRow(theme: theme, cornerRadius: 7)
+        .padding(.horizontal, -6)
     }
 }
 

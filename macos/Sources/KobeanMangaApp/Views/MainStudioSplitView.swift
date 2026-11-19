@@ -173,24 +173,23 @@ struct MainStudioSplitView: View {
                             }
                         }
                     } label: {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(theme.accentPrimary)
-                                .frame(width: 7, height: 7)
-                            Text(theme.displayName)
-                                .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(theme.textSecondary)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 8.5, weight: .semibold))
-                                .foregroundStyle(theme.textMuted)
+                        StudioHoverMenuTrigger(theme: theme, cornerRadius: 6) { isHovered in
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(theme.accentPrimary)
+                                    .frame(width: 7, height: 7)
+                                    .scaleEffect(isHovered ? 1.18 : 1.0)
+                                Text(theme.displayName)
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(isHovered ? theme.textPrimary : theme.textSecondary)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8.5, weight: .semibold))
+                                    .foregroundStyle(isHovered ? theme.accentPrimary : theme.textMuted)
+                                    .offset(y: isHovered ? 1 : 0)
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 24)
                         }
-                        .padding(.horizontal, 8)
-                        .frame(height: 24)
-                        .background(theme.bgInput, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(theme.bgCardBorder, lineWidth: 0.75)
-                        )
                     }
                     .menuStyle(.button)
                     .buttonStyle(.plain)
@@ -319,20 +318,17 @@ struct MainStudioSplitView: View {
                 Button("Cancel") {
                     Task { await store.cancelColorization() }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.destructive, theme: theme, size: .small)
             } else if store.isTrainingAdapter {
                 Button("Cancel") {
                     Task { await store.cancelAdapterTraining() }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.destructive, theme: theme, size: .small)
             } else if store.isExporting && store.combinedExportJob != nil {
                 Button("Cancel") {
                     Task { await store.cancelCombinedOmnibusExport() }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.destructive, theme: theme, size: .small)
             }
         }
         .padding(.horizontal, 14)
@@ -357,15 +353,13 @@ struct MainStudioSplitView: View {
             Spacer()
             if isError, let onRetry, !store.backendState.isRunning {
                 Button("Restart Engine", action: onRetry)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .studioButtonStyle(.secondary, theme: theme, size: .small)
             }
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.caption)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(theme.textMuted)
+            .buttonStyle(StudioInlineIconButtonStyle(theme: theme, tint: theme.textMuted))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)

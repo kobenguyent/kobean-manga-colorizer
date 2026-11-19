@@ -3,6 +3,9 @@ import SwiftUI
 
 struct DocumentQueueSidebar: View {
     @Bindable var store: StudioStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isSearchHovered: Bool = false
+    @FocusState private var isSearchFocused: Bool
 
     private var totalQueuedPages: Int {
         store.sessions.reduce(0) { $0 + $1.totalPages }
@@ -46,29 +49,57 @@ struct DocumentQueueSidebar: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .font(.caption)
-                    .foregroundStyle(theme.textMuted)
+                    .foregroundStyle(isSearchFocused || isSearchHovered ? theme.accentPrimary : theme.textMuted)
                 TextField("Filter volumes...", text: $store.sessionSearchQuery)
                     .textFieldStyle(.plain)
                     .font(.callout)
                     .foregroundStyle(theme.textPrimary)
+                    .focused($isSearchFocused)
                 if !store.sessionSearchQuery.isEmpty {
                     Button {
                         store.sessionSearchQuery = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.caption)
-                            .foregroundStyle(theme.textMuted)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(
+                        StudioInlineIconButtonStyle(
+                            theme: theme,
+                            tint: theme.textMuted,
+                            paddingHorizontal: 2,
+                            paddingVertical: 2
+                        )
+                    )
                 }
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
-            .background(theme.bgInput, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background {
+                let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+                ZStack {
+                    shape.fill(theme.bgInput)
+                    if isSearchHovered && !isSearchFocused {
+                        shape.fill(theme.hoverFillOverlay)
+                    }
+                }
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(theme.bgCardBorder, lineWidth: 0.75)
+                    .strokeBorder(
+                        isSearchFocused
+                            ? theme.accentPrimary.opacity(0.8)
+                            : (isSearchHovered ? theme.hoverBorderAccent.opacity(0.7) : theme.bgCardBorder),
+                        lineWidth: isSearchFocused ? 1.15 : 0.8
+                    )
             )
+            .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isSearchHovered)
+            .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isSearchFocused)
+            .onHover { hovering in
+                isSearchHovered = hovering
+            }
+            .onDisappear {
+                isSearchHovered = false
+            }
 
             HStack(spacing: 6) {
                 Button {
@@ -80,9 +111,7 @@ struct DocumentQueueSidebar: View {
                     Label("Files", systemImage: "plus")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(theme.accentPrimary)
-                .controlSize(.small)
+                .studioButtonStyle(.prominent, theme: theme, size: .small)
 
                 Button {
                     if let folder = StudioFilePanels.pickFolder() {
@@ -92,8 +121,7 @@ struct DocumentQueueSidebar: View {
                     Label("Folder", systemImage: "folder.badge.plus")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
             }
         }
         .padding(12)
@@ -180,8 +208,7 @@ struct DocumentQueueSidebar: View {
                     store.selectAllSessions()
                 }
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .studioButtonStyle(.secondary, theme: theme, size: .small)
             .disabled(store.sessions.isEmpty)
 
             Button {
@@ -189,9 +216,7 @@ struct DocumentQueueSidebar: View {
             } label: {
                 Label("Batch", systemImage: "play.fill")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.accentSecondary)
-            .controlSize(.small)
+            .studioButtonStyle(.prominent, theme: theme, size: .small, tint: theme.accentSecondary)
             .disabled(store.sessions.isEmpty || store.isColorizing)
 
             Button(role: .destructive) {
@@ -205,8 +230,7 @@ struct DocumentQueueSidebar: View {
             } label: {
                 Image(systemName: "trash")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .studioButtonStyle(.destructive, theme: theme, size: .small)
             .disabled(store.sessions.isEmpty)
             .help(store.selectedSessionIds.isEmpty ? "Clear All Queued Sessions" : "Delete Checked Sessions")
         }
@@ -225,6 +249,7 @@ private struct SessionRowCard: View {
     let onToggleCheck: () -> Void
     let onDelete: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
 
     var body: some View {
@@ -233,10 +258,15 @@ private struct SessionRowCard: View {
             Button(action: onToggleCheck) {
                 Image(systemName: isChecked ? "checkmark.square.fill" : "square")
                     .font(.body)
-                    .foregroundStyle(isChecked ? theme.accentPrimary : theme.textMuted)
             }
-            .buttonStyle(.plain)
-            .padding(.top, 2)
+            .buttonStyle(
+                StudioInlineIconButtonStyle(
+                    theme: theme,
+                    tint: isChecked ? theme.accentPrimary : theme.textMuted,
+                    paddingHorizontal: 2,
+                    paddingVertical: 2
+                )
+            )
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -326,12 +356,15 @@ private struct SessionRowCard: View {
             radius: isHovered || isActive ? 7 : 3,
             y: isHovered || isActive ? 2 : 1
         )
-        .scaleEffect(isHovered ? 1.01 : 1.0)
-        .animation(.spring(response: 0.22, dampingFraction: 0.80), value: isHovered)
-        .animation(.spring(response: 0.24, dampingFraction: 0.82), value: isActive)
+        .scaleEffect(isHovered ? StudioMotion.effectiveScale(1.01, reduceMotion: reduceMotion) : 1.0)
+        .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isHovered)
+        .animation(StudioMotion.selectionAnimation(reduceMotion: reduceMotion), value: isActive)
         .contentShape(shape)
         .onHover { hovering in
             isHovered = hovering
+        }
+        .onDisappear {
+            isHovered = false
         }
         .onTapGesture(perform: onSelect)
         .contextMenu {

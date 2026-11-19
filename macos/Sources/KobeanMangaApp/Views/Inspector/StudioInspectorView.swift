@@ -108,8 +108,7 @@ private struct EngineActionDock: View {
                 )
                 .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
+            .studioButtonStyle(.secondary, theme: theme, size: .regular)
             .disabled(!hasSession || store.isPreviewing || store.isColorizing)
 
             Button {
@@ -124,9 +123,7 @@ private struct EngineActionDock: View {
                     .monospacedDigit()
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.accentPrimary)
-            .controlSize(.regular)
+            .studioButtonStyle(.prominent, theme: theme, size: .regular)
             .disabled(!hasSession || !hasPages || store.isColorizing)
 
             HStack(spacing: 8) {
@@ -136,8 +133,7 @@ private struct EngineActionDock: View {
                     Label("Resume", systemImage: "play.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
                 .disabled(!hasSession || store.isColorizing)
 
                 Button {
@@ -146,9 +142,7 @@ private struct EngineActionDock: View {
                     Label("Batch Queue", systemImage: "square.stack.3d.up")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .tint(theme.accentSecondary)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small, tint: theme.accentSecondary)
                 .disabled(store.sessions.isEmpty || store.isColorizing)
             }
         }
@@ -162,6 +156,7 @@ private struct EngineActionDock: View {
 private struct EngineTuningTab: View {
     @Bindable var store: StudioStore
     let theme: StudioTheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var apiKeyDraft: String = ""
     @State private var hoveredProvider: AIProvider?
     @Namespace private var providerSelectionNamespace
@@ -243,33 +238,56 @@ private struct EngineTuningTab: View {
                                         .shadow(color: theme.accentPrimary.opacity(0.22), radius: 6, y: 1)
                                         .matchedGeometryEffect(id: "activeProviderGlass", in: providerSelectionNamespace)
                                     } else {
+                                        if isHovered {
+                                            shape.fill(theme.hoverFillOverlay)
+                                            shape.fill(
+                                                LinearGradient(
+                                                    colors: [theme.hoverTopSheen, Color.clear],
+                                                    startPoint: .top,
+                                                    endPoint: .center
+                                                )
+                                            )
+                                        }
                                         shape.strokeBorder(
-                                            isHovered ? theme.accentPrimary.opacity(0.42) : theme.bgCardBorder,
-                                            lineWidth: 0.85
+                                            isHovered ? theme.hoverBorderAccent : theme.bgCardBorder,
+                                            lineWidth: isHovered ? 1.0 : 0.85
                                         )
                                     }
                                 }
                             }
-                            .scaleEffect(isHovered && !selected ? 1.015 : 1.0)
+                            .shadow(
+                                color: !selected && isHovered ? theme.hoverGlowColor.opacity(0.35) : .clear,
+                                radius: !selected && isHovered ? 6 : 0,
+                                y: 1
+                            )
+                            .scaleEffect(
+                                isHovered && !selected
+                                    ? StudioMotion.effectiveScale(StudioMotion.cardHoverScale, reduceMotion: reduceMotion)
+                                    : 1.0
+                            )
                             .contentShape(shape)
                         }
                         .buttonStyle(.plain)
-                        .animation(.spring(response: 0.22, dampingFraction: 0.78), value: isHovered)
+                        .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isHovered)
                         .onHover { hovering in
                             hoveredProvider = hovering ? provider : (hoveredProvider == provider ? nil : hoveredProvider)
                         }
                     }
                 }
+                .onDisappear {
+                    hoveredProvider = nil
+                }
 
                 VStack(alignment: .leading, spacing: 5) {
                     StudioFieldLabel(title: "Model Variant", theme: theme)
-                    Picker("Model Variant", selection: $store.colorizeConfig.modelName) {
-                        ForEach(store.colorizeConfig.modelProvider.variants) { variant in
-                            Text(variant.label).tag(variant.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    StudioDropdownPicker(
+                        selection: $store.colorizeConfig.modelName,
+                        options: store.colorizeConfig.modelProvider.variants.map {
+                            StudioDropdownOption(value: $0.id, title: $0.label)
+                        },
+                        theme: theme,
+                        size: .regular
+                    )
                     .onChange(of: store.colorizeConfig.modelName) { _, _ in
                         store.persistColorizePreferences()
                     }
@@ -294,9 +312,7 @@ private struct EngineTuningTab: View {
                             Button("Save") {
                                 store.saveGeminiAPIKey(apiKeyDraft)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(theme.accentPrimary)
-                            .controlSize(.small)
+                            .studioButtonStyle(.prominent, theme: theme, size: .small)
                         }
                     }
                     .padding(.top, 4)
@@ -315,13 +331,14 @@ private struct EngineTuningTab: View {
                     Text("Color Aesthetic")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(theme.textSecondary)
-                    Picker("Color Aesthetic", selection: $store.colorizeConfig.style) {
-                        ForEach(ColorAestheticStyle.allCases) { style in
-                            Label(style.displayName, systemImage: style.sfSymbol).tag(style)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    StudioDropdownPicker(
+                        selection: $store.colorizeConfig.style,
+                        options: ColorAestheticStyle.allCases.map {
+                            StudioDropdownOption(value: $0, title: $0.displayName, systemImage: $0.sfSymbol)
+                        },
+                        theme: theme,
+                        size: .regular
+                    )
                     .onChange(of: store.colorizeConfig.style) { _, _ in
                         store.persistColorizePreferences()
                     }
@@ -410,13 +427,14 @@ private struct EngineTuningTab: View {
                 if store.colorizeConfig.translatePage {
                     VStack(alignment: .leading, spacing: 5) {
                         StudioFieldLabel(title: "Translation Engine", theme: theme)
-                        Picker("Engine", selection: $store.colorizeConfig.translationEngine) {
-                            ForEach(TranslationEngine.allCases) { eng in
-                                Text(eng.displayName).tag(eng)
-                            }
-                        }
-                        .labelsHidden()
-                        .controlSize(.small)
+                        StudioDropdownPicker(
+                            selection: $store.colorizeConfig.translationEngine,
+                            options: TranslationEngine.allCases.map {
+                                StudioDropdownOption(value: $0, title: $0.displayName)
+                            },
+                            theme: theme,
+                            size: .small
+                        )
                         .onChange(of: store.colorizeConfig.translationEngine) { _, _ in
                             store.persistColorizePreferences()
                         }
@@ -424,13 +442,14 @@ private struct EngineTuningTab: View {
 
                     VStack(alignment: .leading, spacing: 5) {
                         StudioFieldLabel(title: "Target Language", theme: theme)
-                        Picker("Target Language", selection: $store.colorizeConfig.targetLanguage) {
-                            ForEach(TargetLanguage.allCases) { lang in
-                                Text(lang.displayName).tag(lang)
-                            }
-                        }
-                        .labelsHidden()
-                        .controlSize(.small)
+                        StudioDropdownPicker(
+                            selection: $store.colorizeConfig.targetLanguage,
+                            options: TargetLanguage.allCases.map {
+                                StudioDropdownOption(value: $0, title: $0.displayName)
+                            },
+                            theme: theme,
+                            size: .small
+                        )
                         .onChange(of: store.colorizeConfig.targetLanguage) { _, _ in
                             store.persistColorizePreferences()
                         }
@@ -464,6 +483,10 @@ private struct EngineTuningTab: View {
                     store.persistColorizePreferences()
                 }
         }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .studioHoverRow(theme: theme, cornerRadius: 7)
+        .padding(.horizontal, -6)
     }
 }
 
@@ -483,21 +506,20 @@ private struct PaletteSeriesTab: View {
                 StudioFieldLabel(title: "Manga Preset & Web Lookup", theme: theme)
 
                 HStack(spacing: 6) {
-                    Picker("Preset", selection: $selectedPresetId) {
-                        Text("Custom / None").tag("")
-                        ForEach(store.presets) { preset in
-                            Text(preset.title).tag(preset.id)
-                        }
-                    }
-                    .labelsHidden()
+                    StudioDropdownPicker(
+                        selection: $selectedPresetId,
+                        options: [StudioDropdownOption(value: "", title: "Custom / None")] + store.presets.map {
+                            StudioDropdownOption(value: $0.id, title: $0.title)
+                        },
+                        theme: theme,
+                        size: .small
+                    )
 
                     Button("Apply") {
                         guard !selectedPresetId.isEmpty else { return }
                         Task { await store.applyPreset(presetId: selectedPresetId) }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(theme.accentPrimary)
-                    .controlSize(.small)
+                    .studioButtonStyle(.prominent, theme: theme, size: .small)
                     .disabled(store.activeSession == nil || selectedPresetId.isEmpty)
                 }
 
@@ -507,8 +529,7 @@ private struct PaletteSeriesTab: View {
                     Button("Search") {
                         Task { await store.searchOnlinePreset(query: onlineQuery) }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .studioButtonStyle(.secondary, theme: theme, size: .small)
                     .disabled(onlineQuery.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
@@ -529,8 +550,7 @@ private struct PaletteSeriesTab: View {
                     } label: {
                         Label(store.isRecognizingCharacters ? "Scanning…" : "Scan (YOLO+CLIP)", systemImage: "viewfinder")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .studioButtonStyle(.secondary, theme: theme, size: .small)
                     .disabled(store.activeSession == nil || store.isRecognizingCharacters)
                 }
 
@@ -538,13 +558,14 @@ private struct PaletteSeriesTab: View {
                     Text("Recognition Mode")
                         .font(.caption2)
                         .foregroundStyle(theme.textMuted)
-                    Picker("Recognition Mode", selection: $store.colorizeConfig.recognitionMode) {
-                        ForEach(RecognitionMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .controlSize(.small)
+                    StudioDropdownPicker(
+                        selection: $store.colorizeConfig.recognitionMode,
+                        options: RecognitionMode.allCases.map {
+                            StudioDropdownOption(value: $0, title: $0.displayName)
+                        },
+                        theme: theme,
+                        size: .small
+                    )
                 }
             }
         }
@@ -602,9 +623,7 @@ private struct PaletteSeriesTab: View {
                         } label: {
                             Label("Add", systemImage: "plus")
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.accentSecondary)
-                        .controlSize(.small)
+                        .studioButtonStyle(.prominent, theme: theme, size: .small, tint: theme.accentSecondary)
                         .disabled(store.activeSession == nil || newChar.name.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
                 }
@@ -640,7 +659,7 @@ private struct PaletteSeriesTab: View {
                     Label("Open Exemplar & LoRA Studio…", systemImage: "slider.horizontal.3")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .studioButtonStyle(.secondary, theme: theme, size: .regular)
                 .disabled(store.activeSession == nil)
             }
         }
@@ -673,13 +692,12 @@ private struct CharacterPaletteCard: View {
                     .foregroundStyle(theme.textPrimary)
                 Spacer()
                 Button("Save") { onSave(draft) }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    .studioButtonStyle(.secondary, theme: theme, size: .mini)
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "trash")
+                        .font(.caption)
                 }
-                .buttonStyle(.borderless)
-                .controlSize(.mini)
+                .buttonStyle(StudioInlineIconButtonStyle(theme: theme, isDestructive: true))
             }
 
             if !draft.notes.isEmpty {
@@ -711,38 +729,71 @@ private struct CharacterColorSwatchButton: View {
     @Binding var hex: String
     let theme: StudioTheme
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showPickerPopover: Bool = false
+    @State private var isHovered: Bool = false
 
     private var resolvedColor: Color {
         Color(studioHex: hex.isEmpty ? "#808080" : hex)
     }
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
         Button {
             showPickerPopover.toggle()
         } label: {
             VStack(spacing: 3) {
                 Text(label)
                     .font(.caption2)
-                    .foregroundStyle(theme.textMuted)
+                    .foregroundStyle(isHovered ? theme.textPrimary : theme.textMuted)
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(resolvedColor)
                     .frame(width: 28, height: 22)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(theme.bgCardBorder, lineWidth: 1)
+                            .strokeBorder(
+                                isHovered || showPickerPopover ? theme.accentPrimary : theme.bgCardBorder,
+                                lineWidth: isHovered || showPickerPopover ? 1.4 : 1
+                            )
+                    )
+                    .shadow(
+                        color: isHovered ? resolvedColor.opacity(0.45) : .clear,
+                        radius: isHovered ? 5 : 0,
+                        y: 1
+                    )
+                    .scaleEffect(
+                        isHovered
+                            ? StudioMotion.effectiveScale(StudioMotion.swatchHoverScale, reduceMotion: reduceMotion)
+                            : 1.0
                     )
                 Text(hex.isEmpty ? "—" : hex.uppercased())
                     .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(theme.textSecondary)
+                    .foregroundStyle(isHovered ? theme.textPrimary : theme.textSecondary)
                     .lineLimit(1)
                     .frame(width: 48)
             }
             .padding(.vertical, 3)
             .padding(.horizontal, 2)
-            .background(theme.bgInput.opacity(0.45), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .background(
+                (isHovered ? theme.bgInput : theme.bgInput.opacity(0.45)),
+                in: shape
+            )
+            .overlay(
+                shape.strokeBorder(
+                    isHovered ? theme.hoverBorderAccent.opacity(0.65) : Color.clear,
+                    lineWidth: 0.75
+                )
+            )
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
+        .animation(StudioMotion.hoverAnimation(reduceMotion: reduceMotion), value: isHovered)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .onDisappear {
+            isHovered = false
+        }
         .popover(isPresented: $showPickerPopover, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("\(label) Color")
@@ -788,8 +839,7 @@ private struct ExportOmnibusTab: View {
                                 .font(.caption.weight(.medium))
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .studioButtonStyle(.secondary, theme: theme, size: .small)
                         .disabled(store.activeSession == nil || store.isExporting)
                     }
                 }
@@ -802,7 +852,7 @@ private struct ExportOmnibusTab: View {
                     Label("Batch Export Queue ZIP", systemImage: "archivebox.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .studioButtonStyle(.secondary, theme: theme, size: .regular)
                 .disabled(store.sessions.isEmpty || store.isExporting)
             }
         }
@@ -835,12 +885,14 @@ private struct ExportOmnibusTab: View {
                     Text("Split Mode")
                         .font(.caption2)
                         .foregroundStyle(theme.textMuted)
-                    Picker("Split Mode", selection: $store.omnibusConfig.chunkBy) {
-                        ForEach(OmnibusChunkMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
+                    StudioDropdownPicker(
+                        selection: $store.omnibusConfig.chunkBy,
+                        options: OmnibusChunkMode.allCases.map {
+                            StudioDropdownOption(value: $0, title: $0.displayName)
+                        },
+                        theme: theme,
+                        size: .regular
+                    )
                 }
 
                 if store.omnibusConfig.chunkBy != .none {
@@ -863,12 +915,14 @@ private struct ExportOmnibusTab: View {
                     Text("Device Preset")
                         .font(.caption2)
                         .foregroundStyle(theme.textMuted)
-                    Picker("Device Preset", selection: $store.omnibusConfig.devicePreset) {
-                        ForEach(EReaderDevicePreset.allCases) { preset in
-                            Text(preset.displayName).tag(preset)
-                        }
-                    }
-                    .labelsHidden()
+                    StudioDropdownPicker(
+                        selection: $store.omnibusConfig.devicePreset,
+                        options: EReaderDevicePreset.allCases.map {
+                            StudioDropdownOption(value: $0, title: $0.displayName)
+                        },
+                        theme: theme,
+                        size: .regular
+                    )
                     .onChange(of: store.omnibusConfig.devicePreset) { _, newPreset in
                         store.omnibusConfig.maxDimension = newPreset.maxDimension
                         store.omnibusConfig.jpegQuality = newPreset.jpegQuality
@@ -941,8 +995,7 @@ private struct ExportOmnibusTab: View {
                         Button("Cancel Export", role: .destructive) {
                             Task { await store.cancelCombinedOmnibusExport() }
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .studioButtonStyle(.destructive, theme: theme, size: .small)
                     }
                 }
 
@@ -952,8 +1005,7 @@ private struct ExportOmnibusTab: View {
                     Label("Build Omnibus", systemImage: "book.closed.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(theme.accentPrimary)
+                .studioButtonStyle(.prominent, theme: theme, size: .regular)
                 .disabled(store.sessions.isEmpty || store.isExporting)
 
                 if let downloaded = store.lastDownloadedFileURL {
@@ -964,9 +1016,7 @@ private struct ExportOmnibusTab: View {
                             Label("Reveal in Finder", systemImage: "folder.fill")
                                 .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.accentGreen)
-                        .controlSize(.small)
+                        .studioButtonStyle(.prominent, theme: theme, size: .small, tint: theme.accentGreen)
 
                         Button {
                             if let saveURL = StudioFilePanels.pickSaveDestination(suggestedFilename: downloaded.lastPathComponent) {
@@ -976,8 +1026,7 @@ private struct ExportOmnibusTab: View {
                         } label: {
                             Label("Save As…", systemImage: "square.and.arrow.down")
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .studioButtonStyle(.secondary, theme: theme, size: .small)
                     }
                 }
             }

@@ -66,23 +66,19 @@ struct MenuBarStudioPopover: View {
                     Button("Pause / Cancel") {
                         Task { await store.cancelColorization() }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .studioButtonStyle(.destructive, theme: theme, size: .small)
                 } else {
                     Button("Resume") {
                         Task { await store.startOrResumeColorization() }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(theme.accentPrimary)
-                    .controlSize(.small)
+                    .studioButtonStyle(.prominent, theme: theme, size: .small)
                     .disabled(store.activeSession == nil)
                 }
 
                 Button("Output Folder") {
                     store.revealOutputDirectory()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
             }
 
             Divider()
@@ -92,8 +88,7 @@ struct MenuBarStudioPopover: View {
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "studio-main")
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(theme.accentPrimary)
+                .studioButtonStyle(.prominent, theme: theme, size: .regular)
 
                 Spacer()
 
@@ -101,7 +96,7 @@ struct MenuBarStudioPopover: View {
                     store.shutdownSynchronously()
                     NSApplication.shared.terminate(nil)
                 }
-                .buttonStyle(.bordered)
+                .studioButtonStyle(.secondary, theme: theme, size: .regular)
             }
         }
         .padding(14)

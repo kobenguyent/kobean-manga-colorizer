@@ -51,8 +51,9 @@ struct HistorySheetView: View {
                 Button("Refresh") {
                     Task { await store.refreshSessions() }
                 }
-                .buttonStyle(.bordered)
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
                 Button("Done") { dismiss() }
+                    .studioButtonStyle(.secondary, theme: theme, size: .small)
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
@@ -78,7 +79,7 @@ struct HistorySheetView: View {
                     Button("Delete Selected (\(store.selectedSessionIds.count))", role: .destructive) {
                         Task { await store.bulkDeleteSelectedSessions() }
                     }
-                    .buttonStyle(.bordered)
+                    .studioButtonStyle(.destructive, theme: theme, size: .small)
                 }
             }
             .padding(12)
@@ -105,9 +106,15 @@ struct HistorySheetView: View {
                             store.toggleSessionSelection(item.sessionId)
                         } label: {
                             Image(systemName: store.selectedSessionIds.contains(item.sessionId) ? "checkmark.square.fill" : "square")
-                                .foregroundStyle(theme.accentPrimary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(
+                            StudioInlineIconButtonStyle(
+                                theme: theme,
+                                tint: theme.accentPrimary,
+                                paddingHorizontal: 3,
+                                paddingVertical: 3
+                            )
+                        )
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.filename)
@@ -132,9 +139,7 @@ struct HistorySheetView: View {
                                 dismiss()
                             }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.accentPrimary)
-                        .controlSize(.small)
+                        .studioButtonStyle(.prominent, theme: theme, size: .small)
 
                         Button("Export") {
                             Task {
@@ -142,16 +147,14 @@ struct HistorySheetView: View {
                                 await store.exportCurrentSession(format: .auto)
                             }
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .studioButtonStyle(.secondary, theme: theme, size: .small)
 
                         Button(role: .destructive) {
                             Task { await store.deleteSession(id: item.sessionId) }
                         } label: {
                             Image(systemName: "trash")
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .studioButtonStyle(.destructive, theme: theme, size: .small)
                     }
                     .padding(.vertical, 4)
                 }
