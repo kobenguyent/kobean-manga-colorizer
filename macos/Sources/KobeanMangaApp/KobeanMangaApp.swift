@@ -24,6 +24,12 @@ struct KobeanMangaApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1360, height: 860)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await store.checkForUpdates(userInitiated: true) }
+                }
+            }
+
             CommandMenu("Studio") {
                 Button("Import Files…") {
                     let urls = StudioFilePanels.pickFiles()

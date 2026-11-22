@@ -235,8 +235,17 @@ public actor BackendSupervisor {
 
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
-        if let dataDirectory {
-            env["KOBEAN_DATA_DIR"] = dataDirectory.standardizedFileURL.path
+        let effectiveDataDirectory = dataDirectory ?? Self.defaultDataDirectoryIfBundled(workspaceURL: workspaceURL)
+        if let effectiveDataDirectory {
+            try? FileManager.default.createDirectory(at: effectiveDataDirectory, withIntermediateDirectories: true)
+            env["KOBEAN_DATA_DIR"] = effectiveDataDirectory.standardizedFileURL.path
+            // Keep uv's virtual environment outside the signed .app bundle so codesigning stays valid
+            // and downloaded dependencies persist cleanly across auto-updates.
+            if Self.isInsideAppBundle(workspaceURL) {
+                env["UV_PROJECT_ENVIRONMENT"] = effectiveDataDirectory
+                    .appendingPathComponent(".venv", isDirectory: true)
+                    .standardizedFileURL.path
+            }
         }
         proc.environment = env
 
@@ -405,12 +414,35 @@ public actor BackendSupervisor {
         return nil
     }
 
+    public static func defaultApplicationSupportDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base.appendingPathComponent(AppMetadata.appBundleName, isDirectory: true)
+    }
+
+    public static func isInsideAppBundle(_ url: URL) -> Bool {
+        let bundlePath = Bundle.main.bundleURL.standardizedFileURL.path
+        guard Bundle.main.bundleURL.pathExtension.lowercased() == "app" else { return false }
+        return url.standardizedFileURL.path.hasPrefix(bundlePath)
+    }
+
+    public static func defaultDataDirectoryIfBundled(workspaceURL: URL) -> URL? {
+        guard isInsideAppBundle(workspaceURL) else { return nil }
+        return defaultApplicationSupportDirectory()
+    }
+
     public static func locatePythonRunner(in workspaceURL: URL, mainPyPath: String) -> PythonRunner? {
         let fm = FileManager.default
-        let venvCandidates = [
+        var venvCandidates = [
             workspaceURL.appendingPathComponent(".venv/bin/python3"),
             workspaceURL.appendingPathComponent("venv/bin/python3"),
         ]
+        if isInsideAppBundle(workspaceURL) {
+            venvCandidates.insert(
+                defaultApplicationSupportDirectory().appendingPathComponent(".venv/bin/python3"),
+                at: 0
+            )
+        }
         for pyURL in venvCandidates where fm.isExecutableFile(atPath: pyURL.path) {
             return PythonRunner(executableURL: pyURL, baseArguments: [], mainPyPath: mainPyPath)
         }

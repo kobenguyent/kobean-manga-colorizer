@@ -13,3 +13,5 @@ __pycache__/
 /networks/archive
 
 /storage
+/dist-macos
+/macos/.build

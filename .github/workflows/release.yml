@@ -1,0 +1,228 @@
+name: Release Native macOS App
+
+on:
+  # Automatic release on push/merge to main (doc-only commits & [skip release] are skipped by next-version.sh)
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+
+  # Manual release trigger with optional SemVer bump or explicit tag override
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Automatic SemVer bump strategy (ignored if explicit tag is set)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      tag:
+        description: "Optional explicit version tag override (e.g. v1.1.0 or v1.2.0-beta.1)"
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        default: false
+        type: boolean
+      universal:
+        description: "Build universal binary (Apple Silicon + Intel)"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+# Never cancel an active release halfway through tagging/publishing; queue safely instead.
+concurrency:
+  group: kobean-manga-colorizer-release-pipeline
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, Verify & Publish Native macOS Release
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout Full History & Tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve Release Version & Tag
+        id: meta
+        shell: bash
+        run: |
+          chmod +x scripts/next-version.sh
+          SHOULD_RELEASE="true"
+          CREATE_TAG="false"
+          PREV_TAG=""
+          BUMP_KIND="manual"
+          UNIVERSAL="true"
+          PRERELEASE="false"
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            UNIVERSAL="${{ inputs.universal }}"
+            PRERELEASE="${{ inputs.prerelease }}"
+            EXPLICIT_TAG="${{ inputs.tag }}"
+            if [[ -n "$EXPLICIT_TAG" ]]; then
+              TAG="$EXPLICIT_TAG"
+              [[ "$TAG" == v* ]] || TAG="v${TAG}"
+              if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+                CREATE_TAG="true"
+              fi
+            else
+              eval "$(./scripts/next-version.sh --bump "${{ inputs.bump }}")"
+              TAG="$NEXT_TAG"
+              CREATE_TAG="true"
+            fi
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            CREATE_TAG="false"
+            if [[ "$TAG" == *-* ]]; then
+              PRERELEASE="true"
+            fi
+          else
+            eval "$(./scripts/next-version.sh --bump auto)"
+            TAG="$NEXT_TAG"
+            if [[ "$SHOULD_RELEASE" == "true" ]]; then
+              CREATE_TAG="true"
+            fi
+          fi
+
+          VERSION="${TAG#v}"
+          if [[ "$UNIVERSAL" == "true" ]]; then
+            ARCH_MODE="universal"
+            ARCH_LABEL="universal"
+          else
+            ARCH_MODE="native"
+            ARCH_LABEL="$(uname -m)"
+          fi
+
+          echo "should_release=${SHOULD_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "create_tag=${CREATE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "arch_mode=${ARCH_MODE}" >> "$GITHUB_OUTPUT"
+          echo "arch_label=${ARCH_LABEL}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "bump_kind=${BUMP_KIND}" >> "$GITHUB_OUTPUT"
+
+          echo "Release decision: should_release=${SHOULD_RELEASE}, tag=${TAG}, create_tag=${CREATE_TAG}, bump=${BUMP_KIND}, arch=${ARCH_MODE}"
+
+      - name: Run Native macOS Swift Test Suite
+        if: steps.meta.outputs.should_release == 'true'
+        working-directory: macos
+        run: swift test --parallel
+
+      - name: Package KobeanMangaColorizer.app, DMG, ZIP & Checksums
+        if: steps.meta.outputs.should_release == 'true'
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          chmod +x scripts/build-macos-app.sh
+          ./scripts/build-macos-app.sh \
+            --release \
+            --version "${{ steps.meta.outputs.version }}" \
+            --build-number "${{ github.run_number }}" \
+            --github-repo "${{ github.repository }}" \
+            --arch "${{ steps.meta.outputs.arch_mode }}"
+
+      - name: Verify Release Artifacts & Checksums
+        if: steps.meta.outputs.should_release == 'true'
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          ARCH="${{ steps.meta.outputs.arch_label }}"
+          test -d "dist-macos/KobeanMangaColorizer.app"
+          test -x "dist-macos/KobeanMangaColorizer.app/Contents/MacOS/KobeanMangaColorizer"
+          test -f "dist-macos/KobeanMangaColorizer.app/Contents/Resources/AppIcon.icns"
+          test -f "dist-macos/KobeanMangaColorizer.app/Contents/Resources/backend/main.py"
+          test -f "dist-macos/KobeanMangaColorizer-${VERSION}-macOS-${ARCH}.dmg"
+          test -f "dist-macos/KobeanMangaColorizer-${VERSION}-macOS-${ARCH}.zip"
+          test -f "dist-macos/SHA256SUMS.txt"
+          (cd dist-macos && shasum -a 256 -c SHA256SUMS.txt)
+
+      - name: Upload Build Artifacts
+        if: steps.meta.outputs.should_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: KobeanMangaColorizer-${{ steps.meta.outputs.version }}-macOS-${{ steps.meta.outputs.arch_label }}
+          path: |
+            dist-macos/KobeanMangaColorizer-*.dmg
+            dist-macos/KobeanMangaColorizer-*.zip
+            dist-macos/SHA256SUMS.txt
+          retention-days: 30
+
+      - name: Create & Push Release Tag (Automatic Release)
+        if: steps.meta.outputs.should_release == 'true' && steps.meta.outputs.create_tag == 'true'
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git tag -a "${TAG}" -m "Release ${TAG}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${TAG}"
+          fi
+
+      - name: Compose Release Notes & Changelog
+        if: steps.meta.outputs.should_release == 'true'
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          ARCH="${{ steps.meta.outputs.arch_label }}"
+          PREV_TAG="${{ steps.meta.outputs.prev_tag }}"
+
+          if [[ -n "$PREV_TAG" ]]; then
+            COMMIT_LOG="$(git log "${PREV_TAG}..HEAD" --no-merges --pretty=format:'- %s (%h)')"
+          else
+            COMMIT_LOG="$(git log -n 20 --no-merges --pretty=format:'- %s (%h)')"
+          fi
+
+          cat << EOF > dist-macos/RELEASE_NOTES.md
+          ## Kobean Manga Colorizer v${VERSION}
+
+          Native macOS SwiftUI Studio for **AI Manga & Comic Colorization**, translation, series memory, LoRA character consistency, and e-reader omnibus exports (EPUB / MOBI / PDF).
+
+          ### Changes
+          ${COMMIT_LOG}
+
+          ### Downloads
+          - **macOS Disk Image:** \`KobeanMangaColorizer-${VERSION}-macOS-${ARCH}.dmg\` (drag \`KobeanMangaColorizer.app\` into \`/Applications\`)
+          - **macOS App Archive:** \`KobeanMangaColorizer-${VERSION}-macOS-${ARCH}.zip\` (used by the built-in GitHub Releases auto-updater)
+          - **Checksums:** \`SHA256SUMS.txt\`
+
+          ### First Launch Without an Apple Developer Certificate
+          Releases built without a paid Apple Developer ID certificate are **ad-hoc signed** for Apple Silicon & Intel compatibility. On first launch after manual download, clear macOS download quarantine once:
+          \`\`\`bash
+          xattr -cr /Applications/KobeanMangaColorizer.app
+          open /Applications/KobeanMangaColorizer.app
+          \`\`\`
+          Subsequent updates via **Kobean Manga Colorizer → Check for Updates…** automatically download the release, verify \`SHA256SUMS.txt\`, close the running app, swap \`KobeanMangaColorizer.app\`, clear quarantine flags, and relaunch.
+
+          ### SHA-256 Checksums
+          \`\`\`
+          $(cat dist-macos/SHA256SUMS.txt)
+          \`\`\`
+          EOF
+
+      - name: Publish GitHub Release
+        if: steps.meta.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Kobean Manga Colorizer ${{ steps.meta.outputs.tag }}
+          body_path: dist-macos/RELEASE_NOTES.md
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: false
+          files: |
+            dist-macos/KobeanMangaColorizer-*.dmg
+            dist-macos/KobeanMangaColorizer-*.zip
+            dist-macos/SHA256SUMS.txt

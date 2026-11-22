@@ -70,6 +70,9 @@ struct MainStudioSplitView: View {
         .sheet(isPresented: $store.showHistorySheet) {
             HistorySheetView(store: store)
         }
+        .sheet(isPresented: $store.showUpdateSheet) {
+            UpdateSheetView(store: store)
+        }
     }
 
     private func studioTopHeaderBar(theme: StudioTheme) -> some View {
@@ -215,6 +218,30 @@ struct MainStudioSplitView: View {
                         theme: theme
                     ) {
                         store.showHistorySheet = true
+                    }
+
+                    if let updateInfo = store.availableUpdateInfo {
+                        Button {
+                            store.showUpdateSheet = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("v\(updateInfo.version.description)")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .monospacedDigit()
+                            }
+                            .foregroundStyle(theme.accentGreen)
+                            .padding(.horizontal, 7)
+                            .frame(height: 24)
+                            .background(theme.accentGreen.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(theme.accentGreen.opacity(0.35), lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Update v\(updateInfo.version.description) available — click to download and update")
                     }
 
                     if !store.isFullscreenComparator {

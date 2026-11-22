@@ -84,6 +84,31 @@ struct MenuBarStudioPopover: View {
             Divider()
 
             HStack {
+                if let updateInfo = store.availableUpdateInfo {
+                    Button {
+                        NSApp.activate(ignoringOtherApps: true)
+                        openWindow(id: "studio-main")
+                        store.showUpdateSheet = true
+                    } label: {
+                        Label("Update v\(updateInfo.version.description)", systemImage: "arrow.down.circle.fill")
+                    }
+                    .studioButtonStyle(.prominent, theme: theme, size: .small, tint: theme.accentGreen)
+                } else {
+                    Button("Check for Updates…") {
+                        NSApp.activate(ignoringOtherApps: true)
+                        openWindow(id: "studio-main")
+                        Task { await store.checkForUpdates(userInitiated: true) }
+                    }
+                    .studioButtonStyle(.ghost, theme: theme, size: .small)
+                }
+                Spacer()
+                Text("v\(AppMetadata.currentVersionString)")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
                 Button("Open Studio Window") {
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "studio-main")

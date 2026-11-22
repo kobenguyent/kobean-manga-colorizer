@@ -36,16 +36,33 @@ public enum PageGalleryFilter: String, Codable, Sendable, CaseIterable, Identifi
     public var id: String { rawValue }
 }
 
+public enum AppUpdateState: Equatable, Sendable {
+    case idle
+    case checking
+    case upToDate(current: SemanticVersion, checkedAt: Date)
+    case available(release: GitHubRelease, latestVersion: SemanticVersion, asset: GitHubReleaseAsset?)
+    case downloading(release: GitHubRelease, asset: GitHubReleaseAsset, progress: Double)
+    case readyToInstall(release: GitHubRelease, artifact: DownloadedUpdateArtifact)
+    case installing(release: GitHubRelease)
+    case failed(String)
+}
+
 @Observable
 @MainActor
 public final class StudioStore {
     public typealias RevealInFinderHandler = @MainActor @Sendable (URL) -> Void
     public typealias ImagePrefetchHandler = @MainActor @Sendable ([URL]) -> Void
+    public typealias UpdateInstallerHandler = @MainActor @Sendable (UpdateInstallPlan) throws -> Void
+    public typealias TerminateAppHandler = @MainActor @Sendable () -> Void
 
     private static let themeDefaultsKey = "kobean_theme"
     private static let settingsDefaultsKey = "kobean_colorize_settings"
     private static let workspaceDefaultsKey = "kobean_workspace_path"
     private static let preferredPortDefaultsKey = "kobean_preferred_port"
+    private static let autoCheckUpdatesDefaultsKey = "kobean_auto_check_updates"
+    private static let includePrereleaseUpdatesDefaultsKey = "kobean_include_prerelease_updates"
+    private static let updateGitHubRepoDefaultsKey = "kobean_update_github_repo"
+    private static let skippedUpdateTagDefaultsKey = "kobean_skipped_update_tag"
 
     // MARK: - Dependencies
 
@@ -55,6 +72,11 @@ public final class StudioStore {
     private let userDefaults: UserDefaults
     private let revealInFinderHandler: RevealInFinderHandler
     private let imagePrefetchHandler: ImagePrefetchHandler
+    private let updateService: UpdateService
+    private let updateInstallerHandler: UpdateInstallerHandler
+    private let terminateAppHandler: TerminateAppHandler
+    private let currentVersionProvider: @Sendable () -> SemanticVersion
+    private let targetAppBundleProvider: @Sendable () -> URL?
 
     // MARK: - Backend & Workspace State
 
@@ -84,7 +106,32 @@ public final class StudioStore {
     public var isInspectorVisible: Bool = true
     public var showExemplarSheet: Bool = false
     public var showHistorySheet: Bool = false
+    public var showUpdateSheet: Bool = false
     public var pageGalleryFilter: PageGalleryFilter = .all
+
+    // MARK: - Software Updates State
+
+    public var updateState: AppUpdateState = .idle
+    public var autoCheckForUpdates: Bool {
+        didSet {
+            userDefaults.set(autoCheckForUpdates, forKey: Self.autoCheckUpdatesDefaultsKey)
+        }
+    }
+    public var includePrereleaseUpdates: Bool {
+        didSet {
+            userDefaults.set(includePrereleaseUpdates, forKey: Self.includePrereleaseUpdatesDefaultsKey)
+        }
+    }
+    public var updateGitHubRepository: String {
+        didSet {
+            userDefaults.set(updateGitHubRepository, forKey: Self.updateGitHubRepoDefaultsKey)
+        }
+    }
+    public var skippedUpdateTag: String {
+        didSet {
+            userDefaults.set(skippedUpdateTag, forKey: Self.skippedUpdateTagDefaultsKey)
+        }
+    }
 
     public var isBusy: Bool = false
     public var statusBannerMessage: String?
@@ -158,6 +205,7 @@ public final class StudioStore {
     @ObservationIgnored private var colorizeStreamTask: Task<Void, Never>?
     @ObservationIgnored private var exportStreamTask: Task<Void, Never>?
     @ObservationIgnored private var persistPreferencesTask: Task<Void, Never>?
+    @ObservationIgnored private var startupUpdateCheckTask: Task<Void, Never>?
 
     // MARK: - Init
 
@@ -167,7 +215,12 @@ public final class StudioStore {
         keychain: KeychainHelperProtocol = KeychainHelper.shared,
         userDefaults: UserDefaults = .standard,
         revealInFinderHandler: RevealInFinderHandler? = nil,
-        imagePrefetchHandler: ImagePrefetchHandler? = nil
+        imagePrefetchHandler: ImagePrefetchHandler? = nil,
+        updateService: UpdateService = UpdateService(),
+        updateInstallerHandler: UpdateInstallerHandler? = nil,
+        terminateAppHandler: TerminateAppHandler? = nil,
+        currentVersionProvider: @escaping @Sendable () -> SemanticVersion = { AppMetadata.currentSemanticVersion },
+        targetAppBundleProvider: @escaping @Sendable () -> URL? = { UpdateInstaller.currentAppBundleURL() }
     ) {
         self.apiClient = apiClient
         self.supervisor = supervisor
@@ -182,12 +235,34 @@ public final class StudioStore {
                 await StudioImageCache.shared.prefetch(urls: urls)
             }
         }
+        self.updateService = updateService
+        self.updateInstallerHandler = updateInstallerHandler ?? { plan in
+            try UpdateInstaller.launchDetachedInstaller(plan: plan)
+        }
+        self.terminateAppHandler = terminateAppHandler ?? {
+            NSApplication.shared.terminate(nil)
+        }
+        self.currentVersionProvider = currentVersionProvider
+        self.targetAppBundleProvider = targetAppBundleProvider
 
         let storedTheme = userDefaults.string(forKey: Self.themeDefaultsKey)
         self.activeThemeID = storedTheme.flatMap(StudioThemeID.init(rawValue:)) ?? .cyberNeon
         self.workspacePathOverride = userDefaults.string(forKey: Self.workspaceDefaultsKey) ?? ""
         let savedPort = userDefaults.integer(forKey: Self.preferredPortDefaultsKey)
         self.preferredPort = (1024...65535).contains(savedPort) ? savedPort : 8000
+
+        if userDefaults.object(forKey: Self.autoCheckUpdatesDefaultsKey) != nil {
+            self.autoCheckForUpdates = userDefaults.bool(forKey: Self.autoCheckUpdatesDefaultsKey)
+        } else {
+            self.autoCheckForUpdates = true
+        }
+        self.includePrereleaseUpdates = userDefaults.bool(forKey: Self.includePrereleaseUpdatesDefaultsKey)
+        let savedRepo = userDefaults.string(forKey: Self.updateGitHubRepoDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.updateGitHubRepository = (savedRepo?.isEmpty == false)
+            ? savedRepo!
+            : AppMetadata.configuredGitHubRepo
+        self.skippedUpdateTag = userDefaults.string(forKey: Self.skippedUpdateTagDefaultsKey) ?? ""
 
         let savedSecret = keychain.read(key: KeychainHelper.geminiAPIKeyAccount) ?? ""
         self.geminiAPIKey = savedSecret
@@ -308,11 +383,153 @@ public final class StudioStore {
     // MARK: - Backend Lifecycle
 
     public func bootstrap() async {
+        scheduleStartupUpdateCheckIfEnabled()
         await connectAndLoad()
     }
 
     nonisolated public func shutdownSynchronously() {
         supervisor.terminateOwnedProcessSynchronously()
+    }
+
+    // MARK: - Software Updates (GitHub Releases)
+
+    public var availableUpdateInfo: (release: GitHubRelease, version: SemanticVersion, asset: GitHubReleaseAsset?)? {
+        if case .available(let release, let latestVersion, let asset) = updateState {
+            return (release, latestVersion, asset)
+        }
+        return nil
+    }
+
+    public var hasAvailableUpdate: Bool {
+        availableUpdateInfo != nil
+    }
+
+    public var isCheckingOrDownloadingUpdate: Bool {
+        switch updateState {
+        case .checking, .downloading, .installing:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func scheduleStartupUpdateCheckIfEnabled() {
+        guard autoCheckForUpdates else { return }
+        startupUpdateCheckTask?.cancel()
+        startupUpdateCheckTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.checkForUpdates(userInitiated: false)
+        }
+    }
+
+    public func checkForUpdates(userInitiated: Bool = true, presentSheet: Bool = true) async {
+        guard !isCheckingOrDownloadingUpdate else {
+            if userInitiated && presentSheet {
+                showUpdateSheet = true
+            }
+            return
+        }
+
+        if userInitiated {
+            if presentSheet {
+                showUpdateSheet = true
+            }
+            updateState = .checking
+        }
+
+        let repo = updateGitHubRepository.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? AppMetadata.configuredGitHubRepo
+            : updateGitHubRepository
+
+        do {
+            let outcome = try await updateService.checkForUpdates(
+                repository: repo,
+                currentVersion: currentVersionProvider(),
+                includePrereleases: includePrereleaseUpdates
+            )
+            switch outcome {
+            case .updateAvailable(let release, let latestVersion, let asset):
+                if !userInitiated && skippedUpdateTag == release.tagName {
+                    return
+                }
+                updateState = .available(release: release, latestVersion: latestVersion, asset: asset)
+                if !userInitiated {
+                    statusBannerMessage = "Update v\(latestVersion.description) is available on GitHub Releases."
+                }
+            case .upToDate(let current, _):
+                updateState = .upToDate(current: current, checkedAt: Date())
+            }
+        } catch {
+            if userInitiated {
+                updateState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    public func skipUpdateVersion(_ tagName: String) {
+        skippedUpdateTag = tagName
+        updateState = .idle
+        showUpdateSheet = false
+    }
+
+    /// Downloads the release artifact, verifies SHA-256 against `SHA256SUMS.txt`,
+    /// and once downloaded automatically launches the detached updater, shuts down
+    /// the local Python backend, and closes the current app to apply the update.
+    public func downloadAndInstallUpdate(
+        release: GitHubRelease,
+        asset: GitHubReleaseAsset,
+        autoCloseAndInstall: Bool = true
+    ) async {
+        updateState = .downloading(release: release, asset: asset, progress: 0.0)
+        do {
+            let artifact = try await updateService.downloadAndVerify(
+                release: release,
+                asset: asset,
+                progress: { [weak self] ratio in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        if case .downloading(let activeRelease, let activeAsset, _) = self.updateState {
+                            self.updateState = .downloading(
+                                release: activeRelease,
+                                asset: activeAsset,
+                                progress: ratio
+                            )
+                        }
+                    }
+                }
+            )
+
+            if autoCloseAndInstall {
+                installDownloadedUpdateAndQuit(release: release, artifact: artifact)
+            } else {
+                updateState = .readyToInstall(release: release, artifact: artifact)
+            }
+        } catch {
+            updateState = .failed(error.localizedDescription)
+        }
+    }
+
+    public func installDownloadedUpdateAndQuit(
+        release: GitHubRelease,
+        artifact: DownloadedUpdateArtifact
+    ) {
+        updateState = .installing(release: release)
+        let plan = UpdateInstallPlan(
+            downloadedAssetURL: artifact.fileURL,
+            targetAppURL: targetAppBundleProvider()
+        )
+        do {
+            try updateInstallerHandler(plan)
+            colorizeStreamTask?.cancel()
+            exportStreamTask?.cancel()
+            startupUpdateCheckTask?.cancel()
+            shutdownSynchronously()
+            terminateAppHandler()
+        } catch {
+            updateState = .readyToInstall(release: release, artifact: artifact)
+            errorMessage = error.localizedDescription
+        }
     }
 
     public func connectAndLoad() async {

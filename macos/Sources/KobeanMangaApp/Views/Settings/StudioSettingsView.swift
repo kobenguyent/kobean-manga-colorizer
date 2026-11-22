@@ -4,6 +4,7 @@ import SwiftUI
 struct StudioSettingsView: View {
     @Bindable var store: StudioStore
     @State private var apiKeyInput: String = ""
+    @State private var showLocalUpdateSheet: Bool = false
 
     var body: some View {
         let theme = store.currentTheme
@@ -69,11 +70,54 @@ struct StudioSettingsView: View {
                     }
                 }
             }
+
+            Section("Software Updates (GitHub Releases)") {
+                Toggle("Automatically check for updates on launch", isOn: $store.autoCheckForUpdates)
+                Toggle("Include pre-release builds", isOn: $store.includePrereleaseUpdates)
+                TextField("GitHub Repository (owner/repo)", text: $store.updateGitHubRepository)
+                    .font(.system(.body, design: .monospaced))
+                HStack {
+                    Button("Check for Updates…") {
+                        showLocalUpdateSheet = true
+                        Task { await store.checkForUpdates(userInitiated: true, presentSheet: false) }
+                    }
+                    .disabled(store.isCheckingOrDownloadingUpdate)
+                    Spacer()
+                    Text(updateSummaryText)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 380)
+        .frame(width: 540, height: 500)
         .onAppear {
             apiKeyInput = store.geminiAPIKey
+        }
+        .sheet(isPresented: $showLocalUpdateSheet) {
+            UpdateSheetView(store: store)
+        }
+    }
+
+    private var updateSummaryText: String {
+        switch store.updateState {
+        case .checking:
+            return "Checking GitHub Releases…"
+        case .available(_, let version, _):
+            return "Update v\(version.description) available"
+        case .downloading(_, _, let progress):
+            return "Downloading \(Int((progress * 100).rounded()))%…"
+        case .upToDate(let current, _):
+            return "Up to date (v\(current.description))"
+        case .installing(let release):
+            return "Installing \(release.tagName)…"
+        case .readyToInstall(let release, _):
+            return "Ready to install \(release.tagName)"
+        case .failed:
+            return "Update check failed"
+        case .idle:
+            return "Installed v\(AppMetadata.currentVersionString) (Build \(AppMetadata.buildNumber))"
         }
     }
 }

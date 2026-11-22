@@ -78,3 +78,50 @@ jobs:
         if: always()
         run: |
           pkill -f "uvicorn main:app" || true
+
+  macos-build:
+    name: Build, Test & Package Native macOS App
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Show Swift & macOS Toolchain
+        run: |
+          swift --version
+          sw_vers
+
+      - name: Run Native macOS Swift Test Suite
+        working-directory: macos
+        run: swift test --parallel
+
+      - name: Package Native macOS App (DMG, ZIP & SHA256SUMS)
+        run: |
+          chmod +x scripts/build-macos-app.sh
+          ./scripts/build-macos-app.sh \
+            --release \
+            --version "0.0.0-ci" \
+            --build-number "${{ github.run_number }}" \
+            --github-repo "${{ github.repository }}" \
+            --arch native
+
+      - name: Verify Packaged Artifacts & Checksums
+        run: |
+          ls -lh dist-macos/
+          test -d "dist-macos/KobeanMangaColorizer.app"
+          test -x "dist-macos/KobeanMangaColorizer.app/Contents/MacOS/KobeanMangaColorizer"
+          test -f "dist-macos/KobeanMangaColorizer.app/Contents/Resources/AppIcon.icns"
+          test -f "dist-macos/KobeanMangaColorizer.app/Contents/Resources/backend/main.py"
+          test -f "dist-macos/SHA256SUMS.txt"
+          (cd dist-macos && shasum -a 256 -c SHA256SUMS.txt)
+
+      - name: Upload Native macOS CI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KobeanMangaColorizer-ci-${{ github.run_number }}-macOS
+          path: |
+            dist-macos/KobeanMangaColorizer-*.dmg
+            dist-macos/KobeanMangaColorizer-*.zip
+            dist-macos/SHA256SUMS.txt
+          retention-days: 7
