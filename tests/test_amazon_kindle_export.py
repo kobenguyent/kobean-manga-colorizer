@@ -110,13 +110,68 @@ def test_pure_python_mobi_generator(tmp_path):
             tags[tag_type] = data
             curr += tag_len
 
-        assert tags[100] == b"Masashi Kishimoto"  # Author
-        assert tags[503] == b"Naruto Shippuden"  # Title
-        assert tags[121] == b"comic"  # Book type: comic
-        assert tags[122] == b"true"  # Fixed-layout: true
-        assert tags[126] == b"none"  # Orientation lock: none
-        assert tags[127] == b"horizontal-rl"  # RTL Manga reading direction!
-        assert tags[128] == b"pre-paginated"  # Rendition layout
+        assert tags[100] == b"Masashi Kishimoto"  # EXTH_AUTHOR
+        assert tags[503] == b"Naruto Shippuden"  # EXTH_UPDATEDTITLE
+        assert tags[501] == b"EBOK"  # EXTH_DOCTYPE
+        assert tags[524] == b"en"  # EXTH_LANGUAGE
+        assert 121 not in tags  # EXTH_KF8BOUNDARY must NOT be set in pure MOBI 6
+        assert 125 not in tags  # EXTH_COUNTRESOURCES is KF8-only
+        assert tags[122] == b"true"  # EXTH_FIXEDLAYOUT
+        assert tags[123] == b"comic"  # EXTH_BOOKTYPE
+        assert tags[124] == b"none"  # EXTH_ORIENTATIONLOCK
+        assert tags[126] == b"200x300"  # EXTH_ORIGRESOLUTION
+        assert tags[127] == b"true"  # EXTH_ZEROGUTTER
+        assert tags[128] == b"true"  # EXTH_ZEROMARGIN
+        assert tags[132] == b"false"  # EXTH_REGIONMAGNI
+        assert tags[201] == struct.pack(">I", 0)  # EXTH_COVEROFFSET
+        assert tags[202] == struct.pack(">I", 0)  # EXTH_THUMBOFFSET
+        assert tags[203] == struct.pack(">I", 0)  # EXTH_HASFAKECOVER
+        assert tags[525] == b"horizontal-rl"  # EXTH_ALIGNMENT (primary-writing-mode)
+        assert tags[527] == b"rtl"  # EXTH_PAGEDIR (page-progression-direction)
+
+        # Verify MOBI 6 header structural pointers (offsets 164..247) so libmobi & iPad readers
+        # never misinterpret Record 0 as DRM, FCIS, FLIS, or NCX INDX.
+        unk164, drm_off, drm_cnt, drm_size, drm_flags = struct.unpack(">5I", rec0_data[164:184])
+        assert unk164 == 0xFFFFFFFF
+        assert drm_off == 0xFFFFFFFF
+        assert (drm_cnt, drm_size, drm_flags) == (0, 0, 0)
+
+        fcr, lcr, unk196, fcis_idx, fcis_cnt, flis_idx, flis_cnt = struct.unpack(
+            ">HH5I", rec0_data[192:216]
+        )
+        assert fcr == 1
+        assert lcr == 3  # last image record index
+        assert unk196 == 1
+        assert flis_idx == 4 and flis_cnt == 1
+        assert fcis_idx == 5 and fcis_cnt == 1
+
+        srcs_idx, srcs_cnt, unk232, unk236, extra_flags, ncx_idx = struct.unpack(
+            ">6I", rec0_data[224:248]
+        )
+        assert srcs_idx == 0xFFFFFFFF
+        assert srcs_cnt == 0
+        assert unk232 == 0xFFFFFFFF
+        assert unk236 == 0xFFFFFFFF
+        assert extra_flags == 0
+        assert ncx_idx == 0xFFFFFFFF
+
+        # Verify FLIS (36 bytes), FCIS (44 bytes), and EOF (4 bytes) records at declared indices
+        flis_start, flis_end = rec_headers[flis_idx][0], rec_headers[flis_idx + 1][0]
+        f.seek(flis_start)
+        flis_data = f.read(flis_end - flis_start)
+        assert len(flis_data) == 36
+        assert flis_data[:4] == b"FLIS"
+
+        fcis_start, fcis_end = rec_headers[fcis_idx][0], rec_headers[fcis_idx + 1][0]
+        f.seek(fcis_start)
+        fcis_data = f.read(fcis_end - fcis_start)
+        assert len(fcis_data) == 44
+        assert fcis_data[:4] == b"FCIS"
+        assert struct.unpack(">I", fcis_data[20:24])[0] == tlen
+
+        eof_start = rec_headers[6][0]
+        f.seek(eof_start)
+        assert f.read(4) == b"\xe9\x8e\r\n"
 
         # Verify Record 1 (HTML text)
         rec2_offset = rec_headers[2][0]
@@ -130,6 +185,115 @@ def test_pure_python_mobi_generator(tmp_path):
         # Verify Record 2 (first image is JPEG)
         f.seek(rec2_offset)
         assert f.read(3) == b"\xff\xd8\xff"
+
+
+def test_mobi_palmdoc_utf8_multibyte_chunking(tmp_path):
+    """Verifies that multi-byte UTF-8 characters (em-dash, CJK) are never split across 4096-byte PalmDOC slices."""
+    processor = MangaFileProcessor(str(tmp_path / "storage"))
+
+    img = Image.new("RGB", (120, 180), color="teal")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    img_bytes = buf.getvalue()
+
+    # Use multi-byte UTF-8 labels (em-dash '—', Japanese '巻') across many pages so boundaries hit multibyte chars
+    images_data = [
+        (
+            img_bytes,
+            f"第{i:03d}話 — Dr. Slump — ページ {i:03d} — 冒険の始まり",
+            f"Vol. {i // 10 + 1} — Dr. Slump 第{i // 10 + 1}巻" if i % 10 == 1 else None,
+        )
+        for i in range(1, 90)
+    ]
+
+    out_mobi = str(tmp_path / "utf8_chunked.mobi")
+    processor.build_mobi_from_images(images_data, out_mobi, title="Dr. Slump — Part 1 (Vol. 1–3)")
+
+    with open(out_mobi, "rb") as f:
+        header = f.read(78)
+        _, _, _, _, _, _, _, _, _, _, _, _, _, n_records = struct.unpack(
+            ">32sHHIIIIII4s4sIIH", header
+        )
+        rec_headers = [struct.unpack(">IB3s", f.read(8)) for _ in range(n_records)]
+        f.read(2)
+
+        f.seek(rec_headers[0][0])
+        rec0 = f.read(rec_headers[1][0] - rec_headers[0][0])
+        comp, _, tlen, rcount, rsize, _ = struct.unpack(">HHIHHI", rec0[:16])
+        assert comp == 1
+        assert rcount > 1
+        assert rsize == 4096
+
+        total_reconstructed = b""
+        for r_idx in range(1, 1 + rcount):
+            start_off = rec_headers[r_idx][0]
+            end_off = rec_headers[r_idx + 1][0]
+            f.seek(start_off)
+            chunk = f.read(end_off - start_off)
+            assert len(chunk) <= 4096
+            # Every individual PalmDOC record must be valid UTF-8 (no split codepoints)
+            chunk.decode("utf-8")
+            total_reconstructed += chunk
+
+        assert len(total_reconstructed) == tlen
+
+
+def test_epub_ocf_mimetype_and_xml_escaping(tmp_path):
+    """Verifies EPUB OCF mimetype storage (uncompressed & first) and XML well-formedness for iPad/Apple Books."""
+    import xml.etree.ElementTree as ET
+
+    processor = MangaFileProcessor(str(tmp_path / "storage"))
+    session_id = "test_epub_xml"
+    orig_dir = tmp_path / "storage" / session_id / "original"
+    orig_dir.mkdir(parents=True)
+
+    p1 = orig_dir / "p1.jpg"
+    Image.new("RGB", (400, 600), "green").save(str(p1), "JPEG")
+
+    pages_meta = [
+        {
+            "filename": "p1.jpg",
+            "original_path": str(p1),
+            "width": 400,
+            "height": 600,
+            "display_name": 'Page 1 & Cover <"Special">',
+        }
+    ]
+
+    # 1. Standalone EPUB
+    standalone_epub = str(tmp_path / "standalone.epub")
+    processor.build_standalone_epub(pages_meta, session_id, standalone_epub, title="Tom & Jerry <Vol 1>")
+    with zipfile.ZipFile(standalone_epub, "r") as zf:
+        infos = zf.infolist()
+        assert infos[0].filename == "mimetype"
+        assert infos[0].compress_type == zipfile.ZIP_STORED
+        for zi in infos:
+            if zi.filename.endswith((".xml", ".xhtml", ".opf")):
+                ET.fromstring(zf.read(zi.filename))
+
+    # 2. Cloned/colorized EPUB must preserve uncompressed mimetype as first zip entry
+    cloned_epub = str(tmp_path / "cloned.epub")
+    processor.build_colorized_epub(standalone_epub, pages_meta, session_id, cloned_epub)
+    with zipfile.ZipFile(cloned_epub, "r") as zf:
+        infos = zf.infolist()
+        assert infos[0].filename == "mimetype"
+        assert infos[0].compress_type == zipfile.ZIP_STORED
+        assert zf.read("mimetype") == b"application/epub+zip"
+
+    # 3. Combined EPUB with special XML characters in filenames/labels
+    combined_epub = str(tmp_path / "combined.epub")
+    processor.build_combined_epub(
+        [{"session_id": session_id, "filename": "Vol 1 & 2 <HQ>.cbz", "pages": pages_meta}],
+        combined_epub,
+        title="Dr. Slump & Friends",
+    )
+    with zipfile.ZipFile(combined_epub, "r") as zf:
+        infos = zf.infolist()
+        assert infos[0].filename == "mimetype"
+        assert infos[0].compress_type == zipfile.ZIP_STORED
+        for zi in infos:
+            if zi.filename.endswith((".xml", ".xhtml", ".opf")):
+                ET.fromstring(zf.read(zi.filename))
 
 
 def test_mobi_palmdoc_large_text_chunking(tmp_path):

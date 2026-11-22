@@ -1,3 +1,4 @@
+import html
 import io
 import os
 import re
@@ -6,6 +7,7 @@ import struct
 import subprocess
 import tempfile
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Optional
@@ -387,7 +389,20 @@ class MangaFileProcessor:
                             if c_path.exists():
                                 color_map[zip_path] = str(c_path)
 
+                    # EPUB OCF spec requires `mimetype` to be the very first entry and uncompressed (ZIP_STORED).
+                    # Writing it compressed causes Apple Books and strict iPad/iOS readers to report corruption.
                     for item in zin.infolist():
+                        if item.filename == "mimetype":
+                            zout.writestr(
+                                "mimetype",
+                                zin.read(item.filename),
+                                compress_type=zipfile.ZIP_STORED,
+                            )
+                            break
+
+                    for item in zin.infolist():
+                        if item.filename == "mimetype":
+                            continue
                         if item.filename in color_map:
                             # Write the colorized replacement image
                             with open(color_map[item.filename], "rb") as f:
@@ -485,8 +500,11 @@ class MangaFileProcessor:
                 spine_items.append(
                     f'<itemref idref="{page_id}" properties="rendition:layout-pre-paginated"/>'
                 )
+                safe_display_name = html.escape(
+                    str(page_info.get("display_name", f"Page {idx + 1}")), quote=True
+                )
                 nav_items.append(
-                    f'<li><a href="{xhtml_name}">{page_info.get("display_name", f"Page {idx + 1}")}</a></li>'
+                    f'<li><a href="{xhtml_name}">{safe_display_name}</a></li>'
                 )
 
                 w = page_info.get("width", 1200)
@@ -538,6 +556,7 @@ class MangaFileProcessor:
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="pub-id">urn:uuid:{session_id}</dc:identifier>
     <dc:title>{clean_title}</dc:title>
+    <dc:creator>Kobean Manga Colorizer</dc:creator>
     <dc:language>en</dc:language>
     <meta property="dcterms:modified">2026-09-14T00:00:00Z</meta>
     <!-- Amazon Kindle & EPUB3 Manga Fixed-Layout Metadata -->
@@ -611,7 +630,7 @@ class MangaFileProcessor:
                         epub_path,
                         mobi_path,
                         "--output-profile",
-                        "kindle",
+                        "tablet",
                         "--mobi-file-type",
                         "both",
                     ],
@@ -728,12 +747,13 @@ class MangaFileProcessor:
         num_images = len(images_data)
 
         # 1. Generate text record (HTML)
+        escaped_title = html.escape(clean_title, quote=True)
         html_lines = [
             "<!DOCTYPE html>",
             "<html>",
             "<head>",
             '<meta http-equiv="content-type" content="text/html; charset=utf-8" />',
-            f"<title>{clean_title.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</title>",
+            f"<title>{escaped_title}</title>",
             "<style>",
             "@page { margin: 0; }",
             "body { margin: 0; padding: 0; background-color: #000; text-align: center; }",
@@ -760,14 +780,15 @@ class MangaFileProcessor:
             image_bytes_list.append(raw_bytes)
 
             if vol_header:
-                clean_vol = (
-                    str(vol_header).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                clean_vol = html.escape(str(vol_header), quote=True)
+                html_lines.append(
+                    f'<div class="vol-heading"><h2>{clean_vol}</h2></div><mbp:pagebreak/>'
                 )
-                html_lines.append(f'<div class="vol-heading"><h2>{clean_vol}</h2></div>')
 
-            clean_lbl = str(label).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            clean_lbl = html.escape(str(label), quote=True)
+            page_break = "<mbp:pagebreak/>" if i < num_images else ""
             html_lines.append(
-                f'<div class="page"><img recindex="{i:04d}" alt="{clean_lbl}"/></div>'
+                f'<div class="page"><img recindex="{i:04d}" alt="{clean_lbl}"/></div>{page_break}'
             )
 
         html_lines.append("</body></html>")
@@ -775,12 +796,20 @@ class MangaFileProcessor:
         text_len = len(text_content)
 
         # PalmDOC specification requires text content to be split into records of <= 4096 bytes.
-        # Kindle bookreader strictly rejects files where an uncompressed text record exceeds 4096 bytes.
+        # Split on UTF-8 codepoint boundaries so multi-byte characters (e.g. em-dash, CJK) are
+        # never bisected across adjacent records when extra_record_data_flags == 0.
         CHUNK_SIZE = 4096
-        text_slices = [
-            text_content[i : i + CHUNK_SIZE]
-            for i in range(0, len(text_content), CHUNK_SIZE)
-        ]
+        text_slices = []
+        pos = 0
+        while pos < text_len:
+            end = min(pos + CHUNK_SIZE, text_len)
+            if end < text_len:
+                while end > pos and (text_content[end] & 0xC0) == 0x80:
+                    end -= 1
+                if end == pos:
+                    end = min(pos + CHUNK_SIZE, text_len)
+            text_slices.append(text_content[pos:end])
+            pos = end
         if not text_slices:
             text_slices = [b""]
         num_text_records = len(text_slices)
@@ -792,22 +821,44 @@ class MangaFileProcessor:
         eof_index = fcis_index + 1
         total_records = eof_index + 1
 
+        # Detect original canvas resolution from the first image for EXTH 126 (original-resolution)
+        orig_width, orig_height = 1200, 1600
+        try:
+            with Image.open(io.BytesIO(image_bytes_list[0])) as first_im:
+                orig_width, orig_height = first_im.size
+        except Exception:
+            pass
+        orig_resolution_bytes = f"{orig_width}x{orig_height}".encode("ascii")
+
         def exth_record(tag, data):
             return struct.pack(">II", tag, 8 + len(data)) + data
 
         title_bytes = clean_title.encode("utf-8")
         author_bytes = (author or "Kobean Manga Colorizer").encode("utf-8")
+        asin_bytes = str(uuid.uuid4()).encode("ascii")
 
+        # Spec-compliant MOBI 6 EXTH tags (verified against libmobi, Calibre, KindleUnpack):
+        # - Do NOT emit tag 121 (EXTH_KF8BOUNDARY, 4-byte uint32) or tag 125 (KF8 resource count)
+        #   in a pure MOBI 6 container: writing non-4-byte data or an invalid record offset in
+        #   tag 121 triggers "Invalid EXTH header" / "corrupted file" on strict iPad/iOS readers.
         exth_records = [
-            exth_record(100, author_bytes),  # Author
-            exth_record(503, title_bytes),  # Title
-            exth_record(121, b"comic"),  # Book type: comic
-            exth_record(122, b"true"),  # Fixed-layout: true
-            exth_record(125, struct.pack(">I", num_images)),  # Image count
-            exth_record(126, b"none"),  # Orientation lock: none
-            exth_record(127, b"horizontal-rl"),  # Primary writing mode: RTL
-            exth_record(128, b"pre-paginated"),  # Rendition layout
-            exth_record(201, struct.pack(">I", 0)),  # Cover offset (1st image)
+            exth_record(100, author_bytes),  # EXTH_AUTHOR (<dc:creator>)
+            exth_record(113, asin_bytes),  # EXTH_ASIN (unique book identifier)
+            exth_record(122, b"true"),  # EXTH_FIXEDLAYOUT (<fixed-layout>)
+            exth_record(123, b"comic"),  # EXTH_BOOKTYPE (<book-type>)
+            exth_record(124, b"none"),  # EXTH_ORIENTATIONLOCK (<orientation-lock>)
+            exth_record(126, orig_resolution_bytes),  # EXTH_ORIGRESOLUTION (<original-resolution>)
+            exth_record(127, b"true"),  # EXTH_ZEROGUTTER (<zero-gutter>)
+            exth_record(128, b"true"),  # EXTH_ZEROMARGIN (<zero-margin>)
+            exth_record(132, b"false"),  # EXTH_REGIONMAGNI (<region-mag>)
+            exth_record(201, struct.pack(">I", 0)),  # EXTH_COVEROFFSET (1st image)
+            exth_record(202, struct.pack(">I", 0)),  # EXTH_THUMBOFFSET (cover thumbnail)
+            exth_record(203, struct.pack(">I", 0)),  # EXTH_HASFAKECOVER (0 = real cover)
+            exth_record(501, b"EBOK"),  # EXTH_DOCTYPE (EBOK)
+            exth_record(503, title_bytes),  # EXTH_UPDATEDTITLE
+            exth_record(524, b"en"),  # EXTH_LANGUAGE (<dc:language>)
+            exth_record(525, b"horizontal-rl"),  # EXTH_ALIGNMENT (<primary-writing-mode>)
+            exth_record(527, b"rtl"),  # EXTH_PAGEDIR (page-progression-direction)
         ]
         exth_data = b"".join(exth_records)
         exth_header_len = 12 + len(exth_data)
@@ -819,67 +870,97 @@ class MangaFileProcessor:
             + (b"\x00" * pad_len)
         )
 
-        # PalmDOC Header (16 bytes)
+        # PalmDOC Header (16 bytes, offsets 0..15)
         palmdoc_header = struct.pack(
-            ">HHIHHI",
+            ">HHIHHHH",
             1,  # compression: 1 (none)
             0,  # unused
             text_len,  # text length
             num_text_records,  # record count
             4096,  # record size
-            0,  # current position
+            0,  # encryption type: 0 (none)
+            0,  # unknown
         )
 
         title_offset = 248 + len(exth_block)
         title_len = len(title_bytes)
 
-        # MOBI Header (232 bytes, starts at offset 16)
+        # MOBI 6 Header (exact 232 bytes, offsets 16..247 of Record 0).
+        # Every unused pointer MUST be 0xFFFFFFFF (MOBI_NOTSET); leaving fields zero-padded
+        # (especially drm_offset at 168, fcis/flis at 200/208, and ncx_index at 244) causes
+        # libmobi and strict iPad/iOS readers to parse Record 0 as INDX/DRM and reject as corrupt.
         mobi_fields = [
-            ("identifier", "4s", b"MOBI"),
-            ("header_length", "I", 232),
-            ("mobi_type", "I", 2),  # Mobipocket book
-            ("text_encoding", "I", 65001),  # UTF-8
-            ("unique_id", "I", int(time.time()) & 0xFFFFFFFF),
-            ("file_version", "I", 6),
-            ("orthographic_index", "I", 0xFFFFFFFF),
-            ("inflection_index", "I", 0xFFFFFFFF),
-            ("index_names", "I", 0xFFFFFFFF),
-            ("index_keys", "I", 0xFFFFFFFF),
-            ("extra_index_0", "I", 0xFFFFFFFF),
-            ("extra_index_1", "I", 0xFFFFFFFF),
-            ("extra_index_2", "I", 0xFFFFFFFF),
-            ("extra_index_3", "I", 0xFFFFFFFF),
-            ("extra_index_4", "I", 0xFFFFFFFF),
-            ("extra_index_5", "I", 0xFFFFFFFF),
-            ("first_non_book_index", "I", first_image_index),
-            ("full_name_offset", "I", title_offset),
-            ("full_name_length", "I", title_len),
-            ("locale", "I", 1033),
-            ("input_language", "I", 0),
-            ("output_language", "I", 0),
-            ("min_version", "I", 6),
-            ("first_image_index", "I", first_image_index),
-            ("huffman_record_offset", "I", 0),
-            ("huffman_record_count", "I", 0),
-            ("huffman_table_offset", "I", 0),
-            ("huffman_table_length", "I", 0),
-            ("exth_flags", "I", 0x50),  # Bit 6 set for EXTH
-            ("reserved", "32s", b"\x00" * 32),
-            ("drm_offset", "I", 0xFFFFFFFF),
-            ("drm_count", "I", 0),
-            ("drm_size", "I", 0),
-            ("drm_flags", "I", 0),
+            ("identifier", "4s", b"MOBI"),  # 16
+            ("header_length", "I", 232),  # 20
+            ("mobi_type", "I", 2),  # 24: Mobipocket book
+            ("text_encoding", "I", 65001),  # 28: UTF-8
+            ("unique_id", "I", int(time.time()) & 0xFFFFFFFF),  # 32
+            ("file_version", "I", 6),  # 36
+            ("orthographic_index", "I", 0xFFFFFFFF),  # 40
+            ("inflection_index", "I", 0xFFFFFFFF),  # 44
+            ("index_names", "I", 0xFFFFFFFF),  # 48
+            ("index_keys", "I", 0xFFFFFFFF),  # 52
+            ("extra_index_0", "I", 0xFFFFFFFF),  # 56
+            ("extra_index_1", "I", 0xFFFFFFFF),  # 60
+            ("extra_index_2", "I", 0xFFFFFFFF),  # 64
+            ("extra_index_3", "I", 0xFFFFFFFF),  # 68
+            ("extra_index_4", "I", 0xFFFFFFFF),  # 72
+            ("extra_index_5", "I", 0xFFFFFFFF),  # 76
+            ("first_non_book_index", "I", first_image_index),  # 80
+            ("full_name_offset", "I", title_offset),  # 84
+            ("full_name_length", "I", title_len),  # 88
+            ("locale", "I", 0x00000009),  # 92: English (matches Calibre iana2mobi("en"))
+            ("input_language", "I", 0),  # 96
+            ("output_language", "I", 0),  # 100
+            ("min_version", "I", 6),  # 104
+            ("first_image_index", "I", first_image_index),  # 108
+            ("huffman_record_offset", "I", 0),  # 112
+            ("huffman_record_count", "I", 0),  # 116
+            ("huffman_table_offset", "I", 0),  # 120
+            ("huffman_table_length", "I", 0),  # 124
+            ("exth_flags", "I", 0x50),  # 128: Bit 6 set for EXTH
+            ("reserved", "32s", b"\x00" * 32),  # 132..163
+            ("unknown_164", "I", 0xFFFFFFFF),  # 164
+            ("drm_offset", "I", 0xFFFFFFFF),  # 168: MOBI_NOTSET (no DRM)
+            ("drm_count", "I", 0),  # 172
+            ("drm_size", "I", 0),  # 176
+            ("drm_flags", "I", 0),  # 180
+            ("unknown_184", "8s", b"\x00" * 8),  # 184..191
+            ("first_content_record", "H", 1),  # 192
+            ("last_content_record", "H", min(last_image_index, 0xFFFF)),  # 194
+            ("unknown_196", "I", 1),  # 196
+            ("fcis_record_number", "I", fcis_index),  # 200
+            ("fcis_record_count", "I", 1),  # 204
+            ("flis_record_number", "I", flis_index),  # 208
+            ("flis_record_count", "I", 1),  # 212
+            ("unknown_216", "8s", b"\x00" * 8),  # 216..223
+            ("srcs_index", "I", 0xFFFFFFFF),  # 224: MOBI_NOTSET
+            ("srcs_count", "I", 0),  # 228
+            ("unknown_232", "I", 0xFFFFFFFF),  # 232
+            ("unknown_236", "I", 0xFFFFFFFF),  # 236
+            ("extra_record_data_flags", "I", 0),  # 240: no trailing record data
+            ("indx_record_offset", "I", 0xFFFFFFFF),  # 244: MOBI_NOTSET (no NCX INDX)
         ]
         fmt = ">" + "".join(f[1] for f in mobi_fields)
         mobi_header = struct.pack(fmt, *[f[2] for f in mobi_fields])
-        if len(mobi_header) < 232:
-            mobi_header += b"\x00" * (232 - len(mobi_header))
+        assert len(mobi_header) == 232
 
         record_0 = palmdoc_header + mobi_header + exth_block + title_bytes + b"\x00\x00"
         if len(record_0) % 4 != 0:
             record_0 += b"\x00" * (4 - (len(record_0) % 4))
 
-        flis_record = b"FLIS\x00\x00\x00\x08\x00\x41\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\x00\x01\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00"
+        # Spec-compliant 36-byte FLIS record and 44-byte FCIS record
+        flis_record = (
+            b"FLIS"
+            b"\x00\x00\x00\x08"
+            b"\x00\x41\x00\x00"
+            b"\x00\x00\x00\x00"
+            b"\xff\xff\xff\xff"
+            b"\x00\x01\x00\x03"
+            b"\x00\x00\x00\x03"
+            b"\x00\x00\x00\x01"
+            b"\xff\xff\xff\xff"
+        )
         fcis_record = (
             b"FCIS\x00\x00\x00\x14\x00\x00\x00\x10\x00\x00\x00\x01\x00\x00\x00\x00"
             + struct.pack(">I", text_len)
@@ -899,7 +980,8 @@ class MangaFileProcessor:
             curr_offset += len(rec)
 
         now = int(time.time()) + 2082844800  # seconds since 1904-01-01
-        name_field = clean_title.encode("ascii", errors="replace")[:31].ljust(32, b"\x00")
+        pdb_safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", clean_title).strip("_") or "Colorized_Manga"
+        name_field = pdb_safe_name.encode("ascii")[:31].ljust(32, b"\x00")
         pdb_header = struct.pack(
             ">32sHHIIIIII4s4sIIH",
             name_field,
@@ -1162,13 +1244,14 @@ class MangaFileProcessor:
                         img_id = f"img_v{vol_idx + 1}p{gidx + 1}"
                         page_id = f"page_v{vol_idx + 1}p{gidx + 1}"
                         page_label = page_info.get("display_name", f"Page {gidx + 1}")
+                        safe_page_label = html.escape(str(page_label), quote=True)
 
                         page_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="utf-8"/>
-  <title>{page_label}</title>
+  <title>{safe_page_label}</title>
   <meta name="viewport" content="width={w}, height={h}"/>
   <style>
     @page {{ margin: 0; }}
@@ -1177,7 +1260,7 @@ class MangaFileProcessor:
   </style>
 </head>
 <body>
-  <img src="{img_arc_name}" alt="{page_label}"/>
+  <img src="{img_arc_name}" alt="{safe_page_label}"/>
 </body>
 </html>'''
                         zout.writestr(f"OEBPS/{xhtml_name}", page_xhtml)
@@ -1247,6 +1330,7 @@ class MangaFileProcessor:
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="pub-id">urn:uuid:{book_uuid}</dc:identifier>
     <dc:title>{safe_title}</dc:title>
+    <dc:creator>Kobean Manga Colorizer</dc:creator>
     <dc:language>en</dc:language>
     <meta property="dcterms:modified">2026-09-15T00:00:00Z</meta>
     <!-- Amazon Kindle & EPUB3 Manga Fixed-Layout Metadata -->
