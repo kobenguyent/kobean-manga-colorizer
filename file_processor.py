@@ -97,6 +97,64 @@ def derive_volume_name(image_names: list, fallback_folder: Optional[str] = None)
     return "Manga Volume"
 
 
+def _write_compatible_zip(created_files: list[tuple[str, str]], output_zip_path: str) -> str:
+    """
+    Packages already-compressed ebook/document files into a ZIP archive using ZIP_STORED
+    with full compatibility for macOS Archive Utility, Windows Explorer, and Linux unzip.
+
+    Why the first entry gets a small 0xA220 extra-field header pad:
+    macOS Archive Utility uses embedded libmagic (`/usr/share/file/magic/archive`) to verify
+    the archive type before extracting. Its generic ZIP rule contains:
+        >>30 search/100/b !application/epub+zip
+    When a stored (or lightly compressed) `.epub` is the first entry and its local header +
+    filename is under ~92 bytes, the inner EPUB's uncompressed `mimetype` payload
+    (`application/epub+zip` at EPUB offset 38) lands inside bytes 30..130 of the outer ZIP.
+    For archives larger than ~1 MiB (or >4 GiB ZIP64 archives where the 32-bit EOCD central
+    directory offset is 0xFFFFFFFF), libmagic's EOCD fallback rule also cannot match, causing
+    libmagic to report `data` and Archive Utility to reject the valid archive with
+    "It is in an unsupported format."
+
+    Adding a standard PKWARE/ECMA-376 `0xA220` (Microsoft Open Packaging Growth Hint) extra
+    field to the first entry pushes the first payload offset to >= 160 bytes (putting any
+    embedded `application/epub+zip` at >= byte 198), with zero extra files and zero CPU cost.
+    """
+    temp_zip = output_zip_path + ".tmp"
+    if os.path.exists(temp_zip):
+        os.remove(temp_zip)
+
+    try:
+        with zipfile.ZipFile(
+            temp_zip, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+        ) as zout:
+            for idx, (file_path, arcname) in enumerate(created_files):
+                zinfo = zipfile.ZipInfo.from_file(file_path, arcname=arcname)
+                zinfo.compress_type = zipfile.ZIP_STORED
+                # S_IFREG (0o100000) | 0o644 Unix regular-file mode + DOS archive bit (0x20)
+                zinfo.external_attr = (0o100644 << 16) | 0x20
+                zinfo.create_system = 3
+                if idx == 0:
+                    header_plus_name = 30 + len(arcname.encode("utf-8"))
+                    min_payload_offset = 160
+                    if header_plus_name < min_payload_offset:
+                        pad_needed = min_payload_offset - header_plus_name
+                        body_len = max(4, pad_needed - 4)
+                        zinfo.extra += struct.pack("<HHHH", 0xA220, body_len, 0xA028, 0x0000) + (
+                            b"\x00" * (body_len - 4)
+                        )
+                with open(file_path, "rb") as src, zout.open(zinfo, "w") as dest:
+                    shutil.copyfileobj(src, dest, length=1024 * 1024)
+
+        os.replace(temp_zip, output_zip_path)
+        return output_zip_path
+    except Exception:
+        if os.path.exists(temp_zip):
+            try:
+                os.remove(temp_zip)
+            except OSError:
+                pass
+        raise
+
+
 class MangaFileProcessor:
     @staticmethod
     def natural_sort_key(s: str):
@@ -1129,16 +1187,7 @@ class MangaFileProcessor:
                     created_files.append((doc_path, doc_filename))
 
             # Package all generated colorized books/files into output zip
-            with zipfile.ZipFile(
-                output_filepath, "w", compression=zipfile.ZIP_STORED, allowZip64=True
-            ) as zout:
-                for file_path, arcname in created_files:
-                    zinfo = zipfile.ZipInfo.from_file(file_path, arcname=arcname)
-                    zinfo.compress_type = zipfile.ZIP_STORED
-                    zinfo.external_attr = (0o644 << 16) | 0x20
-                    zinfo.create_system = 3
-                    with open(file_path, "rb") as src, zout.open(zinfo, "w") as dest:
-                        shutil.copyfileobj(src, dest, length=1024 * 1024)
+            return _write_compatible_zip(created_files, output_filepath)
 
     # ── Combined single-file export (all volumes → one EPUB / PDF) ───
 
@@ -1841,25 +1890,4 @@ class MangaFileProcessor:
             if not zip_output.lower().endswith(".zip"):
                 zip_output = str(Path(output_filepath).with_suffix(".zip"))
 
-            temp_zip = zip_output + ".tmp"
-            if os.path.exists(temp_zip):
-                os.remove(temp_zip)
-
-            # Package into ZIP using ZIP_STORED (ebook files are already compressed internally)
-            # and proper external_attr (Unix 0644 + DOS archive bit 0x20) for 100% compatibility
-            # with macOS Archive Utility, Windows Explorer, and Linux unzip.
-            with zipfile.ZipFile(
-                temp_zip, "w", compression=zipfile.ZIP_STORED, allowZip64=True
-            ) as zout:
-                for fpath, arcname in created_files:
-                    zinfo = zipfile.ZipInfo.from_file(fpath, arcname=arcname)
-                    zinfo.compress_type = zipfile.ZIP_STORED
-                    zinfo.external_attr = (0o644 << 16) | 0x20
-                    zinfo.create_system = 3
-                    with open(fpath, "rb") as src, zout.open(zinfo, "w") as dest:
-                        shutil.copyfileobj(src, dest, length=1024 * 1024)
-
-            if os.path.exists(zip_output):
-                os.remove(zip_output)
-            os.rename(temp_zip, zip_output)
-            return zip_output
+            return _write_compatible_zip(created_files, zip_output)

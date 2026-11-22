@@ -38,8 +38,10 @@ public protocol StudioAPIClientProtocol: Sendable {
     func deletePage(sessionId: String, pageIndex: Int) async throws -> MangaSessionDetail
 
     func uploadFiles(fileURLs: [URL], batchId: String?, combineImages: Bool) async throws -> UploadResponseDTO
+    func importLocalFiles(paths: [String], batchId: String?, combineImages: Bool) async throws -> DirectoryImportResponseDTO
     func importDirectory(path: String, recursive: Bool, combineImages: Bool) async throws -> DirectoryImportResponseDTO
     func fetchImportStatus(importId: String) async throws -> DirectoryImportStatusDTO
+    func cancelImport(importId: String) async throws
 
     func previewPage(sessionId: String, pageIndex: Int, config: ColorizeConfig) async throws -> PreviewResultDTO
     func startColorize(sessionId: String, selectedPages: [Int]?, forceRecolorize: Bool, config: ColorizeConfig) async throws
@@ -219,61 +221,104 @@ public final class StudioAPIClient: StudioAPIClientProtocol, @unchecked Sendable
         let tempBodyURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("kobean-upload-\(UUID().uuidString).multipart")
 
-        FileManager.default.createFile(atPath: tempBodyURL.path, contents: nil)
-        defer { try? FileManager.default.removeItem(at: tempBodyURL) }
-
-        do {
-            let handle = try FileHandle(forWritingTo: tempBodyURL)
-            defer { try? handle.close() }
-
-            func writeString(_ s: String) throws {
-                if let d = s.data(using: .utf8) {
-                    try handle.write(contentsOf: d)
-                }
-            }
-
-            if let batchId, !batchId.isEmpty {
-                try writeString("--\(boundary)\r\n")
-                try writeString("Content-Disposition: form-data; name=\"batch_id\"\r\n\r\n")
-                try writeString("\(batchId)\r\n")
-            }
-
-            if combineImages {
-                try writeString("--\(boundary)\r\n")
-                try writeString("Content-Disposition: form-data; name=\"combine_images\"\r\n\r\n")
-                try writeString("true\r\n")
-            }
-
-            for fileURL in fileURLs {
-                let standardized = fileURL.standardizedFileURL
-                let filename = standardized.lastPathComponent
-                let mime = mimeType(for: standardized.pathExtension)
-                try writeString("--\(boundary)\r\n")
-                try writeString("Content-Disposition: form-data; name=\"files\"; filename=\"\(escapeHeaderParam(filename))\"\r\n")
-                try writeString("Content-Type: \(mime)\r\n\r\n")
-
-                let reader = try FileHandle(forReadingFrom: standardized)
-                defer { try? reader.close() }
-                while let chunk = try reader.read(upToCount: 1024 * 1024), !chunk.isEmpty {
-                    try handle.write(contentsOf: chunk)
-                }
-                try writeString("\r\n")
-            }
-
-            try writeString("--\(boundary)--\r\n")
-        } catch let error as StudioAPIError {
-            throw error
-        } catch {
-            throw StudioAPIError.fileOperationFailed(error.localizedDescription)
+        // Build multipart payload off the caller's actor so large files never block the main UI thread.
+        let escapedParams: [(URL, String, String)] = fileURLs.map { fileURL in
+            let standardized = fileURL.standardizedFileURL
+            return (
+                standardized,
+                escapeHeaderParam(standardized.lastPathComponent),
+                mimeType(for: standardized.pathExtension)
+            )
         }
 
-        var req = URLRequest(url: url)
+        defer { try? FileManager.default.removeItem(at: tempBodyURL) }
+
+        try await Task.detached(priority: .userInitiated) {
+            FileManager.default.createFile(atPath: tempBodyURL.path, contents: nil)
+            do {
+                let handle = try FileHandle(forWritingTo: tempBodyURL)
+                defer { try? handle.close() }
+
+                func writeString(_ s: String) throws {
+                    if let d = s.data(using: .utf8) {
+                        try handle.write(contentsOf: d)
+                    }
+                }
+
+                if let batchId, !batchId.isEmpty {
+                    try writeString("--\(boundary)\r\n")
+                    try writeString("Content-Disposition: form-data; name=\"batch_id\"\r\n\r\n")
+                    try writeString("\(batchId)\r\n")
+                }
+
+                if combineImages {
+                    try writeString("--\(boundary)\r\n")
+                    try writeString("Content-Disposition: form-data; name=\"combine_images\"\r\n\r\n")
+                    try writeString("true\r\n")
+                }
+
+                for (standardized, escapedName, mime) in escapedParams {
+                    try writeString("--\(boundary)\r\n")
+                    try writeString("Content-Disposition: form-data; name=\"files\"; filename=\"\(escapedName)\"\r\n")
+                    try writeString("Content-Type: \(mime)\r\n\r\n")
+
+                    let reader = try FileHandle(forReadingFrom: standardized)
+                    defer { try? reader.close() }
+                    while let chunk = try reader.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                        try handle.write(contentsOf: chunk)
+                    }
+                    try writeString("\r\n")
+                }
+
+                try writeString("--\(boundary)--\r\n")
+            } catch let error as StudioAPIError {
+                throw error
+            } catch {
+                throw StudioAPIError.fileOperationFailed(error.localizedDescription)
+            }
+        }.value
+
+        // Explicitly set timeoutInterval because URLRequest defaults to 60s and overrides URLSessionConfiguration.
+        var req = URLRequest(url: url, timeoutInterval: max(session.configuration.timeoutIntervalForRequest, 1800))
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
-        let (data, response) = try await session.upload(for: req, fromFile: tempBodyURL)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.upload(for: req, fromFile: tempBodyURL)
+        } catch {
+            throw StudioAPIError.networkError(error.localizedDescription)
+        }
         try validateHTTPResponse(response, data: data)
         return try decode(UploadResponseDTO.self, from: data)
+    }
+
+    private struct LocalFilesImportRequestBody: Encodable {
+        let filePaths: [String]
+        let batchId: String?
+        let combineImages: Bool
+        let runAsync: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case filePaths = "file_paths"
+            case batchId = "batch_id"
+            case combineImages = "combine_images"
+            case runAsync = "run_async"
+        }
+    }
+
+    public func importLocalFiles(
+        paths: [String],
+        batchId: String? = nil,
+        combineImages: Bool = false
+    ) async throws -> DirectoryImportResponseDTO {
+        let body = LocalFilesImportRequestBody(
+            filePaths: paths,
+            batchId: batchId,
+            combineImages: combineImages,
+            runAsync: true
+        )
+        return try await request(path: "/api/import/files", method: "POST", body: body)
     }
 
     private struct DirectoryImportRequestBody: Encodable {
@@ -292,7 +337,7 @@ public final class StudioAPIClient: StudioAPIClientProtocol, @unchecked Sendable
 
     public func importDirectory(
         path: String,
-        recursive: Bool = false,
+        recursive: Bool = true,
         combineImages: Bool = true
     ) async throws -> DirectoryImportResponseDTO {
         let body = DirectoryImportRequestBody(
@@ -307,6 +352,11 @@ public final class StudioAPIClient: StudioAPIClientProtocol, @unchecked Sendable
     public func fetchImportStatus(importId: String) async throws -> DirectoryImportStatusDTO {
         let safeId = encodePathSegment(importId)
         return try await request(path: "/api/import/status/\(safeId)", method: "GET")
+    }
+
+    public func cancelImport(importId: String) async throws {
+        let safeId = encodePathSegment(importId)
+        _ = try await rawRequest(path: "/api/import/cancel/\(safeId)", method: "POST")
     }
 
     // MARK: - Colorization & Preview
@@ -1016,7 +1066,10 @@ public final class StudioAPIClient: StudioAPIClientProtocol, @unchecked Sendable
             let task = Task {
                 do {
                     let url = try self.buildURL(relativePath: path)
-                    var req = URLRequest(url: url)
+                    var req = URLRequest(
+                        url: url,
+                        timeoutInterval: self.streamSession.configuration.timeoutIntervalForRequest
+                    )
                     req.httpMethod = "GET"
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
@@ -1074,14 +1127,14 @@ public final class StudioAPIClient: StudioAPIClientProtocol, @unchecked Sendable
 
     private func rawRequest(path: String, method: String) async throws -> Data {
         let url = try buildURL(relativePath: path)
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: url, timeoutInterval: session.configuration.timeoutIntervalForRequest)
         req.httpMethod = method
         return try await execute(req)
     }
 
     private func rawRequest<Body: Encodable>(path: String, method: String, body: Body) async throws -> Data {
         let url = try buildURL(relativePath: path)
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: url, timeoutInterval: session.configuration.timeoutIntervalForRequest)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(body)

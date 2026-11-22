@@ -1852,8 +1852,10 @@ public struct DirectoryImportStatusDTO: Codable, Sendable, Equatable {
     public var totalFiles: Int
     public var importedFiles: Int
     public var failedFiles: Int
+    public var processedFiles: Int
     public var currentFile: String?
     public var percent: Double
+    public var createdSessions: [MangaSessionSummary]
     public var createdSessionIds: [String]
     public var error: String?
 
@@ -1865,8 +1867,10 @@ public struct DirectoryImportStatusDTO: Codable, Sendable, Equatable {
         totalFiles: Int = 0,
         importedFiles: Int = 0,
         failedFiles: Int = 0,
+        processedFiles: Int? = nil,
         currentFile: String? = nil,
         percent: Double = 0,
+        createdSessions: [MangaSessionSummary] = [],
         createdSessionIds: [String] = [],
         error: String? = nil
     ) {
@@ -1877,8 +1881,10 @@ public struct DirectoryImportStatusDTO: Codable, Sendable, Equatable {
         self.totalFiles = totalFiles
         self.importedFiles = importedFiles
         self.failedFiles = failedFiles
+        self.processedFiles = processedFiles ?? (importedFiles + failedFiles)
         self.currentFile = currentFile
         self.percent = percent
+        self.createdSessions = createdSessions
         self.createdSessionIds = createdSessionIds
         self.error = error
     }
@@ -1891,8 +1897,10 @@ public struct DirectoryImportStatusDTO: Codable, Sendable, Equatable {
         case totalFiles = "total_files"
         case importedFiles = "imported_files"
         case failedFiles = "failed_files"
+        case processedFiles = "processed_files"
         case currentFile = "current_file"
         case percent
+        case createdSessions = "created_sessions"
         case createdSessionIds = "created_session_ids"
         case error
     }
@@ -1906,8 +1914,11 @@ public struct DirectoryImportStatusDTO: Codable, Sendable, Equatable {
         self.totalFiles = try c.decodeIfPresent(Int.self, forKey: .totalFiles) ?? 0
         self.importedFiles = try c.decodeIfPresent(Int.self, forKey: .importedFiles) ?? 0
         self.failedFiles = try c.decodeIfPresent(Int.self, forKey: .failedFiles) ?? 0
+        self.processedFiles = try c.decodeIfPresent(Int.self, forKey: .processedFiles)
+            ?? (self.importedFiles + self.failedFiles)
         self.currentFile = try c.decodeIfPresent(String.self, forKey: .currentFile)
         self.percent = try c.decodeIfPresent(Double.self, forKey: .percent) ?? 0
+        self.createdSessions = try c.decodeIfPresent([MangaSessionSummary].self, forKey: .createdSessions) ?? []
         self.createdSessionIds = try c.decodeIfPresent([String].self, forKey: .createdSessionIds) ?? []
         self.error = try c.decodeIfPresent(String.self, forKey: .error)
     }

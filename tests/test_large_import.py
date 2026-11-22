@@ -494,6 +494,66 @@ class TestLargeImport(unittest.TestCase):
                     f.unlink(missing_ok=True)
             shutil.rmtree(str(test_dir), ignore_errors=True)
 
+    def test_10_import_18_local_files_async_natural_order(self):
+        """POST /api/import/files imports 18 CBZ volumes asynchronously in natural order without timeout."""
+        import io
+        import tempfile
+        import zipfile
+        from fastapi.testclient import TestClient
+        from PIL import Image
+
+        test_dir = Path(tempfile.mkdtemp(prefix="kobean_18vols_"))
+        created_ids = []
+        try:
+            # Create 18 mini CBZ volumes in shuffled order
+            vol_paths = []
+            for vol_num in range(1, 19):
+                cbz_path = test_dir / f"DrSlump_Vol_{vol_num}.cbz"
+                with zipfile.ZipFile(cbz_path, "w") as zf:
+                    img = Image.new("RGB", (64, 96), color=(vol_num * 10 % 255, 120, 180))
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=70)
+                    zf.writestr("page_001.jpg", buf.getvalue())
+                vol_paths.append(str(cbz_path))
+
+            shuffled = list(reversed(vol_paths))
+            client = TestClient(main.app)
+            resp = client.post(
+                "/api/import/files",
+                json={"file_paths": shuffled, "combine_images": False, "run_async": True},
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            data = resp.json()
+            self.assertEqual(data["status"], "started")
+            self.assertEqual(data["total_files"], 18)
+            import_id = data["import_id"]
+
+            stat = None
+            for _ in range(100):
+                st_resp = client.get(f"/api/import/status/{import_id}")
+                self.assertEqual(st_resp.status_code, 200)
+                stat = st_resp.json()
+                if stat["status"] in ("completed", "failed", "cancelled"):
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(stat["status"], "completed")
+            self.assertEqual(stat["imported_files"], 18)
+            self.assertEqual(stat["failed_files"], 0)
+            self.assertEqual(len(stat["created_sessions"]), 18)
+            filenames = [s["filename"] for s in stat["created_sessions"]]
+            self.assertEqual(filenames[0], "DrSlump_Vol_1.cbz")
+            self.assertEqual(filenames[1], "DrSlump_Vol_2.cbz")
+            self.assertEqual(filenames[17], "DrSlump_Vol_18.cbz")
+            created_ids = stat["created_session_ids"]
+        finally:
+            for cid in created_ids:
+                main.SESSIONS.pop(cid, None)
+                shutil.rmtree(str(main.STORAGE_DIR / cid), ignore_errors=True)
+                for f in main.UPLOAD_DIR.glob(f"{cid}_*"):
+                    f.unlink(missing_ok=True)
+            shutil.rmtree(str(test_dir), ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

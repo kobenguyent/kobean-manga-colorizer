@@ -179,8 +179,13 @@ public final class StudioStore {
     public var isTranslating: Bool = false
     public var isImporting: Bool = false
     public var importProgressText: String = ""
+    public var importProcessedCount: Int = 0
+    public var importTotalCount: Int = 0
+    public var importProgressFraction: Double = 0.0
+    public var activeImportId: String?
     public var colorizeProgressMessage: String = ""
     public var batchStatus: BatchStatusDTO?
+    @ObservationIgnored private var importCancelledLocally: Bool = false
 
     // MARK: - Palette, Series Memory & LoRA State
 
@@ -682,7 +687,10 @@ public final class StudioStore {
 
     // MARK: - Ingestion (Files & Directories)
 
-    public func handleDroppedOrPickedURLs(_ urls: [URL], recursive: Bool = false) async {
+    private static let supportedContainerExtensions: Set<String> = ["pdf", "epub", "zip", "cbz"]
+    private static let supportedImageExtensions: Set<String> = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"]
+
+    public func handleDroppedOrPickedURLs(_ urls: [URL], recursive: Bool = true) async {
         guard !urls.isEmpty else { return }
         let fm = FileManager.default
         var directories: [URL] = []
@@ -699,6 +707,7 @@ public final class StudioStore {
             }
         }
 
+        directories.sort { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         for dir in directories {
             await importDirectory(path: dir.path, recursive: recursive, combineImages: true)
         }
@@ -707,36 +716,161 @@ public final class StudioStore {
         }
     }
 
+    public func cancelImport() async {
+        importCancelledLocally = true
+        importProgressText = "Cancelling import…"
+        if let importId = activeImportId, !importId.isEmpty {
+            try? await apiClient.cancelImport(importId: importId)
+        }
+    }
+
     public func uploadFiles(_ urls: [URL], combineImages: Bool = false) async {
-        guard !urls.isEmpty else { return }
+        let supported = Self.supportedContainerExtensions.union(Self.supportedImageExtensions)
+        let sortedURLs = urls
+            .map(\.standardizedFileURL)
+            .filter { supported.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+
+        guard !sortedURLs.isEmpty else {
+            if !urls.isEmpty {
+                errorMessage = "Supported formats: .pdf, .epub, .cbz, .zip, and images (.png, .jpg, .webp)."
+            }
+            return
+        }
+
+        let allImages = sortedURLs.allSatisfy { Self.supportedImageExtensions.contains($0.pathExtension.lowercased()) }
+        let effectiveCombineImages = combineImages || (sortedURLs.count > 1 && allImages)
+
         isImporting = true
-        importProgressText = "Uploading \(urls.count) file(s)..."
+        importCancelledLocally = false
+        activeImportId = nil
+        importProcessedCount = 0
+        importTotalCount = sortedURLs.count
+        importProgressFraction = 0.0
+        importProgressText = "Preparing \(sortedURLs.count) volume\(sortedURLs.count == 1 ? "" : "s")…"
         errorMessage = nil
         defer {
             isImporting = false
+            activeImportId = nil
             importProgressText = ""
+            importProcessedCount = 0
+            importTotalCount = 0
+            importProgressFraction = 0.0
         }
 
+        // Fast zero-copy local path import (no multi-GB HTTP multipart duplication, no 60s timeout,
+        // live per-volume progress & cancellation via background IMPORT_TASKS).
         do {
-            let resp = try await apiClient.uploadFiles(
-                fileURLs: urls,
+            let resp = try await apiClient.importLocalFiles(
+                paths: sortedURLs.map(\.path),
                 batchId: nil,
-                combineImages: combineImages
+                combineImages: effectiveCombineImages
             )
-            await refreshSessions()
-            let targetId = resp.sessions.first?.sessionId ?? resp.sessionId
-            if !targetId.isEmpty {
-                await selectSession(id: targetId)
+            let finalStatus = try await handleBackgroundImportResponse(
+                resp,
+                initialTotal: max(resp.totalFiles, sortedURLs.count),
+                completionLabel: "Imported"
+            )
+            if let err = finalStatus.error, !err.isEmpty {
+                errorMessage = err
             }
-            statusBannerMessage = "Imported \(resp.totalFiles) document(s)"
+            return
+        } catch StudioAPIError.httpError(let code, _) where code == 404 || code == 405 {
+            // Older backend without /api/import/files — fall back seamlessly to per-volume chunked uploads.
         } catch {
-            errorMessage = error.localizedDescription
+            // If local path wasn't directly accessible (e.g. remote backend), fall back to chunked HTTP uploads.
+            let shouldFallback: Bool
+            if case StudioAPIError.httpError(let code, _) = error, code == 400 {
+                shouldFallback = true
+            } else {
+                shouldFallback = false
+            }
+            if !shouldFallback {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
+
+        await uploadFilesChunkedFallback(sortedURLs, combineImages: effectiveCombineImages)
+    }
+
+    private func uploadFilesChunkedFallback(_ sortedURLs: [URL], combineImages: Bool) async {
+        // Upload container volumes one-by-one (or grouped loose images as one volume) to avoid
+        // huge single multipart payloads and provide smooth per-volume progress & live queue updates.
+        let chunks: [[URL]]
+        if combineImages {
+            chunks = [sortedURLs]
+        } else {
+            chunks = sortedURLs.map { [$0] }
+        }
+
+        importTotalCount = chunks.count
+        importProcessedCount = 0
+        importProgressFraction = 0.0
+
+        var activeBatchId: String?
+        var successCount = 0
+        var failCount = 0
+        var firstSessionId: String?
+        var lastError: String?
+
+        for (index, chunk) in chunks.enumerated() {
+            if importCancelledLocally || Task.isCancelled {
+                statusBannerMessage = successCount > 0
+                    ? "Import cancelled after \(successCount) volume(s)"
+                    : "Import cancelled"
+                break
+            }
+
+            let label = chunk.count == 1
+                ? chunk[0].lastPathComponent
+                : "\(chunk.count) image pages"
+            importProgressText = "Importing \(index + 1)/\(chunks.count): \(label)"
+
+            do {
+                let resp = try await apiClient.uploadFiles(
+                    fileURLs: chunk,
+                    batchId: activeBatchId,
+                    combineImages: combineImages
+                )
+                if !resp.batchId.isEmpty {
+                    activeBatchId = resp.batchId
+                }
+                successCount += max(resp.totalFiles, resp.sessions.count)
+                if firstSessionId == nil {
+                    firstSessionId = resp.sessions.first?.sessionId ?? (resp.sessionId.isEmpty ? nil : resp.sessionId)
+                }
+                if !resp.sessions.isEmpty {
+                    mergeSessionsIncrementally(resp.sessions)
+                }
+                if activeSession == nil, let firstId = firstSessionId {
+                    await selectSession(id: firstId)
+                }
+            } catch {
+                failCount += chunk.count
+                lastError = error.localizedDescription
+            }
+
+            importProcessedCount = index + 1
+            importProgressFraction = Double(importProcessedCount) / Double(max(1, chunks.count))
+        }
+
+        await refreshSessions()
+        if activeSession == nil, let targetId = firstSessionId ?? sessions.first?.sessionId {
+            await selectSession(id: targetId)
+        }
+
+        if successCount > 0 {
+            let suffix = failCount > 0 ? " (\(failCount) failed)" : ""
+            statusBannerMessage = "Imported \(successCount) volume\(successCount == 1 ? "" : "s")\(suffix)"
+        } else if let lastError {
+            errorMessage = lastError
         }
     }
 
     public func importDirectory(
         url: URL,
-        recursive: Bool = false,
+        recursive: Bool = true,
         combineImages: Bool = true
     ) async {
         await importDirectory(
@@ -748,7 +882,7 @@ public final class StudioStore {
 
     public func importDirectory(
         path: String,
-        recursive: Bool = false,
+        recursive: Bool = true,
         combineImages: Bool = true
     ) async {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -758,11 +892,20 @@ public final class StudioStore {
         }
 
         isImporting = true
-        importProgressText = "Scanning directory..."
+        importCancelledLocally = false
+        activeImportId = nil
+        importProcessedCount = 0
+        importTotalCount = 0
+        importProgressFraction = 0.0
+        importProgressText = "Scanning directory…"
         errorMessage = nil
         defer {
             isImporting = false
+            activeImportId = nil
             importProgressText = ""
+            importProcessedCount = 0
+            importTotalCount = 0
+            importProgressFraction = 0.0
         }
 
         do {
@@ -771,30 +914,126 @@ public final class StudioStore {
                 recursive: recursive,
                 combineImages: combineImages
             )
-            var createdIds = resp.createdSessionIds
-
-            if resp.status == "started", !resp.importId.isEmpty {
-                while !Task.isCancelled {
-                    try await Task.sleep(nanoseconds: 350_000_000)
-                    let st = try await apiClient.fetchImportStatus(importId: resp.importId)
-                    importProgressText = st.currentFile ?? "Imported \(st.importedFiles)/\(st.totalFiles)"
-                    if st.status == "completed" || st.status == "cancelled" || st.status == "failed" {
-                        createdIds = st.createdSessionIds
-                        if let err = st.error, !err.isEmpty {
-                            errorMessage = err
-                        }
-                        break
-                    }
-                }
+            let finalStatus = try await handleBackgroundImportResponse(
+                resp,
+                initialTotal: resp.totalFiles,
+                completionLabel: "Folder import"
+            )
+            if let err = finalStatus.error, !err.isEmpty {
+                errorMessage = err
             }
-
-            await refreshSessions()
-            if let firstId = createdIds.first ?? sessions.first?.sessionId {
-                await selectSession(id: firstId)
-            }
-            statusBannerMessage = "Folder import completed"
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    private func handleBackgroundImportResponse(
+        _ resp: DirectoryImportResponseDTO,
+        initialTotal: Int,
+        completionLabel: String
+    ) async throws -> DirectoryImportStatusDTO {
+        importTotalCount = max(initialTotal, resp.totalFiles)
+        var createdIds = resp.createdSessionIds
+        var finalStatus = DirectoryImportStatusDTO(
+            importId: resp.importId,
+            batchId: resp.batchId,
+            status: resp.status,
+            totalFiles: importTotalCount,
+            importedFiles: resp.importedFiles,
+            failedFiles: resp.failedFiles,
+            processedFiles: resp.processedFiles,
+            percent: resp.status == "completed" ? 100 : 0,
+            createdSessions: resp.createdSessions,
+            createdSessionIds: resp.createdSessionIds
+        )
+
+        if resp.status == "started", !resp.importId.isEmpty {
+            activeImportId = resp.importId
+            var lastImportedCount = 0
+            var consecutivePollErrors = 0
+            var selectedFirst = (activeSession != nil)
+
+            while !Task.isCancelled {
+                try await Task.sleep(nanoseconds: 250_000_000)
+
+                let st: DirectoryImportStatusDTO
+                do {
+                    st = try await apiClient.fetchImportStatus(importId: resp.importId)
+                    consecutivePollErrors = 0
+                } catch {
+                    consecutivePollErrors += 1
+                    if consecutivePollErrors >= 5 {
+                        throw error
+                    }
+                    continue
+                }
+
+                finalStatus = st
+                let total = max(1, st.totalFiles > 0 ? st.totalFiles : importTotalCount)
+                let processed = max(st.processedFiles, st.importedFiles + st.failedFiles)
+                importTotalCount = total
+                importProcessedCount = min(processed, total)
+                importProgressFraction = st.percent > 0
+                    ? min(1.0, max(0.0, st.percent / 100.0))
+                    : min(1.0, Double(importProcessedCount) / Double(total))
+
+                if let cur = st.currentFile, !cur.isEmpty {
+                    importProgressText = "Importing \(min(processed + 1, total))/\(total): \(cur)"
+                } else {
+                    importProgressText = "Imported \(st.importedFiles)/\(total) volume\(total == 1 ? "" : "s")"
+                }
+
+                // Stream completed volumes into the sidebar queue live as they finish
+                if st.importedFiles > lastImportedCount {
+                    lastImportedCount = st.importedFiles
+                    if !st.createdSessions.isEmpty {
+                        mergeSessionsIncrementally(st.createdSessions)
+                    } else {
+                        await refreshSessions()
+                    }
+                    if !selectedFirst, let firstId = st.createdSessionIds.first ?? st.createdSessions.first?.sessionId {
+                        selectedFirst = true
+                        await selectSession(id: firstId)
+                    }
+                }
+
+                if st.status == "completed" || st.status == "cancelled" || st.status == "failed" || st.status == "error" {
+                    createdIds = st.createdSessionIds
+                    break
+                }
+            }
+        } else if !resp.createdSessions.isEmpty {
+            mergeSessionsIncrementally(resp.createdSessions)
+        }
+
+        await refreshSessions()
+        if activeSession == nil, let firstId = createdIds.first ?? sessions.first?.sessionId {
+            await selectSession(id: firstId)
+        }
+
+        if finalStatus.status == "cancelled" {
+            statusBannerMessage = "\(completionLabel) cancelled (\(finalStatus.importedFiles) imported)"
+        } else if finalStatus.importedFiles > 0 {
+            let failSuffix = finalStatus.failedFiles > 0 ? " (\(finalStatus.failedFiles) failed)" : ""
+            statusBannerMessage = "Imported \(finalStatus.importedFiles) volume\(finalStatus.importedFiles == 1 ? "" : "s")\(failSuffix)"
+        } else if finalStatus.status == "completed" {
+            statusBannerMessage = "\(completionLabel) completed"
+        }
+
+        return finalStatus
+    }
+
+    private func mergeSessionsIncrementally(_ incoming: [MangaSessionSummary]) {
+        guard !incoming.isEmpty else { return }
+        var byId: [String: MangaSessionSummary] = Dictionary(
+            uniqueKeysWithValues: sessions.map { ($0.sessionId, $0) }
+        )
+        for item in incoming {
+            byId[item.sessionId] = item
+        }
+        sessions = byId.values.sorted {
+            $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
         }
     }
 

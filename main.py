@@ -399,6 +399,13 @@ class DirectoryImportRequest(BaseModel):
     combine_images: Optional[bool] = True
 
 
+class LocalFilesImportRequest(BaseModel):
+    file_paths: list[str]
+    batch_id: Optional[str] = None
+    combine_images: Optional[bool] = False
+    run_async: Optional[bool] = True
+
+
 class PreviewRequest(BaseModel):
     session_id: str
     page_index: int = 0
@@ -768,7 +775,12 @@ async def upload_files(
 
                     cbz_filename = f"{vol_name}.cbz"
                     upload_path = UPLOAD_DIR / f"{session_id}_{cbz_filename}"
-                    pages_meta = file_processor.process_image_files(saved_paths, session_id, cbz_path=str(upload_path))
+                    pages_meta = await asyncio.to_thread(
+                        file_processor.process_image_files,
+                        saved_paths,
+                        session_id,
+                        str(upload_path),
+                    )
                     if not pages_meta:
                         continue
 
@@ -840,7 +852,9 @@ async def upload_files(
                     buffer.write(chunk)
 
             try:
-                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+                pages_meta = await asyncio.to_thread(
+                    file_processor.process_input_file, str(upload_path), session_id
+                )
             except Exception as e:
                 if upload_path.exists():
                     upload_path.unlink(missing_ok=True)
@@ -915,7 +929,9 @@ async def upload_files(
                     buffer.write(chunk)
 
             try:
-                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+                pages_meta = await asyncio.to_thread(
+                    file_processor.process_input_file, str(upload_path), session_id
+                )
             except Exception as e:
                 if upload_path.exists():
                     upload_path.unlink(missing_ok=True)
@@ -1041,6 +1057,332 @@ def normalize_directory_path(raw_path: str) -> Path:
     return resolved
 
 
+def normalize_local_file_path(raw_path: str) -> Path:
+    """Normalizes a user-supplied local file path (stripping quotes, file:// URI, percent-encoding)."""
+    import urllib.parse
+
+    p = raw_path.strip()
+    if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")):
+        p = p[1:-1].strip()
+    if p.startswith("file://"):
+        p = urllib.parse.unquote(urllib.parse.urlparse(p).path)
+    elif p.startswith("file:"):
+        p = urllib.parse.unquote(p[5:])
+    if "%" in p:
+        p = urllib.parse.unquote(p)
+    p = p.replace(r"\ ", " ")
+    return Path(p).expanduser().resolve()
+
+
+def _run_import_items_sync(import_items: list[dict], task_state: dict, effective_batch_id: str):
+    """Processes container volumes and image folders in the background with live progress & cancellation."""
+    for item in import_items:
+        if task_state.get("cancel_requested"):
+            task_state["status"] = "cancelled"
+            break
+
+        if item["type"] == "container":
+            file_p = item["path"]
+            task_state["current_file"] = file_p.name
+            ext = file_p.suffix.lower()
+            session_id = str(uuid.uuid4())
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            upload_path = UPLOAD_DIR / f"{session_id}_{file_p.name}"
+
+            try:
+                shutil.copy2(str(file_p), str(upload_path))
+                pages_meta = file_processor.process_input_file(str(upload_path), session_id)
+                if not pages_meta:
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                    task_state["failed_files"] += 1
+                    continue
+
+                for page in pages_meta:
+                    page["status"] = "pending"
+                    page["colorized_url"] = None
+
+                detected = detect_manga_preset(file_p.name)
+                detected_preset_id = detected.id if detected else None
+                preset_title = detected.title if detected else None
+
+                sess_obj = {
+                    "session_id": session_id,
+                    "batch_id": effective_batch_id,
+                    "filename": file_p.name,
+                    "file_path": str(upload_path),
+                    "ext": ext,
+                    "total_pages": len(pages_meta),
+                    "pages": pages_meta,
+                    "status": "idle",
+                    "processed_count": 0,
+                    "model_provider": "google_nano",
+                    "model_name": "nano-banana",
+                    "detected_preset": detected_preset_id,
+                    "preset_title": preset_title,
+                }
+                if detected:
+                    if detected.recommended_style:
+                        sess_obj["recommended_style"] = detected.recommended_style
+                    pal = CharacterPalette(
+                        characters=[
+                            CharacterEntry(
+                                name=c.name,
+                                hair_hex=c.hair_hex,
+                                skin_hex=c.skin_hex,
+                                costume_hex=c.costume_hex,
+                                extra_hex=c.extra_hex,
+                                eye_hex=getattr(c, "eye_hex", ""),
+                                visual_traits=getattr(c, "visual_traits", []) or [],
+                                notes=getattr(c, "notes", ""),
+                            )
+                            for c in detected.characters
+                        ],
+                        preset_id=detected.id,
+                        preset_title=detected.title,
+                    )
+                    SESSION_PALETTES[session_id] = pal
+                    save_session_palette(session_id, pal)
+
+                SESSIONS[session_id] = sess_obj
+                EVENT_QUEUES[session_id] = []
+                save_session_meta(session_id)
+                task_state["imported_files"] += 1
+                task_state["created_sessions"].append(
+                    {
+                        "session_id": session_id,
+                        "batch_id": effective_batch_id,
+                        "filename": file_p.name,
+                        "ext": ext,
+                        "total_pages": len(pages_meta),
+                        "status": "idle",
+                        "processed_count": 0,
+                        "detected_preset": detected_preset_id,
+                        "preset_title": preset_title,
+                    }
+                )
+            except Exception as e:
+                task_state["failed_files"] += 1
+                print(f"[Local Import Error] {file_p.name}: {e}")
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+
+        elif item["type"] == "image_folder":
+            images = item["images"]
+            vol_name = item["name"]
+
+            task_state["current_file"] = f"{vol_name} ({len(images)} pages)"
+            session_id = str(uuid.uuid4())
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            cbz_filename = f"{vol_name}.cbz"
+            upload_path = UPLOAD_DIR / f"{session_id}_{cbz_filename}"
+
+            try:
+                pages_meta = file_processor.process_image_files(
+                    images, session_id, cbz_path=str(upload_path)
+                )
+                if not pages_meta:
+                    if upload_path.exists():
+                        upload_path.unlink(missing_ok=True)
+                    task_state["failed_files"] += 1
+                    continue
+
+                for page in pages_meta:
+                    page["status"] = "pending"
+                    page["colorized_url"] = None
+
+                detected = detect_manga_preset(vol_name) or (
+                    detect_manga_preset(images[0].name) if images else None
+                )
+                detected_preset_id = detected.id if detected else None
+                preset_title = detected.title if detected else None
+
+                sess_obj = {
+                    "session_id": session_id,
+                    "batch_id": effective_batch_id,
+                    "filename": cbz_filename,
+                    "file_path": str(upload_path),
+                    "ext": ".cbz",
+                    "total_pages": len(pages_meta),
+                    "pages": pages_meta,
+                    "status": "idle",
+                    "processed_count": 0,
+                    "model_provider": "google_nano",
+                    "model_name": "nano-banana",
+                    "detected_preset": detected_preset_id,
+                    "preset_title": preset_title,
+                }
+                if detected:
+                    if detected.recommended_style:
+                        sess_obj["recommended_style"] = detected.recommended_style
+                    pal = CharacterPalette(
+                        characters=[
+                            CharacterEntry(
+                                name=c.name,
+                                hair_hex=c.hair_hex,
+                                skin_hex=c.skin_hex,
+                                costume_hex=c.costume_hex,
+                                extra_hex=c.extra_hex,
+                                eye_hex=getattr(c, "eye_hex", ""),
+                                visual_traits=getattr(c, "visual_traits", []) or [],
+                                notes=getattr(c, "notes", ""),
+                            )
+                            for c in detected.characters
+                        ],
+                        preset_id=detected.id,
+                        preset_title=detected.title,
+                    )
+                    SESSION_PALETTES[session_id] = pal
+                    save_session_palette(session_id, pal)
+
+                SESSIONS[session_id] = sess_obj
+                EVENT_QUEUES[session_id] = []
+                save_session_meta(session_id)
+                task_state["imported_files"] += 1
+                task_state["created_sessions"].append(
+                    {
+                        "session_id": session_id,
+                        "batch_id": effective_batch_id,
+                        "filename": cbz_filename,
+                        "ext": ".cbz",
+                        "total_pages": len(pages_meta),
+                        "status": "idle",
+                        "processed_count": 0,
+                        "detected_preset": detected_preset_id,
+                        "preset_title": preset_title,
+                    }
+                )
+            except Exception as e:
+                task_state["failed_files"] += 1
+                print(f"[Local Import Volume Error] {vol_name}: {e}")
+                if upload_path.exists():
+                    upload_path.unlink(missing_ok=True)
+
+    if task_state["status"] != "cancelled":
+        task_state["status"] = "completed"
+    task_state["current_file"] = None
+
+
+@app.post("/api/import/files")
+async def import_local_files_endpoint(req: LocalFilesImportRequest, background_tasks: BackgroundTasks):
+    """
+    Imports an explicit list of local manga/comic files (.pdf, .epub, .cbz, .zip, images)
+    directly from disk in a background task without HTTP multipart serialization or timeouts.
+    Ideal for native macOS bulk imports (18+ volumes).
+    """
+    if not req.file_paths:
+        raise HTTPException(status_code=400, detail="No file paths provided.")
+
+    CONTAINER_EXTENSIONS = {".pdf", ".epub", ".zip", ".cbz"}
+    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"}
+
+    container_files: list[Path] = []
+    image_files: list[Path] = []
+    seen: set[str] = set()
+
+    for raw in req.file_paths:
+        if not raw or not raw.strip():
+            continue
+        try:
+            p = normalize_local_file_path(raw)
+        except Exception:
+            continue
+        key = str(p)
+        if key in seen or not p.exists() or not p.is_file() or p.name.startswith("."):
+            continue
+        seen.add(key)
+        ext = p.suffix.lower()
+        if ext in CONTAINER_EXTENSIONS:
+            container_files.append(p)
+        elif ext in IMAGE_EXTENSIONS:
+            image_files.append(p)
+
+    import_items: list[dict] = []
+    should_combine_images = bool(
+        req.combine_images or (len(image_files) > 1 and len(container_files) == 0)
+    )
+    if image_files:
+        if should_combine_images:
+            # Group loose images by parent folder so multi-folder drops stay grouped cleanly
+            by_folder: dict[Path, list[Path]] = {}
+            for img_p in image_files:
+                by_folder.setdefault(img_p.parent, []).append(img_p)
+            for folder_p, imgs in by_folder.items():
+                imgs.sort(key=lambda x: file_processor.natural_sort_key(x.name))
+                vol_name = file_processor.derive_volume_name(
+                    [x.name for x in imgs], fallback_folder=folder_p.name
+                )
+                import_items.append(
+                    {
+                        "type": "image_folder",
+                        "folder": folder_p,
+                        "name": vol_name,
+                        "images": imgs,
+                    }
+                )
+        else:
+            for img_p in image_files:
+                import_items.append({"type": "container", "path": img_p, "name": img_p.name})
+
+    for cf in container_files:
+        import_items.append({"type": "container", "path": cf, "name": cf.name})
+
+    import_items.sort(key=lambda x: file_processor.natural_sort_key(x["name"]))
+
+    if not import_items:
+        raise HTTPException(
+            status_code=400, detail="No supported local ebook or image files found in selection."
+        )
+
+    import_id = str(uuid.uuid4())
+    effective_batch_id = req.batch_id or str(uuid.uuid4())
+    parent_label = str(import_items[0].get("path", import_items[0].get("folder", "")))
+
+    task_state = {
+        "import_id": import_id,
+        "batch_id": effective_batch_id,
+        "directory": parent_label,
+        "status": "running",
+        "total_files": len(import_items),
+        "imported_files": 0,
+        "failed_files": 0,
+        "current_file": import_items[0]["name"],
+        "created_sessions": [],
+        "error": None,
+        "cancel_requested": False,
+    }
+    IMPORT_TASKS[import_id] = task_state
+
+    if req.run_async:
+        background_tasks.add_task(_run_import_items_sync, import_items, task_state, effective_batch_id)
+        return JSONResponse(
+            {
+                "status": "started",
+                "import_id": import_id,
+                "batch_id": effective_batch_id,
+                "total_files": len(import_items),
+                "total_scanned_files": len(import_items),
+                "message": f"Started background import of {len(import_items)} volume(s)",
+            }
+        )
+    else:
+        await asyncio.to_thread(_run_import_items_sync, import_items, task_state, effective_batch_id)
+        return JSONResponse(
+            {
+                "status": "completed",
+                "import_id": import_id,
+                "batch_id": effective_batch_id,
+                "total_files": len(import_items),
+                "total_scanned_files": len(import_items),
+                "imported_files": task_state["imported_files"],
+                "processed_files": task_state["imported_files"] + task_state["failed_files"],
+                "failed_files": task_state["failed_files"],
+                "created_sessions": task_state["created_sessions"],
+                "created_session_ids": [s["session_id"] for s in task_state["created_sessions"]],
+            }
+        )
+
+
 @app.post("/api/import/directory")
 async def import_directory_endpoint(req: DirectoryImportRequest, background_tasks: BackgroundTasks):
     """
@@ -1142,188 +1484,8 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
     }
     IMPORT_TASKS[import_id] = task_state
 
-    def _process_import():
-        for item in import_items:
-            if task_state.get("cancel_requested"):
-                task_state["status"] = "cancelled"
-                break
-
-            if item["type"] == "container":
-                file_p = item["path"]
-                task_state["current_file"] = file_p.name
-                ext = file_p.suffix.lower()
-                session_id = str(uuid.uuid4())
-                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-                upload_path = UPLOAD_DIR / f"{session_id}_{file_p.name}"
-
-                try:
-                    shutil.copy2(str(file_p), str(upload_path))
-                    pages_meta = file_processor.process_input_file(str(upload_path), session_id)
-                    if not pages_meta:
-                        if upload_path.exists():
-                            upload_path.unlink(missing_ok=True)
-                        task_state["failed_files"] += 1
-                        continue
-
-                    for page in pages_meta:
-                        page["status"] = "pending"
-                        page["colorized_url"] = None
-
-                    detected = detect_manga_preset(file_p.name)
-                    detected_preset_id = detected.id if detected else None
-                    preset_title = detected.title if detected else None
-
-                    sess_obj = {
-                        "session_id": session_id,
-                        "batch_id": effective_batch_id,
-                        "filename": file_p.name,
-                        "file_path": str(upload_path),
-                        "ext": ext,
-                        "total_pages": len(pages_meta),
-                        "pages": pages_meta,
-                        "status": "idle",
-                        "processed_count": 0,
-                        "model_provider": "google_nano",
-                        "model_name": "nano-banana",
-                        "detected_preset": detected_preset_id,
-                        "preset_title": preset_title,
-                    }
-                    if detected:
-                        if detected.recommended_style:
-                            sess_obj["recommended_style"] = detected.recommended_style
-                        pal = CharacterPalette(
-                            characters=[
-                                CharacterEntry(
-                                    name=c.name,
-                                    hair_hex=c.hair_hex,
-                                    skin_hex=c.skin_hex,
-                                    costume_hex=c.costume_hex,
-                                    extra_hex=c.extra_hex,
-                                    eye_hex=getattr(c, "eye_hex", ""),
-                                    visual_traits=getattr(c, "visual_traits", []) or [],
-                                    notes=getattr(c, "notes", ""),
-                                )
-                                for c in detected.characters
-                            ],
-                            preset_id=detected.id,
-                            preset_title=detected.title,
-                        )
-                        SESSION_PALETTES[session_id] = pal
-                        save_session_palette(session_id, pal)
-
-                    SESSIONS[session_id] = sess_obj
-                    EVENT_QUEUES[session_id] = []
-                    save_session_meta(session_id)
-                    task_state["imported_files"] += 1
-                    task_state["created_sessions"].append({
-                        "session_id": session_id,
-                        "batch_id": effective_batch_id,
-                        "filename": file_p.name,
-                        "ext": ext,
-                        "total_pages": len(pages_meta),
-                        "status": "idle",
-                        "processed_count": 0,
-                        "detected_preset": detected_preset_id,
-                        "preset_title": preset_title,
-                    })
-                except Exception as e:
-                    task_state["failed_files"] += 1
-                    print(f"[Directory Import Error] {file_p.name}: {e}")
-                    if upload_path.exists():
-                        upload_path.unlink(missing_ok=True)
-
-            elif item["type"] == "image_folder":
-                folder_p = item["folder"]
-                images = item["images"]
-                vol_name = item["name"]
-
-                task_state["current_file"] = f"{vol_name} ({len(images)} pages)"
-                session_id = str(uuid.uuid4())
-                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-                cbz_filename = f"{vol_name}.cbz"
-                upload_path = UPLOAD_DIR / f"{session_id}_{cbz_filename}"
-
-                try:
-                    pages_meta = file_processor.process_image_files(images, session_id, cbz_path=str(upload_path))
-                    if not pages_meta:
-                        if upload_path.exists():
-                            upload_path.unlink(missing_ok=True)
-                        task_state["failed_files"] += 1
-                        continue
-
-                    for page in pages_meta:
-                        page["status"] = "pending"
-                        page["colorized_url"] = None
-
-                    detected = detect_manga_preset(vol_name) or (detect_manga_preset(images[0].name) if images else None)
-                    detected_preset_id = detected.id if detected else None
-                    preset_title = detected.title if detected else None
-
-                    sess_obj = {
-                        "session_id": session_id,
-                        "batch_id": effective_batch_id,
-                        "filename": cbz_filename,
-                        "file_path": str(upload_path),
-                        "ext": ".cbz",
-                        "total_pages": len(pages_meta),
-                        "pages": pages_meta,
-                        "status": "idle",
-                        "processed_count": 0,
-                        "model_provider": "google_nano",
-                        "model_name": "nano-banana",
-                        "detected_preset": detected_preset_id,
-                        "preset_title": preset_title,
-                    }
-                    if detected:
-                        if detected.recommended_style:
-                            sess_obj["recommended_style"] = detected.recommended_style
-                        pal = CharacterPalette(
-                            characters=[
-                                CharacterEntry(
-                                    name=c.name,
-                                    hair_hex=c.hair_hex,
-                                    skin_hex=c.skin_hex,
-                                    costume_hex=c.costume_hex,
-                                    extra_hex=c.extra_hex,
-                                    eye_hex=getattr(c, "eye_hex", ""),
-                                    visual_traits=getattr(c, "visual_traits", []) or [],
-                                    notes=getattr(c, "notes", ""),
-                                )
-                                for c in detected.characters
-                            ],
-                            preset_id=detected.id,
-                            preset_title=detected.title,
-                        )
-                        SESSION_PALETTES[session_id] = pal
-                        save_session_palette(session_id, pal)
-
-                    SESSIONS[session_id] = sess_obj
-                    EVENT_QUEUES[session_id] = []
-                    save_session_meta(session_id)
-                    task_state["imported_files"] += 1
-                    task_state["created_sessions"].append({
-                        "session_id": session_id,
-                        "batch_id": effective_batch_id,
-                        "filename": cbz_filename,
-                        "ext": ".cbz",
-                        "total_pages": len(pages_meta),
-                        "status": "idle",
-                        "processed_count": 0,
-                        "detected_preset": detected_preset_id,
-                        "preset_title": preset_title,
-                    })
-                except Exception as e:
-                    task_state["failed_files"] += 1
-                    print(f"[Directory Import Volume Error] {vol_name}: {e}")
-                    if upload_path.exists():
-                        upload_path.unlink(missing_ok=True)
-
-        if task_state["status"] != "cancelled":
-            task_state["status"] = "completed"
-        task_state["current_file"] = None
-
     if req.run_async:
-        background_tasks.add_task(_process_import)
+        background_tasks.add_task(_run_import_items_sync, import_items, task_state, effective_batch_id)
         return JSONResponse({
             "status": "started",
             "import_id": import_id,
@@ -1333,7 +1495,7 @@ async def import_directory_endpoint(req: DirectoryImportRequest, background_task
             "message": f"Started background import of {len(import_items)} item(s) from {dir_path.name}"
         })
     else:
-        _process_import()
+        await asyncio.to_thread(_run_import_items_sync, import_items, task_state, effective_batch_id)
         return JSONResponse({
             "status": "completed",
             "import_id": import_id,

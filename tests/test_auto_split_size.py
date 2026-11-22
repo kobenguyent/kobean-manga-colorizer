@@ -198,3 +198,61 @@ def test_ui_contains_split_size_options():
     js = Path("static/app.js").read_text(encoding="utf-8")
     assert "combined-custom-size-input" in js
     assert "size_custom" in js
+
+
+def test_omnibus_zip_recognized_by_libmagic_and_macos_tools(tmp_path):
+    """
+    Regression test for macOS Archive Utility 'It is in an unsupported format.' error.
+
+    When a >1 MiB ZIP stores an `.epub` as its first entry, macOS's `/usr/share/file/magic/archive`
+    generic-ZIP rule (`>>30 search/100/b !application/epub+zip`) rejects the archive if the inner
+    EPUB's uncompressed `application/epub+zip` mimetype falls inside bytes 30..130.
+    """
+    import subprocess
+    from file_processor import _write_compatible_zip
+
+    # Create two >1.5 MiB EPUBs so the archive exceeds libmagic's read buffer (cannot fall back to EOCD)
+    epubs = []
+    for idx in (1, 2):
+        epub_path = tmp_path / f"Part_{idx:02d}.epub"
+        with zipfile.ZipFile(epub_path, "w", compression=zipfile.ZIP_STORED) as ez:
+            ez.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            ez.writestr("OEBPS/images/p001.jpg", os.urandom(1_600_000), compress_type=zipfile.ZIP_STORED)
+        epubs.append((str(epub_path), epub_path.name))
+
+    out_zip = str(tmp_path / "Omnibus_Test.zip")
+    result = _write_compatible_zip(epubs, out_zip)
+    assert result == out_zip
+    assert Path(out_zip).exists()
+
+    # Verify byte layout: `application/epub+zip` must NOT appear inside bytes 30..150
+    with open(out_zip, "rb") as f:
+        head = f.read(256)
+    assert head.startswith(b"PK\x03\x04")
+    assert b"application/epub+zip" not in head[30:150]
+    assert b"application/epub+zip" in head[160:]
+
+    # Verify ZIP integrity, namelist, and Unix S_IFREG permissions
+    with zipfile.ZipFile(out_zip, "r") as zf:
+        assert zf.testzip() is None
+        assert zf.namelist() == ["Part_01.epub", "Part_02.epub"]
+        for info in zf.infolist():
+            assert info.create_system == 3
+            assert (info.external_attr >> 16) == 0o100644
+
+    # Verify external OS tools when present (macOS `file`, `unzip`, `ditto`)
+    if shutil.which("file"):
+        file_out = subprocess.run(["file", out_zip], capture_output=True, text=True, check=True).stdout
+        assert "Zip archive data" in file_out, f"libmagic failed to identify ZIP: {file_out}"
+
+    if shutil.which("unzip"):
+        unzip_res = subprocess.run(["unzip", "-t", out_zip], capture_output=True, text=True)
+        assert unzip_res.returncode == 0, unzip_res.stderr
+
+    if shutil.which("ditto"):
+        extract_dir = tmp_path / "ditto_extracted"
+        extract_dir.mkdir()
+        ditto_res = subprocess.run(["ditto", "-x", "-k", out_zip, str(extract_dir)], capture_output=True, text=True)
+        assert ditto_res.returncode == 0, ditto_res.stderr
+        assert sorted(p.name for p in extract_dir.iterdir()) == ["Part_01.epub", "Part_02.epub"]
+        assert (extract_dir / "Part_01.epub").read_bytes() == (tmp_path / "Part_01.epub").read_bytes()

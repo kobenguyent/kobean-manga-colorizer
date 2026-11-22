@@ -341,7 +341,12 @@ struct MainStudioSplitView: View {
                     .tint(theme.accentPrimary)
             }
 
-            if store.isColorizing {
+            if store.isImporting {
+                Button("Cancel") {
+                    Task { await store.cancelImport() }
+                }
+                .studioButtonStyle(.destructive, theme: theme, size: .small)
+            } else if store.isColorizing {
                 Button("Cancel") {
                     Task { await store.cancelColorization() }
                 }
@@ -413,10 +418,15 @@ struct MainStudioSplitView: View {
 
     private func activeJobProgressInfo() -> (title: String, counter: String, fraction: Double) {
         if store.isImporting {
+            let total = store.importTotalCount
+            let processed = store.importProcessedCount
+            let fraction = min(1.0, max(0.0, store.importProgressFraction))
+            let pct = Int((fraction * 100).rounded())
+            let counter = total > 0 ? "\(processed)/\(total) (\(pct)%)" : "Scanning…"
             return (
-                store.importProgressText.isEmpty ? "Importing Manga Files…" : store.importProgressText,
-                "Importing",
-                0.5
+                store.importProgressText.isEmpty ? "Importing Manga Volumes…" : store.importProgressText,
+                counter,
+                fraction
             )
         }
         if store.isTrainingAdapter, let adapter = store.adapterStatus {

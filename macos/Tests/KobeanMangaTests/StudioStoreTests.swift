@@ -414,9 +414,159 @@ final class StudioStoreTests: XCTestCase {
         XCTAssertFalse(store.isColorizing) // stream finishes cleanly and clears busy flag
 
         await store.importDirectory(url: URL(fileURLWithPath: "/tmp/manga_folder"))
-        XCTAssertEqual(store.statusBannerMessage, "Folder import completed")
+        XCTAssertTrue(
+            store.statusBannerMessage?.contains("Imported") == true
+                || store.statusBannerMessage?.contains("Folder import") == true
+        )
 
         store.shutdownSynchronously()
+    }
+
+    func testBulkImport18VolumesUsesLocalAsyncImportWithLiveProgressAndStreaming() async {
+        let mockAPI = MockStudioAPIClient()
+        let eighteenURLs = (1...18).reversed().map { idx in
+            URL(fileURLWithPath: "/tmp/manga/Dr_Slump_Vol_\(idx).cbz")
+        }
+
+        // Simulate progressive background import over 3 status polls: 6 -> 12 -> 18 volumes
+        let allSummaries = (1...18).map { idx in
+            MangaSessionSummary(
+                sessionId: "vol-\(idx)",
+                filename: "Dr_Slump_Vol_\(idx).cbz",
+                ext: ".cbz",
+                totalPages: 180,
+                processedCount: 0,
+                status: "idle"
+            )
+        }
+        mockAPI.importLocalFilesResponse = DirectoryImportResponseDTO(
+            status: "started",
+            importId: "imp-18",
+            batchId: "batch-18",
+            totalFiles: 18,
+            totalScannedFiles: 18
+        )
+        mockAPI.importStatusSequence = [
+            DirectoryImportStatusDTO(
+                importId: "imp-18",
+                batchId: "batch-18",
+                status: "running",
+                totalFiles: 18,
+                importedFiles: 6,
+                failedFiles: 0,
+                processedFiles: 6,
+                currentFile: "Dr_Slump_Vol_7.cbz",
+                percent: 33.3,
+                createdSessions: Array(allSummaries.prefix(6)),
+                createdSessionIds: allSummaries.prefix(6).map(\.sessionId)
+            ),
+            DirectoryImportStatusDTO(
+                importId: "imp-18",
+                batchId: "batch-18",
+                status: "running",
+                totalFiles: 18,
+                importedFiles: 12,
+                failedFiles: 0,
+                processedFiles: 12,
+                currentFile: "Dr_Slump_Vol_13.cbz",
+                percent: 66.7,
+                createdSessions: Array(allSummaries.prefix(12)),
+                createdSessionIds: allSummaries.prefix(12).map(\.sessionId)
+            ),
+            DirectoryImportStatusDTO(
+                importId: "imp-18",
+                batchId: "batch-18",
+                status: "completed",
+                totalFiles: 18,
+                importedFiles: 18,
+                failedFiles: 0,
+                processedFiles: 18,
+                currentFile: nil,
+                percent: 100.0,
+                createdSessions: allSummaries,
+                createdSessionIds: allSummaries.map(\.sessionId)
+            ),
+        ]
+        mockAPI.sessionsToReturn = allSummaries
+
+        let store = StudioStore(
+            apiClient: mockAPI,
+            supervisor: BackendSupervisor(),
+            keychain: KeychainHelper(inMemory: true),
+            userDefaults: makeIsolatedDefaults()
+        )
+
+        await store.uploadFiles(eighteenURLs)
+
+        // Must use fast zero-copy /api/import/files instead of 1 giant multipart HTTP upload
+        XCTAssertEqual(mockAPI.importLocalFilesCalledPaths.count, 18)
+        XCTAssertEqual(mockAPI.uploadFilesCallCount, 0)
+        // Must naturally sort Vol_1 before Vol_2 and Vol_10
+        XCTAssertEqual(
+            URL(fileURLWithPath: mockAPI.importLocalFilesCalledPaths[0]).lastPathComponent,
+            "Dr_Slump_Vol_1.cbz"
+        )
+        XCTAssertEqual(
+            URL(fileURLWithPath: mockAPI.importLocalFilesCalledPaths[1]).lastPathComponent,
+            "Dr_Slump_Vol_2.cbz"
+        )
+        XCTAssertEqual(
+            URL(fileURLWithPath: mockAPI.importLocalFilesCalledPaths[17]).lastPathComponent,
+            "Dr_Slump_Vol_18.cbz"
+        )
+        XCTAssertEqual(store.sessions.count, 18)
+        XCTAssertFalse(store.isImporting)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.statusBannerMessage, "Imported 18 volumes")
+    }
+
+    func testBulkImport18VolumesFallsBackToPerVolumeChunkedUploadsWhenEndpointMissing() async {
+        let mockAPI = MockStudioAPIClient()
+        mockAPI.importLocalFilesError = StudioAPIError.httpError(statusCode: 404, detail: "Not Found")
+
+        let eighteenURLs = (1...18).map { idx in
+            URL(fileURLWithPath: "/tmp/manga/Vol_\(idx).pdf")
+        }
+
+        let store = StudioStore(
+            apiClient: mockAPI,
+            supervisor: BackendSupervisor(),
+            keychain: KeychainHelper(inMemory: true),
+            userDefaults: makeIsolatedDefaults()
+        )
+
+        await store.uploadFiles(eighteenURLs)
+
+        // Must chunk into 18 single-volume HTTP requests (1 per volume), never 1 giant 18-volume request
+        XCTAssertEqual(mockAPI.uploadFilesCallCount, 18)
+        XCTAssertTrue(mockAPI.uploadFilesBatchSizes.allSatisfy { $0 == 1 })
+        XCTAssertFalse(store.isImporting)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.statusBannerMessage, "Imported 18 volumes")
+    }
+
+    func testAPIClientRequestTimeoutOverridesFoundation60SecondDefault() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 300
+        cfg.protocolClasses = [StubURLProtocol.self]
+        let stubSession = URLSession(configuration: cfg)
+        let client = StudioAPIClient(baseURL: URL(string: "http://127.0.0.1:8000")!, session: stubSession)
+
+        var observedTimeout: TimeInterval = 0
+        StubURLProtocol.handler = { req in
+            observedTimeout = req.timeoutInterval
+            let data = #"{"sessions":[]}"#.data(using: .utf8)!
+            let resp = HTTPURLResponse(
+                url: req.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (resp, data)
+        }
+
+        _ = try await client.fetchSessions()
+        XCTAssertGreaterThanOrEqual(observedTimeout, 300.0)
     }
 
     func testLocateWorkspaceRootHonorsInfoDictionaryWorkspacePath() throws {
@@ -574,6 +724,14 @@ private final class MockStudioAPIClient: StudioAPIClientProtocol, @unchecked Sen
     var sessionsToReturn: [MangaSessionSummary] = []
     var recognizedCharactersToReturn: [RecognizedCharacterDTO] = []
     var combinedExportEventsToStream: [SSECombinedExportEvent] = []
+    var importLocalFilesResponse: DirectoryImportResponseDTO?
+    var importLocalFilesError: Error?
+    var importLocalFilesCalledPaths: [String] = []
+    var importStatusSequence: [DirectoryImportStatusDTO] = []
+    var importStatusPollIndex: Int = 0
+    var cancelledImportIds: [String] = []
+    var uploadFilesCallCount: Int = 0
+    var uploadFilesBatchSizes: [Int] = []
     var sessionDetailToReturn = MangaSessionDetail(
         sessionId: "s1",
         filename: "Sample.cbz",
@@ -601,7 +759,49 @@ private final class MockStudioAPIClient: StudioAPIClientProtocol, @unchecked Sen
     func deletePage(sessionId: String, pageIndex: Int) async throws -> MangaSessionDetail { sessionDetailToReturn }
 
     func uploadFiles(fileURLs: [URL], batchId: String?, combineImages: Bool) async throws -> UploadResponseDTO {
-        UploadResponseDTO(status: "success", batchId: batchId ?? "b1", totalFiles: fileURLs.count, sessions: sessionsToReturn, sessionId: "s1", filename: "Sample.cbz", totalPages: 2)
+        uploadFilesCallCount += 1
+        uploadFilesBatchSizes.append(fileURLs.count)
+        let firstName = fileURLs.first?.lastPathComponent ?? "Sample.cbz"
+        let sess = MangaSessionSummary(
+            sessionId: "up-\(uploadFilesCallCount)",
+            filename: firstName,
+            ext: ".\(fileURLs.first?.pathExtension ?? "cbz")",
+            totalPages: 2,
+            processedCount: 0,
+            status: "idle"
+        )
+        return UploadResponseDTO(
+            status: "success",
+            batchId: batchId ?? "b1",
+            totalFiles: fileURLs.count,
+            sessions: [sess],
+            sessionId: sess.sessionId,
+            filename: firstName,
+            totalPages: 2
+        )
+    }
+
+    func importLocalFiles(paths: [String], batchId: String?, combineImages: Bool) async throws -> DirectoryImportResponseDTO {
+        importLocalFilesCalledPaths = paths
+        if let err = importLocalFilesError {
+            throw err
+        }
+        if let custom = importLocalFilesResponse {
+            return custom
+        }
+        return DirectoryImportResponseDTO(
+            status: "completed",
+            importId: "imp-local",
+            batchId: batchId ?? "b1",
+            totalFiles: paths.count,
+            totalScannedFiles: paths.count,
+            importedFiles: paths.count,
+            processedFiles: paths.count,
+            failedFiles: 0,
+            createdSessions: sessionsToReturn,
+            createdSessionIds: sessionsToReturn.map(\.sessionId),
+            message: "OK"
+        )
     }
 
     func importDirectory(path: String, recursive: Bool, combineImages: Bool) async throws -> DirectoryImportResponseDTO {
@@ -609,7 +809,16 @@ private final class MockStudioAPIClient: StudioAPIClientProtocol, @unchecked Sen
     }
 
     func fetchImportStatus(importId: String) async throws -> DirectoryImportStatusDTO {
-        DirectoryImportStatusDTO(importId: importId, batchId: "b1", directory: "/tmp", status: "completed", totalFiles: 1, importedFiles: 1, failedFiles: 0, currentFile: nil, percent: 100, createdSessionIds: ["s1"], error: nil)
+        if !importStatusSequence.isEmpty {
+            let idx = min(importStatusPollIndex, importStatusSequence.count - 1)
+            importStatusPollIndex += 1
+            return importStatusSequence[idx]
+        }
+        return DirectoryImportStatusDTO(importId: importId, batchId: "b1", directory: "/tmp", status: "completed", totalFiles: 1, importedFiles: 1, failedFiles: 0, currentFile: nil, percent: 100, createdSessionIds: ["s1"], error: nil)
+    }
+
+    func cancelImport(importId: String) async throws {
+        cancelledImportIds.append(importId)
     }
 
     func previewPage(sessionId: String, pageIndex: Int, config: ColorizeConfig) async throws -> PreviewResultDTO {
