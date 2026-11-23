@@ -191,48 +191,77 @@ struct DocumentQueueSidebar: View {
         }
     }
 
+    private var batchActionTitle: String {
+        let count = store.batchTargetSessionIds.count
+        if store.isBatchColorizing, let status = store.batchStatus, status.totalDocs > 0 {
+            let current = min(status.totalDocs, status.currentIndex + 1)
+            return "Colorizing Volume \(current)/\(status.totalDocs)…"
+        }
+        if store.hasPartialVolumeSelection {
+            return "Colorize Checked (\(count))"
+        }
+        if store.hasCompletedAndIncompleteVolumes {
+            return "Resume Remaining (\(count))"
+        }
+        return "Colorize All (\(count))"
+    }
+
     private func footerBatchBar(theme: StudioTheme) -> some View {
-        HStack(spacing: 6) {
-            Text("\(store.sessions.count) vol · \(totalQueuedPages) pages")
-                .font(.caption2.weight(.medium))
-                .monospacedDigit()
-                .foregroundStyle(theme.textSecondary)
-                .lineLimit(1)
-
-            Spacer(minLength: 4)
-
-            Button(store.selectedSessionIds.count == store.sessions.count && !store.sessions.isEmpty ? "None" : "All") {
-                if store.selectedSessionIds.count == store.sessions.count {
-                    store.deselectAllSessions()
-                } else {
-                    store.selectAllSessions()
+        VStack(spacing: 8) {
+            if !store.sessions.isEmpty {
+                Button {
+                    Task { await store.startBatchColorization() }
+                } label: {
+                    Label(
+                        batchActionTitle,
+                        systemImage: store.isBatchColorizing ? "sparkles" : "play.fill"
+                    )
+                    .monospacedDigit()
+                    .frame(maxWidth: .infinity)
                 }
+                .studioButtonStyle(.prominent, theme: theme, size: .small, tint: theme.accentSecondary)
+                .disabled(store.sessions.isEmpty || store.isColorizing)
+                .help(
+                    store.hasPartialVolumeSelection
+                        ? "Start colorizing the \(store.batchTargetSessionIds.count) checked volumes sequentially"
+                        : "Start colorizing all \(store.sessions.count) queued volumes sequentially (⇧⌘R)"
+                )
             }
-            .studioButtonStyle(.secondary, theme: theme, size: .small)
-            .disabled(store.sessions.isEmpty)
 
-            Button {
-                Task { await store.startBatchColorization() }
-            } label: {
-                Label("Batch", systemImage: "play.fill")
-            }
-            .studioButtonStyle(.prominent, theme: theme, size: .small, tint: theme.accentSecondary)
-            .disabled(store.sessions.isEmpty || store.isColorizing)
+            HStack(spacing: 6) {
+                Text("\(store.sessions.count) vol · \(totalQueuedPages) pages")
+                    .font(.caption2.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
 
-            Button(role: .destructive) {
-                Task {
-                    if store.selectedSessionIds.isEmpty {
-                        await store.deleteAllSessions()
+                Spacer(minLength: 4)
+
+                Button(store.selectedSessionIds.count == store.sessions.count && !store.sessions.isEmpty ? "None" : "Select All") {
+                    if store.selectedSessionIds.count == store.sessions.count {
+                        store.deselectAllSessions()
                     } else {
-                        await store.bulkDeleteSelectedSessions()
+                        store.selectAllSessions()
                     }
                 }
-            } label: {
-                Image(systemName: "trash")
+                .studioButtonStyle(.secondary, theme: theme, size: .small)
+                .disabled(store.sessions.isEmpty)
+
+                Button(role: .destructive) {
+                    Task {
+                        if store.selectedSessionIds.isEmpty {
+                            await store.deleteAllSessions()
+                        } else {
+                            await store.bulkDeleteSelectedSessions()
+                        }
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .studioButtonStyle(.destructive, theme: theme, size: .small)
+                .disabled(store.sessions.isEmpty)
+                .help(store.selectedSessionIds.isEmpty ? "Clear All Queued Sessions" : "Delete Checked Sessions")
             }
-            .studioButtonStyle(.destructive, theme: theme, size: .small)
-            .disabled(store.sessions.isEmpty)
-            .help(store.selectedSessionIds.isEmpty ? "Clear All Queued Sessions" : "Delete Checked Sessions")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)

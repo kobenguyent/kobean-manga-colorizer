@@ -89,12 +89,27 @@ private struct EngineActionDock: View {
 
     private var primaryColorizeTitle: String {
         if !store.selectedPageIndices.isEmpty {
-            return "Start Colorize Selected (\(store.selectedPageIndices.count))"
+            return "Colorize Selected Pages (\(store.selectedPageIndices.count))"
         }
         if let total = store.activeSession?.pages.count, total > 0 {
-            return "Select All & Colorize (\(total))"
+            return "Colorize Current Volume (\(total)p)"
         }
-        return "Start Colorize Selected (0)"
+        return "Colorize Current Volume"
+    }
+
+    private var colorizeAllVolumesTitle: String {
+        let count = store.batchTargetSessionIds.count
+        if store.isBatchColorizing, let status = store.batchStatus, status.totalDocs > 0 {
+            let current = min(status.totalDocs, status.currentIndex + 1)
+            return "Colorizing Volume \(current)/\(status.totalDocs)…"
+        }
+        if store.hasPartialVolumeSelection {
+            return "Colorize Checked Volumes (\(count))"
+        }
+        if store.hasCompletedAndIncompleteVolumes {
+            return "Resume Remaining (\(count)/\(store.sessions.count) Vols)"
+        }
+        return "Colorize All Volumes (\(count))"
     }
 
     var body: some View {
@@ -126,25 +141,27 @@ private struct EngineActionDock: View {
             .studioButtonStyle(.prominent, theme: theme, size: .regular)
             .disabled(!hasSession || !hasPages || store.isColorizing)
 
-            HStack(spacing: 8) {
-                Button {
-                    Task { await store.resumeColorization() }
-                } label: {
-                    Label("Resume", systemImage: "play.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .studioButtonStyle(.secondary, theme: theme, size: .small)
-                .disabled(!hasSession || store.isColorizing)
-
+            if store.sessions.count > 1 || !store.selectedSessionIds.isEmpty {
                 Button {
                     Task { await store.startBatchColorization() }
                 } label: {
-                    Label("Batch Queue", systemImage: "square.stack.3d.up")
+                    Label(colorizeAllVolumesTitle, systemImage: "square.stack.3d.up.fill")
+                        .monospacedDigit()
                         .frame(maxWidth: .infinity)
                 }
-                .studioButtonStyle(.secondary, theme: theme, size: .small, tint: theme.accentSecondary)
+                .studioButtonStyle(.prominent, theme: theme, size: .regular, tint: theme.accentSecondary)
                 .disabled(store.sessions.isEmpty || store.isColorizing)
+                .help("Sequentially colorize all queued (or checked) manga volumes (⇧⌘R)")
             }
+
+            Button {
+                Task { await store.resumeColorization() }
+            } label: {
+                Label("Resume Current Volume", systemImage: "play.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .studioButtonStyle(.secondary, theme: theme, size: .small)
+            .disabled(!hasSession || store.isColorizing)
         }
         .padding(12)
         .background(theme.bgHeader)

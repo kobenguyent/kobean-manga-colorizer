@@ -126,7 +126,9 @@ for py_file in \
   series_memory.py \
   pyproject.toml \
   requirements.txt \
-  uv.lock; do
+  uv.lock \
+  README.md \
+  LICENSE; do
   if [[ -f "${REPO_ROOT}/${py_file}" ]]; then
     cp -f "${REPO_ROOT}/${py_file}" "${BACKEND_DEST}/${py_file}"
   fi

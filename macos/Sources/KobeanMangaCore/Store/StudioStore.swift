@@ -208,6 +208,7 @@ public final class StudioStore {
     public var lastDownloadedFileURL: URL?
 
     @ObservationIgnored private var colorizeStreamTask: Task<Void, Never>?
+    @ObservationIgnored private var batchPollTask: Task<Void, Never>?
     @ObservationIgnored private var exportStreamTask: Task<Void, Never>?
     @ObservationIgnored private var persistPreferencesTask: Task<Void, Never>?
     @ObservationIgnored private var startupUpdateCheckTask: Task<Void, Never>?
@@ -527,6 +528,7 @@ public final class StudioStore {
         do {
             try updateInstallerHandler(plan)
             colorizeStreamTask?.cancel()
+            batchPollTask?.cancel()
             exportStreamTask?.cancel()
             startupUpdateCheckTask?.cancel()
             shutdownSynchronously()
@@ -541,12 +543,43 @@ public final class StudioStore {
         errorMessage = nil
         backendState = .starting(port: preferredPort)
 
+        await supervisor.setStateChangeHandler { [weak self] newState in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.backendState = newState
+                if case .failed = newState {
+                    let wasWorking = self.isColorizing || self.isBatchColorizing || self.isImporting || self.isExporting
+                    self.batchPollTask?.cancel()
+                    self.batchPollTask = nil
+                    self.colorizeStreamTask?.cancel()
+                    self.isColorizing = false
+                    self.isTranslating = false
+                    self.batchStatus?.isRunning = false
+                    self.backendLogs = await self.supervisor.recentLogs()
+                    if wasWorking {
+                        self.errorMessage = "Backend engine stopped unexpectedly. All completed pages are saved — click Restart Engine, then click Resume Remaining to continue."
+                    } else if case .failed(let reason) = newState {
+                        self.errorMessage = reason
+                    }
+                }
+            }
+        }
+
         let hintURL: URL? = workspacePathOverride.isEmpty
             ? nil
             : URL(fileURLWithPath: workspacePathOverride)
 
         do {
-            let url = try await supervisor.start(preferredPort: preferredPort, workspaceHint: hintURL)
+            let url = try await supervisor.start(
+                preferredPort: preferredPort,
+                workspaceHint: hintURL,
+                statusUpdate: { [weak self] message in
+                    Task { @MainActor [weak self] in
+                        self?.statusBannerMessage = message
+                    }
+                }
+            )
+            statusBannerMessage = nil
             apiClient.updateBaseURL(url)
             backendState = await supervisor.state
             backendLogs = await supervisor.recentLogs()
@@ -564,7 +597,20 @@ public final class StudioStore {
             if let first = sessions.first {
                 await selectSession(id: first.sessionId)
             }
+
+            if let runningBatch = try? await apiClient.fetchBatchStatus(), runningBatch.isRunning {
+                self.batchStatus = runningBatch
+                self.isColorizing = true
+                if let currentSid = runningBatch.currentSessionId {
+                    if self.activeSession?.sessionId != currentSid {
+                        await self.selectSession(id: currentSid)
+                    }
+                    self.startColorizeStream(sessionId: currentSid, autoResume: false)
+                }
+                self.startBatchPollingLoop()
+            }
         } catch {
+            statusBannerMessage = nil
             backendState = await supervisor.state
             backendLogs = await supervisor.recentLogs()
             errorMessage = error.localizedDescription
@@ -573,6 +619,7 @@ public final class StudioStore {
 
     public func restartBackend() async {
         colorizeStreamTask?.cancel()
+        batchPollTask?.cancel()
         exportStreamTask?.cancel()
         await supervisor.stop()
         await connectAndLoad()
@@ -618,7 +665,7 @@ public final class StudioStore {
                     : uncolorized
             }
             self.resetZoom()
-            self.isColorizing = detail.isActive || detail.status == "processing"
+            self.isColorizing = detail.isActive || detail.status == "processing" || isBatchColorizing
 
             if let recommended = detail.recommendedStyle,
                let style = ColorAestheticStyle(rawValue: recommended) {
@@ -628,7 +675,7 @@ public final class StudioStore {
             await loadSessionContext(sessionId: id)
             prefetchAdjacentPages()
 
-            if self.isColorizing {
+            if detail.isActive || detail.status == "processing" || batchStatus?.currentSessionId == id {
                 startColorizeStream(sessionId: id, autoResume: false)
             }
         } catch {
@@ -1235,11 +1282,65 @@ public final class StudioStore {
         }
     }
 
+    /// Volumes in the queue that still have uncolorized pages.
+    public var incompleteSessions: [MangaSessionSummary] {
+        sessions.filter { summary in
+            if summary.totalPages > 0 {
+                return summary.processedCount < summary.totalPages
+            }
+            return summary.status != "completed"
+        }
+    }
+
+    /// True when some queued volumes are already completed and others still have pages remaining.
+    public var hasCompletedAndIncompleteVolumes: Bool {
+        let remaining = incompleteSessions.count
+        return remaining > 0 && remaining < sessions.count
+    }
+
+    /// Ordered list of session IDs that "Colorize All / Resume Remaining / Checked" will process.
+    /// Preserves the Document Queue order (never arbitrary Set iteration order).
+    /// When no checkboxes are selected and some volumes are already complete, targets only the
+    /// remaining incomplete volumes so progress counters and resuming stay crisp.
+    public var batchTargetSessionIds: [String] {
+        if !selectedSessionIds.isEmpty {
+            return sessions.map(\.sessionId).filter { selectedSessionIds.contains($0) }
+        }
+        if hasCompletedAndIncompleteVolumes {
+            return incompleteSessions.map(\.sessionId)
+        }
+        return sessions.map(\.sessionId)
+    }
+
+    public var isBatchColorizing: Bool {
+        batchStatus?.isRunning == true
+    }
+
+    public var hasPartialVolumeSelection: Bool {
+        !selectedSessionIds.isEmpty && selectedSessionIds.count < sessions.count
+    }
+
     public func cancelColorization() async {
-        guard let sessionId = activeSession?.sessionId else { return }
+        let wasBatch = isBatchColorizing
+        let targetSessionId = batchStatus?.currentSessionId ?? activeSession?.sessionId
+        batchPollTask?.cancel()
+        batchPollTask = nil
         colorizeStreamTask?.cancel()
+
         do {
-            try await apiClient.cancelColorize(sessionId: sessionId)
+            if wasBatch {
+                do {
+                    try await apiClient.cancelBatchColorize()
+                } catch {
+                    // Fallback for older backend versions without /api/colorize/batch/cancel
+                    if let sid = targetSessionId {
+                        try await apiClient.cancelColorize(sessionId: sid)
+                    }
+                }
+                batchStatus?.isRunning = false
+            } else if let sessionId = targetSessionId {
+                try await apiClient.cancelColorize(sessionId: sessionId)
+            }
             isColorizing = false
             colorizeProgressMessage = "Cancelled"
             await refreshSessions()
@@ -1249,21 +1350,95 @@ public final class StudioStore {
     }
 
     public func startBatchColorization() async {
-        let targets = selectedSessionIds.isEmpty ? sessions.map(\.sessionId) : Array(selectedSessionIds)
+        let targets = batchTargetSessionIds
         guard !targets.isEmpty else { return }
         errorMessage = nil
+        isColorizing = true
 
         do {
             var reqConfig = colorizeConfig
             reqConfig.apiKey = geminiAPIKey
             try await apiClient.startBatchColorize(sessionIds: targets, config: reqConfig)
-            batchStatus = try? await apiClient.fetchBatchStatus()
-            if let activeId = activeSession?.sessionId {
-                isColorizing = true
-                startColorizeStream(sessionId: activeId, autoResume: false)
+
+            let fetched = try? await apiClient.fetchBatchStatus()
+            let initialBatch = fetched ?? BatchStatusDTO(
+                isRunning: true,
+                totalDocs: targets.count,
+                completedDocs: 0,
+                currentIndex: 0,
+                currentSessionId: targets.first,
+                sessionIds: targets
+            )
+            batchStatus = initialBatch
+            colorizeProgressMessage = "Colorizing batch (1/\(targets.count) volumes)…"
+
+            let streamTargetId = initialBatch.currentSessionId ?? targets.first
+            if let streamTargetId {
+                if activeSession?.sessionId != streamTargetId {
+                    await selectSession(id: streamTargetId)
+                }
+                startColorizeStream(sessionId: streamTargetId, autoResume: false)
             }
+            startBatchPollingLoop()
         } catch {
+            isColorizing = false
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func startBatchPollingLoop() {
+        batchPollTask?.cancel()
+        batchPollTask = Task { [weak self] in
+            guard let self else { return }
+            var lastTrackedSessionId = self.batchStatus?.currentSessionId
+            var consecutivePollFailures = 0
+
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                if Task.isCancelled { break }
+
+                let status: BatchStatusDTO
+                do {
+                    status = try await self.apiClient.fetchBatchStatus()
+                    consecutivePollFailures = 0
+                } catch {
+                    consecutivePollFailures += 1
+                    if consecutivePollFailures >= 3 {
+                        self.backendState = await self.supervisor.state
+                        self.backendLogs = await self.supervisor.recentLogs()
+                        self.isColorizing = false
+                        self.isTranslating = false
+                        self.batchStatus?.isRunning = false
+                        self.errorMessage = "Lost connection to local backend engine. All completed pages are saved — click Restart Engine, then click Resume Remaining to continue."
+                        break
+                    }
+                    continue
+                }
+                self.batchStatus = status
+                await self.refreshSessions()
+
+                if status.isRunning {
+                    self.isColorizing = true
+                    if let nextSid = status.currentSessionId, nextSid != lastTrackedSessionId {
+                        lastTrackedSessionId = nextSid
+                        if self.activeSession?.sessionId != nextSid {
+                            await self.selectSession(id: nextSid)
+                        }
+                        self.startColorizeStream(sessionId: nextSid, autoResume: false)
+                    }
+                } else {
+                    self.isColorizing = false
+                    self.isTranslating = false
+                    if let activeId = self.activeSession?.sessionId {
+                        await self.selectSession(id: activeId)
+                    }
+                    let doneCount = max(status.completedDocs, status.totalDocs)
+                    if doneCount > 0 {
+                        self.statusBannerMessage = "Completed batch colorization (\(doneCount) volume\(doneCount == 1 ? "" : "s"))"
+                    }
+                    break
+                }
+            }
         }
     }
 
@@ -1334,15 +1509,21 @@ public final class StudioStore {
                     if Task.isCancelled { break }
                     self.handleSSEColorizeEvent(event)
                 }
-                self.isColorizing = false
-                self.isTranslating = false
+                if !self.isBatchColorizing {
+                    self.isColorizing = false
+                    self.isTranslating = false
+                }
             } catch is CancellationError {
-                self.isColorizing = false
-                self.isTranslating = false
+                if !self.isBatchColorizing {
+                    self.isColorizing = false
+                    self.isTranslating = false
+                }
             } catch {
-                self.isColorizing = false
-                self.isTranslating = false
-                self.errorMessage = error.localizedDescription
+                if !self.isBatchColorizing {
+                    self.isColorizing = false
+                    self.isTranslating = false
+                    self.errorMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -1353,7 +1534,7 @@ public final class StudioStore {
             if let session, activeSession?.sessionId == session.sessionId {
                 activeSession = session
             }
-            isColorizing = isActive
+            isColorizing = isActive || isBatchColorizing
 
         case .start(let total, _, _):
             isColorizing = true
@@ -1425,8 +1606,10 @@ public final class StudioStore {
             )
 
         case .completed(let totalProcessed, let message):
-            isColorizing = false
-            isTranslating = false
+            if !isBatchColorizing {
+                isColorizing = false
+                isTranslating = false
+            }
             if var sess = activeSession {
                 sess.status = "completed"
                 sess.processedCount = totalProcessed
@@ -1434,11 +1617,15 @@ public final class StudioStore {
                 syncSummaryFromActiveSession()
             }
             colorizeProgressMessage = message ?? "Completed \(totalProcessed) pages"
-            statusBannerMessage = colorizeProgressMessage
+            if !isBatchColorizing {
+                statusBannerMessage = colorizeProgressMessage
+            }
 
         case .idle(let totalProcessed, _):
-            isColorizing = false
-            isTranslating = false
+            if !isBatchColorizing {
+                isColorizing = false
+                isTranslating = false
+            }
             if var sess = activeSession {
                 sess.processedCount = totalProcessed
                 activeSession = sess
@@ -1809,6 +1996,8 @@ public final class StudioStore {
 
     public func deleteAllSessions() async {
         do {
+            batchPollTask?.cancel()
+            batchPollTask = nil
             colorizeStreamTask?.cancel()
             _ = try await apiClient.bulkDeleteSessions(ids: [], deleteAll: true)
             selectedSessionIds.removeAll()

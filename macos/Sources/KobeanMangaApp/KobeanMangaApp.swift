@@ -60,6 +60,12 @@ struct KobeanMangaApp: App {
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(store.activeSession == nil || store.isColorizing)
 
+                Button("Colorize All Volumes") {
+                    Task { await store.startBatchColorization() }
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(store.sessions.isEmpty || store.isColorizing)
+
                 Button("Translate Current Page") {
                     Task { await store.translateCurrentPage() }
                 }

@@ -48,6 +48,7 @@ public protocol StudioAPIClientProtocol: Sendable {
     func resumeColorize(sessionId: String, config: ColorizeConfig?) async throws
     func cancelColorize(sessionId: String) async throws
     func startBatchColorize(sessionIds: [String], config: ColorizeConfig) async throws
+    func cancelBatchColorize() async throws
     func fetchBatchStatus() async throws -> BatchStatusDTO
 
     func translatePage(sessionId: String, pageIndex: Int, config: ColorizeConfig) async throws -> TranslatePageResponseDTO
@@ -83,6 +84,10 @@ public protocol StudioAPIClientProtocol: Sendable {
     func streamColorizeEvents(sessionId: String, autoResume: Bool) -> AsyncThrowingStream<SSEColorizeEvent, Error>
     func streamCombinedExportEvents(jobId: String) -> AsyncThrowingStream<SSECombinedExportEvent, Error>
     func imageURL(relativePath: String, cacheBuster: String?) -> URL?
+}
+
+public extension StudioAPIClientProtocol {
+    func cancelBatchColorize() async throws {}
 }
 
 public final class StudioAPIClient: StudioAPIClientProtocol, @unchecked Sendable {
@@ -584,6 +589,10 @@ public final class StudioAPIClient: StudioAPIClientProtocol, @unchecked Sendable
             targetLanguage: config.targetLanguage.rawValue
         )
         _ = try await rawRequest(path: "/api/colorize/batch/start", method: "POST", body: body)
+    }
+
+    public func cancelBatchColorize() async throws {
+        _ = try await rawRequest(path: "/api/colorize/batch/cancel", method: "POST")
     }
 
     public func fetchBatchStatus() async throws -> BatchStatusDTO {

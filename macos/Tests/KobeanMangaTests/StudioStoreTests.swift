@@ -694,6 +694,181 @@ final class StudioStoreTests: XCTestCase {
         XCTAssertEqual(cfg.urlCache?.memoryCapacity, 64 * 1024 * 1024)
         XCTAssertEqual(cfg.urlCache?.diskCapacity, 256 * 1024 * 1024)
     }
+
+    func testIsVenvHealthyRejectsEmptyVenvAndAcceptsPopulatedVenv() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent("kobean-venv-test-\(UUID().uuidString)")
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let venvBin = tempDir.appendingPathComponent(".venv/bin", isDirectory: true)
+        let sitePackages = tempDir.appendingPathComponent(".venv/lib/python3.12/site-packages", isDirectory: true)
+        try fm.createDirectory(at: venvBin, withIntermediateDirectories: true)
+        try fm.createDirectory(at: sitePackages, withIntermediateDirectories: true)
+
+        let pyExec = venvBin.appendingPathComponent("python3")
+        fm.createFile(atPath: pyExec.path, contents: Data("#!/bin/sh\n".utf8))
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pyExec.path)
+
+        // Empty venv (only _virtualenv.py, missing fastapi/uvicorn) must be rejected
+        fm.createFile(atPath: sitePackages.appendingPathComponent("_virtualenv.py").path, contents: Data())
+        XCTAssertFalse(BackendSupervisor.isVenvHealthy(pyExec))
+
+        // Only fastapi (still missing uvicorn) must still be rejected
+        try fm.createDirectory(at: sitePackages.appendingPathComponent("fastapi", isDirectory: true), withIntermediateDirectories: true)
+        XCTAssertFalse(BackendSupervisor.isVenvHealthy(pyExec))
+
+        // Both fastapi and uvicorn present -> healthy
+        try fm.createDirectory(at: sitePackages.appendingPathComponent("uvicorn", isDirectory: true), withIntermediateDirectories: true)
+        XCTAssertTrue(BackendSupervisor.isVenvHealthy(pyExec))
+    }
+
+    func testShouldBootstrapVenvDetectsEmptyVenvAndLockfileUpdates() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent("kobean-bootstrap-test-\(UUID().uuidString)")
+        let wsDir = tempDir.appendingPathComponent("backend", isDirectory: true)
+        let venvDir = tempDir.appendingPathComponent("data/.venv", isDirectory: true)
+        try fm.createDirectory(at: wsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: venvDir.appendingPathComponent("bin", isDirectory: true), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        fm.createFile(atPath: wsDir.appendingPathComponent("pyproject.toml").path, contents: Data("[project]\nname='x'\n".utf8))
+        let lockURL = wsDir.appendingPathComponent("uv.lock")
+        fm.createFile(atPath: lockURL.path, contents: Data("version = 1\n".utf8))
+
+        let pyExec = venvDir.appendingPathComponent("bin/python3")
+        fm.createFile(atPath: pyExec.path, contents: Data("#!/bin/sh\n".utf8))
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pyExec.path)
+
+        // Empty venv triggers bootstrap
+        XCTAssertTrue(BackendSupervisor.shouldBootstrapVenv(
+            workspaceURL: wsDir,
+            venvURL: venvDir,
+            venvPythonURL: pyExec,
+            isBundled: true
+        ))
+
+        // Populate fastapi + uvicorn + matching lock signature -> no bootstrap needed
+        let sitePackages = venvDir.appendingPathComponent("lib/python3.12/site-packages", isDirectory: true)
+        try fm.createDirectory(at: sitePackages.appendingPathComponent("fastapi"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: sitePackages.appendingPathComponent("uvicorn"), withIntermediateDirectories: true)
+        let sig = try XCTUnwrap(BackendSupervisor.lockfileSignature(at: lockURL))
+        try sig.write(to: venvDir.appendingPathComponent(".kobean-lock-signature"), atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(BackendSupervisor.shouldBootstrapVenv(
+            workspaceURL: wsDir,
+            venvURL: venvDir,
+            venvPythonURL: pyExec,
+            isBundled: true
+        ))
+
+        // Updating uv.lock (e.g. after app auto-update) triggers re-sync
+        try Data("version = 2\n".utf8).write(to: lockURL)
+        XCTAssertTrue(BackendSupervisor.shouldBootstrapVenv(
+            workspaceURL: wsDir,
+            venvURL: venvDir,
+            venvPythonURL: pyExec,
+            isBundled: true
+        ))
+    }
+
+    func testLocatePythonRunnerSkipsPoisonedEmptyVenv() throws {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent("kobean-runner-test-\(UUID().uuidString)")
+        let venvBin = tempDir.appendingPathComponent(".venv/bin", isDirectory: true)
+        try fm.createDirectory(at: venvBin, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let emptyPy = venvBin.appendingPathComponent("python3")
+        fm.createFile(atPath: emptyPy.path, contents: Data("#!/bin/sh\n".utf8))
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: emptyPy.path)
+
+        let runner = BackendSupervisor.locatePythonRunner(
+            in: tempDir,
+            mainPyPath: tempDir.appendingPathComponent("main.py").path
+        )
+        XCTAssertNotEqual(runner?.executableURL.standardizedFileURL, emptyPy.standardizedFileURL)
+    }
+
+    func testSummarizeFailureLogsSurfacesRootCauseFirst() {
+        let traceback = """
+        Traceback (most recent call last):
+          File "/Applications/KobeanMangaColorizer.app/Contents/Resources/backend/main.py", line 30, in <module>
+            from fastapi import FastAPI
+        ModuleNotFoundError: No module named 'fastapi'
+        """
+        let summary = BackendSupervisor.summarizeFailureLogs(traceback)
+        XCTAssertTrue(summary.hasPrefix("ModuleNotFoundError: No module named 'fastapi'"))
+        XCTAssertTrue(summary.contains("Traceback (most recent call last):"))
+    }
+
+    func testBatchColorizePreservesQueueOrderAndCancelsBatchCleanly() async {
+        let mockAPI = MockStudioAPIClient()
+        mockAPI.sessionsToReturn = [
+            MangaSessionSummary(sessionId: "vol-1", filename: "Vol_01.cbz", ext: ".cbz", totalPages: 10, processedCount: 0, status: "idle"),
+            MangaSessionSummary(sessionId: "vol-2", filename: "Vol_02.cbz", ext: ".cbz", totalPages: 12, processedCount: 0, status: "idle"),
+            MangaSessionSummary(sessionId: "vol-3", filename: "Vol_03.cbz", ext: ".cbz", totalPages: 14, processedCount: 0, status: "idle"),
+        ]
+        mockAPI.batchStatusToReturn = BatchStatusDTO(
+            isRunning: true,
+            totalDocs: 2,
+            completedDocs: 0,
+            currentIndex: 0,
+            currentSessionId: "vol-1",
+            sessionIds: ["vol-1", "vol-3"]
+        )
+
+        let defaults = UserDefaults(suiteName: "test-batch-\(UUID().uuidString)")!
+        let store = StudioStore(
+            apiClient: mockAPI,
+            supervisor: BackendSupervisor(),
+            keychain: KeychainHelper(inMemory: true),
+            userDefaults: defaults
+        )
+        store.sessions = mockAPI.sessionsToReturn
+
+        // When no checkboxes checked -> all volumes in queue order
+        XCTAssertEqual(store.batchTargetSessionIds, ["vol-1", "vol-2", "vol-3"])
+        XCTAssertFalse(store.hasPartialVolumeSelection)
+
+        // When vol-3 and vol-1 checked -> must preserve queue order [vol-1, vol-3]
+        store.selectedSessionIds = ["vol-3", "vol-1"]
+        XCTAssertEqual(store.batchTargetSessionIds, ["vol-1", "vol-3"])
+        XCTAssertTrue(store.hasPartialVolumeSelection)
+
+        await store.startBatchColorization()
+        XCTAssertEqual(mockAPI.batchStartedSessionIds, ["vol-1", "vol-3"])
+        XCTAssertTrue(store.isColorizing)
+        XCTAssertTrue(store.isBatchColorizing)
+
+        await store.cancelColorization()
+        XCTAssertEqual(mockAPI.cancelBatchCallCount, 1)
+        XCTAssertFalse(store.isColorizing)
+        XCTAssertFalse(store.isBatchColorizing)
+    }
+
+    func testBatchTargetSessionIdsResumesOnlyIncompleteVolumesWhenPartiallyDone() {
+        let mockAPI = MockStudioAPIClient()
+        let defaults = UserDefaults(suiteName: "test-resume-remaining-\(UUID().uuidString)")!
+        let store = StudioStore(
+            apiClient: mockAPI,
+            supervisor: BackendSupervisor(),
+            keychain: KeychainHelper(inMemory: true),
+            userDefaults: defaults
+        )
+        store.sessions = [
+            MangaSessionSummary(sessionId: "v1", filename: "Vol_01.cbz", ext: ".cbz", totalPages: 180, processedCount: 180, status: "completed"),
+            MangaSessionSummary(sessionId: "v2", filename: "Vol_02.cbz", ext: ".cbz", totalPages: 179, processedCount: 174, status: "paused"),
+            MangaSessionSummary(sessionId: "v3", filename: "Vol_03.cbz", ext: ".cbz", totalPages: 172, processedCount: 0, status: "idle"),
+        ]
+        XCTAssertTrue(store.hasCompletedAndIncompleteVolumes)
+        XCTAssertEqual(store.incompleteSessions.map(\.sessionId), ["v2", "v3"])
+        XCTAssertEqual(store.batchTargetSessionIds, ["v2", "v3"])
+
+        // Explicit checkbox selection still overrides auto-remaining filter
+        store.selectedSessionIds = ["v1", "v3"]
+        XCTAssertEqual(store.batchTargetSessionIds, ["v1", "v3"])
+    }
 }
 
 private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
@@ -730,6 +905,9 @@ private final class MockStudioAPIClient: StudioAPIClientProtocol, @unchecked Sen
     var importStatusSequence: [DirectoryImportStatusDTO] = []
     var importStatusPollIndex: Int = 0
     var cancelledImportIds: [String] = []
+    var batchStartedSessionIds: [String] = []
+    var batchStatusToReturn: BatchStatusDTO = BatchStatusDTO()
+    var cancelBatchCallCount: Int = 0
     var uploadFilesCallCount: Int = 0
     var uploadFilesBatchSizes: [Int] = []
     var sessionDetailToReturn = MangaSessionDetail(
@@ -838,8 +1016,14 @@ private final class MockStudioAPIClient: StudioAPIClientProtocol, @unchecked Sen
     func startColorize(sessionId: String, selectedPages: [Int]?, forceRecolorize: Bool, config: ColorizeConfig) async throws {}
     func resumeColorize(sessionId: String, config: ColorizeConfig?) async throws {}
     func cancelColorize(sessionId: String) async throws {}
-    func startBatchColorize(sessionIds: [String], config: ColorizeConfig) async throws {}
-    func fetchBatchStatus() async throws -> BatchStatusDTO { BatchStatusDTO() }
+    func startBatchColorize(sessionIds: [String], config: ColorizeConfig) async throws {
+        batchStartedSessionIds = sessionIds
+    }
+    func cancelBatchColorize() async throws {
+        cancelBatchCallCount += 1
+        batchStatusToReturn.isRunning = false
+    }
+    func fetchBatchStatus() async throws -> BatchStatusDTO { batchStatusToReturn }
 
     func translatePage(sessionId: String, pageIndex: Int, config: ColorizeConfig) async throws -> TranslatePageResponseDTO {
         TranslatePageResponseDTO(status: "success", pageIndex: pageIndex, colorizedUrl: nil, translations: [], bubbleCount: 0, translated: false)

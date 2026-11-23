@@ -7,6 +7,7 @@ struct MainStudioSplitView: View {
     @Bindable var store: StudioStore
     @State private var isSidebarVisible: Bool = true
     @State private var isDropTargeted: Bool = false
+    @State private var showErrorDetails: Bool = false
 
     var body: some View {
         let theme = store.currentTheme
@@ -375,23 +376,52 @@ struct MainStudioSplitView: View {
         onRetry: (() -> Void)?,
         onDismiss: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: isError ? "exclamationmark.octagon.fill" : "checkmark.circle.fill")
-                .foregroundStyle(isError ? .red : theme.accentGreen)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(theme.textPrimary)
-                .lineLimit(2)
-            Spacer()
-            if isError, let onRetry, !store.backendState.isRunning {
-                Button("Restart Engine", action: onRetry)
-                    .studioButtonStyle(.secondary, theme: theme, size: .small)
-            }
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
+        let hasDetails = isError && (text.contains("\n") || !store.backendLogs.isEmpty)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: isError ? "exclamationmark.octagon.fill" : "checkmark.circle.fill")
+                    .foregroundStyle(isError ? .red : theme.accentGreen)
+                Text(text)
                     .font(.caption)
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(showErrorDetails ? nil : 2)
+                    .textSelection(.enabled)
+                Spacer()
+                if hasDetails {
+                    Button(showErrorDetails ? "Hide Details" : "Details") {
+                        showErrorDetails.toggle()
+                    }
+                    .studioButtonStyle(.ghost, theme: theme, size: .small)
+                }
+                let isConnectionError = text.localizedCaseInsensitiveContains("Could not connect to the server")
+                    || text.localizedCaseInsensitiveContains("Lost connection")
+                    || text.localizedCaseInsensitiveContains("Backend engine stopped")
+                if isError, let onRetry, (!store.backendState.isRunning || isConnectionError) {
+                    Button("Restart Engine", action: onRetry)
+                        .studioButtonStyle(.secondary, theme: theme, size: .small)
+                }
+                Button(action: {
+                    showErrorDetails = false
+                    onDismiss()
+                }) {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                }
+                .buttonStyle(StudioInlineIconButtonStyle(theme: theme, tint: theme.textMuted))
             }
-            .buttonStyle(StudioInlineIconButtonStyle(theme: theme, tint: theme.textMuted))
+
+            if isError && showErrorDetails && !store.backendLogs.isEmpty {
+                ScrollView {
+                    Text(store.backendLogs.suffix(40).joined(separator: "\n"))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 160)
+                .padding(8)
+                .background(theme.bgDark.opacity(0.65), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
@@ -447,6 +477,15 @@ struct MainStudioSplitView: View {
         let processed = store.activeSession?.processedCount ?? 0
         let total = max(1, store.activeSession?.totalPages ?? 1)
         let pct = Int(((Double(processed) / Double(total)) * 100).rounded())
+        if store.isBatchColorizing, let batch = store.batchStatus, batch.totalDocs > 0 {
+            let volNum = min(batch.totalDocs, batch.currentIndex + 1)
+            let volName = store.activeSession?.filename ?? "Volume \(volNum)"
+            return (
+                "Colorizing All · Vol \(volNum)/\(batch.totalDocs) — \(volName)",
+                "\(processed)/\(total)p (\(pct)%)",
+                min(1, max(0, Double(processed) / Double(total)))
+            )
+        }
         return (
             store.colorizeProgressMessage.isEmpty ? "Colorizing Manga Volume…" : store.colorizeProgressMessage,
             "\(processed)/\(total) (\(pct)%)",

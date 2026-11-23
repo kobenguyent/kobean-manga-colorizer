@@ -3,8 +3,10 @@ import contextlib
 import copy
 import io
 import os
+import platform
 import re
 import shutil
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +29,82 @@ try:
     cv2.setNumThreads(1)
 except Exception:
     pass
+
+
+def _install_safe_cv2_resize_guard() -> None:
+    """
+    Guards against an ARM64 macOS OpenCV 5.0 KleidiCV HAL SIGSEGV in
+    `kleidicv::neon::kleidicv_resize_generic_stripe_u8<2, 3>`, which can read
+    1+ bytes past the end of a `uint8` image buffer and fault when that buffer
+    aligns with an unmapped VM guard page (e.g. during long multi-volume batches
+    or Ultralytics YOLO letterboxing).
+
+    Routing `uint8` 1/3/4-channel `cv2.resize` calls through Pillow avoids
+    KleidiCV entirely (~3ms/call, 0.1% of MPS inference time) while preserving
+    exact output dimensions, dtype, and interpolation semantics.
+    """
+    if getattr(cv2.resize, "_kobean_safe_wrapped", False):
+        return
+    if sys.platform != "darwin" or platform.machine().lower() not in ("arm64", "aarch64"):
+        return
+    if not str(getattr(cv2, "__version__", "")).startswith("5."):
+        return
+
+    orig_resize = cv2.resize
+    pil_resample_map = {
+        cv2.INTER_NEAREST: Image.Resampling.NEAREST,
+        cv2.INTER_LINEAR: Image.Resampling.BILINEAR,
+        cv2.INTER_CUBIC: Image.Resampling.BICUBIC,
+        cv2.INTER_LANCZOS4: Image.Resampling.LANCZOS,
+    }
+
+    def _safe_resize(src, dsize, dst=None, fx=0, fy=0, interpolation=cv2.INTER_LINEAR):
+        if (
+            dst is None
+            and isinstance(src, np.ndarray)
+            and src.dtype == np.uint8
+            and src.size > 0
+            and src.ndim in (2, 3)
+        ):
+            src_h, src_w = src.shape[:2]
+            channels = 1 if src.ndim == 2 else src.shape[2]
+            if channels in (1, 3, 4):
+                if dsize is not None and len(dsize) == 2 and dsize[0] > 0 and dsize[1] > 0:
+                    out_w, out_h = int(dsize[0]), int(dsize[1])
+                elif fx and fy and fx > 0 and fy > 0:
+                    out_w = max(1, int(round(src_w * float(fx))))
+                    out_h = max(1, int(round(src_h * float(fy))))
+                else:
+                    return orig_resize(src, dsize, dst=dst, fx=fx, fy=fy, interpolation=interpolation)
+
+                if out_w == src_w and out_h == src_h:
+                    return src.copy()
+
+                if interpolation == cv2.INTER_AREA:
+                    resample = (
+                        Image.Resampling.BOX
+                        if (out_w < src_w or out_h < src_h)
+                        else Image.Resampling.BILINEAR
+                    )
+                else:
+                    resample = pil_resample_map.get(interpolation, Image.Resampling.BILINEAR)
+
+                arr = np.ascontiguousarray(src)
+                if src.ndim == 3 and channels == 1:
+                    pil_img = Image.fromarray(arr[:, :, 0])
+                    resized = np.asarray(pil_img.resize((out_w, out_h), resample=resample))
+                    return np.ascontiguousarray(resized[:, :, np.newaxis])
+                pil_img = Image.fromarray(arr)
+                return np.ascontiguousarray(pil_img.resize((out_w, out_h), resample=resample))
+
+        return orig_resize(src, dsize, dst=dst, fx=fx, fy=fy, interpolation=interpolation)
+
+    _safe_resize._kobean_safe_wrapped = True
+    _safe_resize._orig_cv2_resize = orig_resize
+    cv2.resize = _safe_resize
+
+
+_install_safe_cv2_resize_guard()
 
 # ─────────────────────────────────────────────────────────────────────
 #  Thread-Safe GPU / MPS Serialization Lock
@@ -68,6 +146,12 @@ except ImportError:
 BASE_DIR = Path(__file__).parent.resolve()
 NETWORKS_DIR = BASE_DIR / "networks"
 DENOISING_DIR = BASE_DIR / "denoising" / "models"
+
+
+def _resolve_writable_data_dir() -> Path:
+    """Returns KOBEAN_DATA_DIR when running from a bundled .app, else BASE_DIR."""
+    raw = os.environ.get("KOBEAN_DATA_DIR", "").strip()
+    return Path(raw).expanduser().resolve() if raw else BASE_DIR
 
 try:
     from series_adapter import SeriesAdapterTrainer, SeriesResidualAdapter
@@ -3360,16 +3444,33 @@ class MangaColorizerEngine:
         self.colorizer_model: Optional[Any] = None
         self.denoiser: Optional[Any] = None
         self.recognizer = MangaCharacterRecognizer()
+        data_root = _resolve_writable_data_dir()
         self.adapter_trainer = (
-            SeriesAdapterTrainer(BASE_DIR / "storage") if HAS_SERIES_ADAPTER else None
+            SeriesAdapterTrainer(data_root / "storage") if HAS_SERIES_ADAPTER else None
         )
         self._init_models()
 
     def _ensure_weights(self):
-        """Ensures the pre-trained weights exist locally, downloading if necessary."""
-        gen_path = NETWORKS_DIR / "generator.zip"
-        ext_path = NETWORKS_DIR / "extractor.pth"
-        net_path = DENOISING_DIR / "net_rgb.pth"
+        """Ensures the pre-trained weights exist locally, downloading into writable storage if necessary."""
+        data_root = _resolve_writable_data_dir()
+        writable_networks = data_root / "networks"
+        writable_denoising = data_root / "denoising" / "models"
+
+        gen_path = (
+            NETWORKS_DIR / "generator.zip"
+            if (NETWORKS_DIR / "generator.zip").exists()
+            else writable_networks / "generator.zip"
+        )
+        ext_path = (
+            NETWORKS_DIR / "extractor.pth"
+            if (NETWORKS_DIR / "extractor.pth").exists()
+            else writable_networks / "extractor.pth"
+        )
+        net_path = (
+            DENOISING_DIR / "net_rgb.pth"
+            if (DENOISING_DIR / "net_rgb.pth").exists()
+            else writable_denoising / "net_rgb.pth"
+        )
 
         if gen_path.exists() and ext_path.exists() and net_path.exists():
             return str(gen_path), str(ext_path), str(net_path)
@@ -3377,8 +3478,8 @@ class MangaColorizerEngine:
         if hf_hub_download:
             try:
                 print("[MangaColorizer] Downloading neural model weights from HuggingFace...")
-                NETWORKS_DIR.mkdir(parents=True, exist_ok=True)
-                DENOISING_DIR.mkdir(parents=True, exist_ok=True)
+                writable_networks.mkdir(parents=True, exist_ok=True)
+                writable_denoising.mkdir(parents=True, exist_ok=True)
 
                 if not gen_path.exists():
                     p = hf_hub_download(

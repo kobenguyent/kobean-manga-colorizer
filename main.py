@@ -135,8 +135,10 @@ UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR = resolve_data_dirs(
 )
 STATIC_DIR = BASE_DIR / "static"
 
-for d in [UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR, STATIC_DIR]:
+for d in [UPLOAD_DIR, STORAGE_DIR, OUTPUT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+if not STATIC_DIR.exists():
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 # Increase open file descriptors limit for handling +1076 ebook files simultaneously
 try:
@@ -228,9 +230,23 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
                 with open(meta_path, encoding="utf-8") as f:
                     sess = json.load(f)
                     if "pages" in sess:
+                        if session_id not in ACTIVE_COLORIZATION_TASKS:
+                            for p in sess["pages"]:
+                                if p.get("status") == "processing":
+                                    p["status"] = "pending"
                         sess["processed_count"] = sum(
                             1 for p in sess["pages"] if p.get("status") == "colorized"
                         )
+                        if (
+                            session_id not in ACTIVE_COLORIZATION_TASKS
+                            and sess.get("status") == "processing"
+                        ):
+                            total_p = len(sess["pages"])
+                            sess["status"] = (
+                                "completed"
+                                if total_p > 0 and sess["processed_count"] >= total_p
+                                else "paused"
+                            )
                     if not sess.get("detected_preset") and sess.get("filename"):
                         detected = detect_manga_preset(sess["filename"])
                         if detected:
@@ -2561,6 +2577,9 @@ async def cancel_colorization(session_id: str):
     sess["cancel_requested"] = True
     sess["status"] = "cancelled"
 
+    if CURRENT_BATCH.get("is_running") and CURRENT_BATCH.get("current_session_id") == session_id:
+        CURRENT_BATCH["is_running"] = False
+
     for p in sess["pages"]:
         if p.get("status") == "processing":
             p["status"] = "pending"
@@ -4528,6 +4547,35 @@ async def get_batch_status():
     return JSONResponse(CURRENT_BATCH)
 
 
+@app.post("/api/colorize/batch/cancel")
+async def cancel_batch_colorization():
+    """Stops the active multi-volume batch and cancels the currently running session."""
+    global CURRENT_BATCH
+    active_sid = CURRENT_BATCH.get("current_session_id")
+    CURRENT_BATCH["is_running"] = False
+
+    if active_sid:
+        sess = SESSIONS.get(active_sid) or get_or_restore_session(active_sid)
+        if sess:
+            sess["cancel_requested"] = True
+            sess["status"] = "cancelled"
+            for p in sess.get("pages", []):
+                if p.get("status") == "processing":
+                    p["status"] = "pending"
+            save_session_meta(active_sid)
+            ACTIVE_COLORIZATION_TASKS.pop(active_sid, None)
+            await notify_sse_listeners(
+                active_sid,
+                {
+                    "type": "cancelled",
+                    "processed_count": sess.get("processed_count", 0),
+                    "total": sess.get("total_pages", 0),
+                },
+            )
+
+    return JSONResponse({"status": "cancelled", "batch": CURRENT_BATCH})
+
+
 @app.post("/api/colorize/batch/start")
 async def start_batch_colorization(req: BatchColorizeRequest):
     """Starts sequential colorization for a batch of documents."""
@@ -5221,9 +5269,16 @@ async def get_hardware():
     """Returns detected hardware acceleration profile, weights status, and storage directories."""
     hw = getattr(colorizer_engine, "hw_profile", None)
     profile = dict(hw) if isinstance(hw, dict) else get_hardware_profile()
+    env_data_root = os.environ.get("KOBEAN_DATA_DIR", "").strip()
+    data_gen = (
+        (Path(env_data_root).expanduser() / "networks" / "generator.zip").is_file()
+        if env_data_root
+        else False
+    )
     profile["generator_weights_ready"] = bool(
         getattr(colorizer_engine, "colorizer_model", None) is not None
         or (BASE_DIR / "networks" / "generator.zip").is_file()
+        or data_gen
     )
     profile["storage"] = {
         "sessions_dir": str(STORAGE_DIR),

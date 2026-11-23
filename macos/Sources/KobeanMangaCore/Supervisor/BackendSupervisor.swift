@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -26,6 +27,7 @@ public enum BackendSupervisorError: LocalizedError, Sendable, Equatable {
     case workspaceNotFound
     case pythonRunnerNotFound(workspace: String)
     case portAllocationFailed
+    case bootstrapFailed(code: Int32, logs: String)
     case startupTimeout(port: Int, logs: String)
     case processExitedPrematurely(code: Int32, logs: String)
 
@@ -34,14 +36,20 @@ public enum BackendSupervisorError: LocalizedError, Sendable, Equatable {
         case .workspaceNotFound:
             return "Could not locate Kobean Manga Colorizer backend (main.py)."
         case .pythonRunnerNotFound(let workspace):
-            return "Could not find Python environment (.venv/bin/python3 or uv) for \(workspace)."
+            return "Could not find a ready Python environment (.venv with dependencies or uv) for \(workspace). Install uv (brew install uv) or configure Workspace Root in Settings."
         case .portAllocationFailed:
             return "Unable to allocate a free local TCP port on 127.0.0.1."
+        case .bootstrapFailed(let code, let logs):
+            let summary = BackendSupervisor.summarizeFailureLogs(logs)
+            let suffix = summary.isEmpty ? "" : "\n\(summary)"
+            return "Failed to set up Python environment (uv sync exited with code \(code)).\(suffix)"
         case .startupTimeout(let port, let logs):
-            let suffix = logs.isEmpty ? "" : "\n\(logs)"
+            let summary = BackendSupervisor.summarizeFailureLogs(logs)
+            let suffix = summary.isEmpty ? "" : "\n\(summary)"
             return "Backend engine on 127.0.0.1:\(port) did not become healthy in time.\(suffix)"
         case .processExitedPrematurely(let code, let logs):
-            let suffix = logs.isEmpty ? "" : "\n\(logs)"
+            let summary = BackendSupervisor.summarizeFailureLogs(logs)
+            let suffix = summary.isEmpty ? "" : "\n\(summary)"
             return "Backend engine exited unexpectedly with code \(code).\(suffix)"
         }
     }
@@ -148,6 +156,7 @@ public actor BackendSupervisor {
     private let logBuffer = LogRingBuffer(maxLines: 200)
     private let healthChecker: HealthChecker
     private var managedProcess: Process?
+    private var stateChangeHandler: (@Sendable (BackendState) -> Void)?
 
     public init(healthChecker: HealthChecker? = nil) {
         if let healthChecker {
@@ -172,12 +181,18 @@ public actor BackendSupervisor {
         logBuffer.snapshot()
     }
 
+    public func setStateChangeHandler(_ handler: (@Sendable (BackendState) -> Void)?) {
+        stateChangeHandler = handler
+    }
+
     @discardableResult
     public func start(
         preferredPort: Int = 8000,
         workspaceHint: URL? = nil,
         dataDirectory: URL? = nil,
-        startupTimeout: TimeInterval = 35.0
+        startupTimeout: TimeInterval = 35.0,
+        bootstrapTimeout: TimeInterval = 600.0,
+        statusUpdate: (@Sendable (String) -> Void)? = nil
     ) async throws -> URL {
         if case .running(let currentPort, _) = state,
            let url = URL(string: "http://127.0.0.1:\(currentPort)") {
@@ -196,15 +211,51 @@ public actor BackendSupervisor {
             return URL(string: "http://127.0.0.1:\(preferredPort)")!
         }
 
-        // 2. Locate workspace (main.py) and Python runner.
+        // 2. Locate workspace (main.py), effective writable data directory, and Python runner.
         guard let workspaceURL = Self.locateWorkspaceRoot(hint: workspaceHint) else {
             let err = BackendSupervisorError.workspaceNotFound
             self.state = .failed(err.localizedDescription)
             throw err
         }
 
+        let effectiveDataDirectory = dataDirectory ?? Self.defaultDataDirectoryIfBundled(workspaceURL: workspaceURL)
+        if let effectiveDataDirectory {
+            try? FileManager.default.createDirectory(at: effectiveDataDirectory, withIntermediateDirectories: true)
+        }
+
         let mainPyURL = workspaceURL.appendingPathComponent("main.py")
-        guard let runner = Self.locatePythonRunner(in: workspaceURL, mainPyPath: mainPyURL.path) else {
+        self.logBuffer.clear()
+
+        // 2b. Ensure bundled / uv-managed virtual environment has its Python dependencies synced
+        //     before launching main.py. This avoids:
+        //     - Getting trapped in an empty/half-installed .venv (missing fastapi/uvicorn)
+        //     - `uv run` trying to build an editable wheel via hatchling inside a read-only .app bundle
+        //     - Killing first-launch PyTorch downloads after the 35s server health timeout.
+        let targetVenvURL = Self.targetVenvDirectory(workspaceURL: workspaceURL, dataDirectory: effectiveDataDirectory)
+        let targetVenvPython = targetVenvURL.appendingPathComponent("bin/python3")
+        let needsBootstrap = Self.shouldBootstrapVenv(
+            workspaceURL: workspaceURL,
+            venvURL: targetVenvURL,
+            venvPythonURL: targetVenvPython,
+            isBundled: Self.isInsideAppBundle(workspaceURL)
+        )
+        if needsBootstrap, let uvURL = Self.locateUVExecutable() {
+            statusUpdate?("Setting up Python environment (first launch may take a few minutes)…")
+            try await bootstrapEnvironmentWithUV(
+                uvURL: uvURL,
+                workspaceURL: workspaceURL,
+                venvURL: targetVenvURL,
+                dataDirectory: effectiveDataDirectory,
+                timeout: bootstrapTimeout
+            )
+            statusUpdate?("Starting local colorization engine…")
+        }
+
+        guard let runner = Self.locatePythonRunner(
+            in: workspaceURL,
+            mainPyPath: mainPyURL.path,
+            dataDirectory: effectiveDataDirectory
+        ) else {
             let err = BackendSupervisorError.pythonRunnerNotFound(workspace: workspaceURL.path)
             self.state = .failed(err.localizedDescription)
             throw err
@@ -225,29 +276,19 @@ public actor BackendSupervisor {
         self.port = chosenPort
         self.attachedToExisting = false
         self.state = .starting(port: chosenPort)
-        self.logBuffer.clear()
 
         // 4. Spawn Foundation.Process directly (no shell interpolation - T-03; loopback only - T-02).
+        let isBundled = Self.isInsideAppBundle(workspaceURL)
         let proc = Process()
         proc.currentDirectoryURL = workspaceURL
         proc.executableURL = runner.executableURL
         proc.arguments = runner.arguments(port: chosenPort)
 
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONUNBUFFERED"] = "1"
-        let effectiveDataDirectory = dataDirectory ?? Self.defaultDataDirectoryIfBundled(workspaceURL: workspaceURL)
-        if let effectiveDataDirectory {
-            try? FileManager.default.createDirectory(at: effectiveDataDirectory, withIntermediateDirectories: true)
-            env["KOBEAN_DATA_DIR"] = effectiveDataDirectory.standardizedFileURL.path
-            // Keep uv's virtual environment outside the signed .app bundle so codesigning stays valid
-            // and downloaded dependencies persist cleanly across auto-updates.
-            if Self.isInsideAppBundle(workspaceURL) {
-                env["UV_PROJECT_ENVIRONMENT"] = effectiveDataDirectory
-                    .appendingPathComponent(".venv", isDirectory: true)
-                    .standardizedFileURL.path
-            }
-        }
-        proc.environment = env
+        proc.environment = Self.enrichedEnvironment(
+            dataDirectory: effectiveDataDirectory,
+            venvDirectory: isBundled ? targetVenvURL : nil,
+            disableBytecodeCache: isBundled
+        )
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -287,7 +328,27 @@ public actor BackendSupervisor {
         self.processTracker.setOwned(proc)
 
         // 5. Poll /api/health until ready.
-        let deadline = Date().addingTimeInterval(startupTimeout)
+        // Allow extra time on first bundled launch when neural weights (generator.zip)
+        // are downloaded from HuggingFace before Uvicorn binds the loopback port.
+        let weightsAlreadyPresent: Bool = {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: workspaceURL.appendingPathComponent("networks/generator.zip").path) {
+                return true
+            }
+            if let dataDir = effectiveDataDirectory,
+               fm.fileExists(atPath: dataDir.appendingPathComponent("networks/generator.zip").path) {
+                return true
+            }
+            return false
+        }()
+        let effectiveStartupTimeout = (isBundled && !weightsAlreadyPresent)
+            ? max(startupTimeout, 180.0)
+            : startupTimeout
+        if isBundled && !weightsAlreadyPresent {
+            statusUpdate?("Downloading neural colorization weights (first launch)…")
+        }
+
+        let deadline = Date().addingTimeInterval(effectiveStartupTimeout)
         while Date() < deadline {
             if !proc.isRunning {
                 let logs = logBuffer.snapshot().suffix(12).joined(separator: "\n")
@@ -347,6 +408,7 @@ public actor BackendSupervisor {
         }
         managedProcess = nil
         processTracker.clear()
+        stateChangeHandler?(state)
     }
 
     // MARK: - Discovery & Port Helpers
@@ -431,31 +493,288 @@ public actor BackendSupervisor {
         return defaultApplicationSupportDirectory()
     }
 
-    public static func locatePythonRunner(in workspaceURL: URL, mainPyPath: String) -> PythonRunner? {
+    private func bootstrapEnvironmentWithUV(
+        uvURL: URL,
+        workspaceURL: URL,
+        venvURL: URL,
+        dataDirectory: URL?,
+        timeout: TimeInterval
+    ) async throws {
+        let fm = FileManager.default
+        let lockFile = workspaceURL.appendingPathComponent("uv.lock")
+        let hasLock = fm.fileExists(atPath: lockFile.path)
+
+        let proc = Process()
+        proc.currentDirectoryURL = workspaceURL
+        proc.executableURL = uvURL
+        var args = ["sync", "--no-install-project", "--no-dev"]
+        if hasLock {
+            args.insert("--frozen", at: 1)
+        }
+        proc.arguments = args
+        proc.environment = Self.enrichedEnvironment(
+            dataDirectory: dataDirectory,
+            venvDirectory: venvURL
+        )
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        proc.standardOutput = stdoutPipe
+        proc.standardError = stderrPipe
+
+        let ring = self.logBuffer
+        ring.append(chunk: "[Bootstrap] Running: \(uvURL.path) \(args.joined(separator: " "))")
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                ring.append(chunk: text)
+            }
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                ring.append(chunk: text)
+            }
+        }
+
+        do {
+            try proc.run()
+        } catch {
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            self.state = .failed(error.localizedDescription)
+            throw error
+        }
+
+        self.managedProcess = proc
+        self.processTracker.setOwned(proc)
+
+        defer {
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            self.managedProcess = nil
+            self.processTracker.clear()
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while proc.isRunning && Date() < deadline {
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        if proc.isRunning {
+            self.processTracker.terminateSynchronously()
+            let logs = logBuffer.snapshot().suffix(20).joined(separator: "\n")
+            let err = BackendSupervisorError.bootstrapFailed(code: -1, logs: "Timed out after \(Int(timeout))s.\n\(logs)")
+            self.state = .failed(err.localizedDescription)
+            throw err
+        }
+
+        // Drain any remaining buffered pipe output before inspecting logs
+        let trailingOut = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        if !trailingOut.isEmpty, let text = String(data: trailingOut, encoding: .utf8) {
+            ring.append(chunk: text)
+        }
+        let trailingErr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        if !trailingErr.isEmpty, let text = String(data: trailingErr, encoding: .utf8) {
+            ring.append(chunk: text)
+        }
+
+        if proc.terminationStatus != 0 {
+            let logs = logBuffer.snapshot().suffix(20).joined(separator: "\n")
+            let err = BackendSupervisorError.bootstrapFailed(code: proc.terminationStatus, logs: logs)
+            self.state = .failed(err.localizedDescription)
+            throw err
+        }
+
+        if hasLock, let sig = Self.lockfileSignature(at: lockFile) {
+            let stampURL = venvURL.appendingPathComponent(".kobean-lock-signature")
+            try? sig.write(to: stampURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    public static func enrichedEnvironment(
+        base: [String: String] = ProcessInfo.processInfo.environment,
+        dataDirectory: URL?,
+        venvDirectory: URL?,
+        disableBytecodeCache: Bool = false
+    ) -> [String: String] {
+        var env = base
+        env["PYTHONUNBUFFERED"] = "1"
+        if disableBytecodeCache {
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let extraPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(home)/.local/bin",
+            "\(home)/.cargo/bin",
+        ]
+        let existingPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let existingParts = existingPath.split(separator: ":").map(String.init)
+        var merged = extraPaths.filter { !existingParts.contains($0) }
+        merged.append(contentsOf: existingParts)
+        env["PATH"] = merged.joined(separator: ":")
+
+        if let dataDirectory {
+            env["KOBEAN_DATA_DIR"] = dataDirectory.standardizedFileURL.path
+        }
+        if let venvDirectory {
+            env["UV_PROJECT_ENVIRONMENT"] = venvDirectory.standardizedFileURL.path
+        }
+        return env
+    }
+
+    public static func targetVenvDirectory(workspaceURL: URL, dataDirectory: URL?) -> URL {
+        if let dataDirectory, isInsideAppBundle(workspaceURL) {
+            return dataDirectory.appendingPathComponent(".venv", isDirectory: true)
+        }
+        return workspaceURL.appendingPathComponent(".venv", isDirectory: true)
+    }
+
+    public static func lockfileSignature(at lockFileURL: URL) -> String? {
+        guard let data = try? Data(contentsOf: lockFileURL) else { return nil }
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Fast, zero-subprocess check that a `.venv/bin/python3` actually has core backend
+    /// packages (`fastapi` and `uvicorn`) installed in its `site-packages`, preventing an
+    /// empty or half-installed `.venv` from trapping startup in a `ModuleNotFoundError` loop.
+    public static func isVenvHealthy(_ pythonURL: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.isExecutableFile(atPath: pythonURL.path) else { return false }
+
+        // Resolve `<venv>/bin/python3` -> `<venv>/lib/python*/site-packages`
+        let venvRoot = pythonURL.deletingLastPathComponent().deletingLastPathComponent()
+        let libDir = venvRoot.appendingPathComponent("lib", isDirectory: true)
+        guard let libEntries = try? fm.contentsOfDirectory(
+            at: libDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+
+        for entry in libEntries where entry.lastPathComponent.hasPrefix("python") {
+            let sitePackages = entry.appendingPathComponent("site-packages", isDirectory: true)
+            let fastapiDir = sitePackages.appendingPathComponent("fastapi")
+            let uvicornDir = sitePackages.appendingPathComponent("uvicorn")
+            if fm.fileExists(atPath: fastapiDir.path) && fm.fileExists(atPath: uvicornDir.path) {
+                return true
+            }
+        }
+        return false
+    }
+
+    public static func shouldBootstrapVenv(
+        workspaceURL: URL,
+        venvURL: URL,
+        venvPythonURL: URL,
+        isBundled: Bool
+    ) -> Bool {
+        let fm = FileManager.default
+        let pyproject = workspaceURL.appendingPathComponent("pyproject.toml")
+        guard fm.fileExists(atPath: pyproject.path) else { return false }
+
+        if !isVenvHealthy(venvPythonURL) {
+            // In non-bundled dev workspaces, also allow an existing healthy `venv/` before syncing.
+            if !isBundled {
+                let altVenvPython = workspaceURL.appendingPathComponent("venv/bin/python3")
+                if isVenvHealthy(altVenvPython) {
+                    return false
+                }
+            }
+            return true
+        }
+
+        // For bundled app releases, re-sync automatically if an app update changed uv.lock.
+        if isBundled {
+            let lockFile = workspaceURL.appendingPathComponent("uv.lock")
+            let stampURL = venvURL.appendingPathComponent(".kobean-lock-signature")
+            if let expected = lockfileSignature(at: lockFile) {
+                let current = (try? String(contentsOf: stampURL, encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if current != expected {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    public static func locateUVExecutable() -> URL? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        var uvCandidates = [
+            URL(fileURLWithPath: "/opt/homebrew/bin/uv"),
+            URL(fileURLWithPath: "/usr/local/bin/uv"),
+            home.appendingPathComponent(".local/bin/uv"),
+            home.appendingPathComponent(".cargo/bin/uv"),
+        ]
+        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
+            for dir in pathEnv.split(separator: ":") {
+                uvCandidates.append(URL(fileURLWithPath: String(dir)).appendingPathComponent("uv"))
+            }
+        }
+        var seen = Set<String>()
+        for uvURL in uvCandidates {
+            let path = uvURL.standardizedFileURL.path
+            guard seen.insert(path).inserted else { continue }
+            if fm.isExecutableFile(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+        }
+        return nil
+    }
+
+    /// Surfaces the root error line (e.g. `ModuleNotFoundError: No module named 'fastapi'`)
+    /// ahead of verbose traceback frames so compact UI banners show actionable diagnostics.
+    public static func summarizeFailureLogs(_ logs: String) -> String {
+        let lines = logs
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return "" }
+
+        if lines.count > 1,
+           let first = lines.first,
+           first.hasPrefix("Traceback (most recent call last)"),
+           let rootCause = lines.last,
+           rootCause != first {
+            return "\(rootCause)\n" + lines.joined(separator: "\n")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public static func locatePythonRunner(
+        in workspaceURL: URL,
+        mainPyPath: String,
+        dataDirectory: URL? = nil
+    ) -> PythonRunner? {
         let fm = FileManager.default
         var venvCandidates = [
             workspaceURL.appendingPathComponent(".venv/bin/python3"),
             workspaceURL.appendingPathComponent("venv/bin/python3"),
         ]
         if isInsideAppBundle(workspaceURL) {
+            let appSupportVenv = (dataDirectory ?? defaultApplicationSupportDirectory())
+                .appendingPathComponent(".venv/bin/python3")
+            venvCandidates.insert(appSupportVenv, at: 0)
+        } else if let dataDirectory {
             venvCandidates.insert(
-                defaultApplicationSupportDirectory().appendingPathComponent(".venv/bin/python3"),
+                dataDirectory.appendingPathComponent(".venv/bin/python3"),
                 at: 0
             )
         }
-        for pyURL in venvCandidates where fm.isExecutableFile(atPath: pyURL.path) {
+
+        // Only accept virtualenvs that actually have backend dependencies installed.
+        for pyURL in venvCandidates where isVenvHealthy(pyURL) {
             return PythonRunner(executableURL: pyURL, baseArguments: [], mainPyPath: mainPyPath)
         }
 
-        let home = fm.homeDirectoryForCurrentUser
-        let uvCandidates = [
-            URL(fileURLWithPath: "/opt/homebrew/bin/uv"),
-            URL(fileURLWithPath: "/usr/local/bin/uv"),
-            home.appendingPathComponent(".local/bin/uv"),
-            home.appendingPathComponent(".cargo/bin/uv"),
-        ]
-        for uvURL in uvCandidates where fm.isExecutableFile(atPath: uvURL.path) {
-            return PythonRunner(executableURL: uvURL, baseArguments: ["run", "python"], mainPyPath: mainPyPath)
+        if let uvURL = locateUVExecutable() {
+            return PythonRunner(executableURL: uvURL, baseArguments: ["run", "--no-sync", "python"], mainPyPath: mainPyPath)
         }
 
         let systemPythonCandidates = [
