@@ -230,23 +230,9 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
                 with open(meta_path, encoding="utf-8") as f:
                     sess = json.load(f)
                     if "pages" in sess:
-                        if session_id not in ACTIVE_COLORIZATION_TASKS:
-                            for p in sess["pages"]:
-                                if p.get("status") == "processing":
-                                    p["status"] = "pending"
                         sess["processed_count"] = sum(
                             1 for p in sess["pages"] if p.get("status") == "colorized"
                         )
-                        if (
-                            session_id not in ACTIVE_COLORIZATION_TASKS
-                            and sess.get("status") == "processing"
-                        ):
-                            total_p = len(sess["pages"])
-                            sess["status"] = (
-                                "completed"
-                                if total_p > 0 and sess["processed_count"] >= total_p
-                                else "paused"
-                            )
                     if not sess.get("detected_preset") and sess.get("filename"):
                         detected = detect_manga_preset(sess["filename"])
                         if detected:
@@ -308,23 +294,29 @@ def get_or_restore_session(session_id: str) -> Optional[dict]:
 
     if sess:
         # Sanitize dangling processing status if no task is actually running
-        if sess.get("status") == "processing" and not is_task_active(session_id):
+        if not is_task_active(session_id):
             pages = sess.get("pages", [])
-            actual_count = sum(1 for p in pages if p.get("status") == "colorized")
-            sess["processed_count"] = actual_count
-            total = sess.get("total_pages", len(pages))
-            if total > 0 and actual_count >= total:
-                sess["status"] = "completed"
-            elif actual_count > 0:
-                sess["status"] = "pending"
-            else:
-                sess["status"] = "idle"
+            dirty = False
+            if sess.get("status") == "processing":
+                actual_count = sum(1 for p in pages if p.get("status") == "colorized")
+                sess["processed_count"] = actual_count
+                total = sess.get("total_pages", len(pages))
+                if total > 0 and actual_count >= total:
+                    sess["status"] = "completed"
+                elif actual_count > 0:
+                    sess["status"] = "pending"
+                else:
+                    sess["status"] = "idle"
+                dirty = True
 
             # Reset any page that was mid-flight back to pending
             for p in pages:
                 if p.get("status") == "processing":
                     p["status"] = "pending"
-            save_session_meta(session_id)
+                    dirty = True
+
+            if dirty:
+                save_session_meta(session_id)
 
         return sess
 

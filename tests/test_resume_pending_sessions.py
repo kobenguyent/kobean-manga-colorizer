@@ -124,6 +124,64 @@ class TestResumePendingSessions(unittest.TestCase):
         self.assertEqual(start_res.status_code, 200)
         self.assertEqual(start_res.json()["status"], "started")
 
+    def test_dangling_session_sanitization_edge_cases_and_disk_persistence(self):
+        """Sanitization covers partial/zero/full progress, stale pages, and persists to meta.json."""
+        # 1. Partial progress dangling session -> pending, persisted to disk
+        sid_partial, _ = self._create_mock_session(
+            total_pages=3, colorized_count=1, initial_status="processing"
+        )
+        res = requests.get(f"{BASE_URL}/api/session/{sid_partial}")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["processed_count"], 1)
+        self.assertEqual(data["pages"][1]["status"], "pending")
+        persisted = json.loads((STORAGE_DIR / sid_partial / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["status"], "pending")
+        self.assertEqual(persisted["pages"][1]["status"], "pending")
+
+        # 2. Zero progress dangling session -> idle, persisted to disk
+        sid_zero, _ = self._create_mock_session(
+            total_pages=2, colorized_count=0, initial_status="processing"
+        )
+        res = requests.get(f"{BASE_URL}/api/session/{sid_zero}")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "idle")
+        self.assertEqual(data["processed_count"], 0)
+        self.assertEqual(data["pages"][0]["status"], "pending")
+        persisted = json.loads((STORAGE_DIR / sid_zero / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["status"], "idle")
+        self.assertEqual(persisted["pages"][0]["status"], "pending")
+
+        # 3. Fully colorized dangling session -> completed, persisted to disk
+        sid_full, _ = self._create_mock_session(
+            total_pages=2, colorized_count=2, initial_status="processing"
+        )
+        res = requests.get(f"{BASE_URL}/api/session/{sid_full}")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "completed")
+        self.assertEqual(data["processed_count"], 2)
+        persisted = json.loads((STORAGE_DIR / sid_full / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["status"], "completed")
+
+        # 4. Non-processing session with stale 'processing' page -> page reset & persisted
+        sid_stale, meta_stale = self._create_mock_session(
+            total_pages=2, colorized_count=1, initial_status="pending"
+        )
+        meta_stale["pages"][1]["status"] = "processing"
+        (STORAGE_DIR / sid_stale / "meta.json").write_text(
+            json.dumps(meta_stale, indent=2), encoding="utf-8"
+        )
+        res = requests.get(f"{BASE_URL}/api/session/{sid_stale}")
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["pages"][1]["status"], "pending")
+        persisted = json.loads((STORAGE_DIR / sid_stale / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["pages"][1]["status"], "pending")
+
     def test_resume_endpoint_resumes_pending_pages(self):
         """POST /api/colorize/resume/{session_id} resumes colorizing remaining uncolored pages."""
         session_id, _ = self._create_mock_session(total_pages=2, colorized_count=1, initial_status="pending")
