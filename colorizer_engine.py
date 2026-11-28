@@ -1524,7 +1524,38 @@ def harmonize_basketball_regions(
                 is_basketball_context = True
                 break
 
-    # 2. Character Exclusion Mask to safeguard character bodies, clothing, and faces
+    # 2. Fast pre-filter: check for unnatural-hue candidate pixels (H in [30, 175])
+    # BEFORE invoking expensive YOLO character detection. Because ~char_mask only
+    # shrinks the candidate mask and closing + distanceTransform are monotone,
+    # early-returning here is mathematically equivalent when no candidate >= r=28 exists.
+    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+    h_chan, s_chan, v_chan = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+    border_margin = 15
+    border_mask = np.zeros((H, W), dtype=bool)
+    border_mask[:border_margin, :] = True
+    border_mask[-border_margin:, :] = True
+    border_mask[:, :border_margin] = True
+    border_mask[:, -border_margin:] = True
+
+    raw_unnatural_pix = (
+        (h_chan >= 30.0)
+        & (h_chan <= 175.0)
+        & (s_chan >= 12.0)
+        & (orig_gray >= 0.04)
+        & (orig_gray <= 0.94)
+        & (~border_mask)
+    )
+    if not np.any(raw_unnatural_pix):
+        return img_rgb
+
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+    raw_closed = cv2.morphologyEx(raw_unnatural_pix.astype(np.uint8), cv2.MORPH_CLOSE, kernel_close)
+    raw_dist_map = cv2.distanceTransform(raw_closed, cv2.DIST_L2, 5)
+    if float(np.max(raw_dist_map)) < 28.0:
+        return img_rgb
+
+    # 3. Character Exclusion Mask to safeguard character bodies, clothing, and faces
     char_mask = np.zeros((H, W), dtype=bool)
     if palette and getattr(palette, "characters", None):
         for c in palette.characters:
@@ -1559,45 +1590,25 @@ def harmonize_basketball_regions(
             by0, bx0, by1, bx1 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
             char_mask[by0:by1, bx0:bx1] = True
 
-    # 3. Detect candidate ball pixels:
-    # ONLY unnatural hue (yellow/green/cyan/blue/purple/magenta: H in [35, 175]) produced by
-    # the neural model on basketballs.  Orange (#D4561C, H≈11) SFX, warm floor, and
-    # character skin are all H < 35, so they are correctly excluded from candidates.
-    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
-    h_chan, s_chan, v_chan = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-
-    border_margin = 15
-    border_mask = np.zeros((H, W), dtype=bool)
-    border_mask[:border_margin, :] = True
-    border_mask[-border_margin:, :] = True
-    border_mask[:, :border_margin] = True
-    border_mask[:, -border_margin:] = True
-
-    unnatural_pix = (
-        (h_chan >= 30.0)
-        & (h_chan <= 175.0)
-        & (s_chan >= 12.0)
-        & (orig_gray >= 0.04)
-        & (orig_gray <= 0.94)
-        & (~char_mask)
-        & (~border_mask)
-    )
-    # Always use only unnatural pixels as candidates — never shaded_pix.
-    # This is the critical guard: any naturally warm/orange SFX (H < 30) is not a candidate.
-    cand_pix = unnatural_pix
-
-    if not np.any(cand_pix):
-        return img_rgb
-
-    # 4. Morphological closing to bridge halftone screentone dots and ball seams
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
-    closed_cand = cv2.morphologyEx(cand_pix.astype(np.uint8), cv2.MORPH_CLOSE, kernel_close)
-
-    # 5. Distance transform to locate spherical / circular ball centers
-    dist_map = cv2.distanceTransform(closed_cand, cv2.DIST_L2, 5)
-    max_d = float(np.max(dist_map))
-    if max_d < 28.0:
-        return img_rgb
+    # 4. Recompute candidate ball pixels after applying character exclusion mask
+    # ONLY unnatural hue (yellow/green/cyan/blue/purple/magenta: H in [30, 175]) produced by
+    # the neural model on basketballs. Orange (#D4561C, H≈11) SFX, warm floor, and
+    # character skin are all H < 30, so they are correctly excluded from candidates.
+    if not np.any(char_mask):
+        cand_pix = raw_unnatural_pix
+        unnatural_pix = cand_pix
+        closed_cand = raw_closed
+        dist_map = raw_dist_map
+    else:
+        cand_pix = raw_unnatural_pix & (~char_mask)
+        unnatural_pix = cand_pix
+        if not np.any(cand_pix):
+            return img_rgb
+        # 5. Morphological closing & distance transform to locate ball centers
+        closed_cand = cv2.morphologyEx(cand_pix.astype(np.uint8), cv2.MORPH_CLOSE, kernel_close)
+        dist_map = cv2.distanceTransform(closed_cand, cv2.DIST_L2, 5)
+        if float(np.max(dist_map)) < 28.0:
+            return img_rgb
 
     # Extract peak centers and recolor each ball
     temp_dist = np.copy(dist_map)

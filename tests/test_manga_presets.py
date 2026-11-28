@@ -1501,3 +1501,45 @@ def test_preview_preserves_recognized_characters(tmp_path):
         shutil.rmtree(sess_dir, ignore_errors=True)
         SESSIONS.pop(session_id, None)
         SESSION_PALETTES.pop(session_id, None)
+
+
+def test_harmonize_basketball_regions_skips_yolo_without_candidates():
+    """YOLO character detection must not run unless a ball-sized unnatural-hue candidate exists."""
+    import cv2
+
+    from colorizer_engine import harmonize_basketball_regions
+
+    class _SpyRecognizer:
+        def __init__(self):
+            self.calls = 0
+
+        def _ensure_manga_yolo(self):
+            self.calls += 1
+            return (None, "cpu")
+
+    # Case 1: Blank white 200x200 image -> no unnatural-hue pixels -> 0 YOLO calls
+    spy1 = _SpyRecognizer()
+    blank_rgb = np.full((200, 200, 3), 255, dtype=np.uint8)
+    blank_gray = np.ones((200, 200), dtype=np.float32)
+    out1 = harmonize_basketball_regions(blank_rgb, blank_gray, recognizer=spy1)
+    assert spy1.calls == 0
+    assert np.array_equal(out1, blank_rgb)
+
+    # Case 2: Warm orange/skin 200x200 image (H < 30) -> no unnatural-hue pixels -> 0 YOLO calls
+    spy2 = _SpyRecognizer()
+    warm_rgb = np.full((200, 200, 3), (230, 140, 80), dtype=np.uint8)
+    warm_gray = np.full((200, 200), 0.6, dtype=np.float32)
+    out2 = harmonize_basketball_regions(warm_rgb, warm_gray, recognizer=spy2)
+    assert spy2.calls == 0
+    assert np.array_equal(out2, warm_rgb)
+
+    # Case 3: 240x240 image with a radius-50 purple/blue circle (H ≈ 120) -> 1 YOLO call + recolored ball
+    spy3 = _SpyRecognizer()
+    ball_rgb = np.full((240, 240, 3), 255, dtype=np.uint8)
+    cv2.circle(ball_rgb, (120, 120), 50, (90, 80, 210), -1)
+    ball_gray = np.full((240, 240), 0.5, dtype=np.float32)
+    out3 = harmonize_basketball_regions(
+        ball_rgb, ball_gray, recognizer=spy3, series_key="slam_dunk"
+    )
+    assert spy3.calls == 1
+    assert out3[120, 120, 0] > out3[120, 120, 2]  # harmonized to warm orange leather

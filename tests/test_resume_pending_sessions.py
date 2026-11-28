@@ -18,6 +18,10 @@ class TestResumePendingSessions(unittest.TestCase):
         self.test_sessions_to_clean = []
 
     def tearDown(self):
+        try:
+            requests.post(f"{BASE_URL}/api/colorize/batch/cancel", timeout=3)
+        except requests.RequestException:
+            pass
         for sid in self.test_sessions_to_clean:
             try:
                 requests.post(f"{BASE_URL}/api/colorize/cancel/{sid}", timeout=3)
@@ -192,9 +196,10 @@ class TestResumePendingSessions(unittest.TestCase):
         data = res.json()
         self.assertIn(data["status"], ["resumed", "already_running"])
 
-        # Wait for the remaining page to complete (up to 30s on slow CPU-only CI runners)
+        # Wait for the remaining page to complete (up to 60s wall-clock on slow CPU-only CI runners)
         check_data = {}
-        for _ in range(60):
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
             check_res = requests.get(f"{BASE_URL}/api/session/{session_id}")
             if check_res.status_code == 200:
                 check_data = check_res.json()
@@ -243,7 +248,15 @@ class TestResumePendingSessions(unittest.TestCase):
         sid1, _ = self._create_mock_session(total_pages=2, colorized_count=1, initial_status="pending")
         sid2, _ = self._create_mock_session(total_pages=2, colorized_count=2, initial_status="completed")
 
-        res = requests.post(f"{BASE_URL}/api/colorize/batch/resume", json={"session_ids": [sid1, sid2]})
+        res = requests.post(
+            f"{BASE_URL}/api/colorize/batch/resume",
+            json={
+                "session_ids": [sid1, sid2],
+                "model_provider": "local_smart",
+                "model_name": "smart-color",
+                "denoise_screentone": False,
+            },
+        )
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertIn(data["status"], ["started", "already_running"])
